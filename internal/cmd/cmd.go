@@ -108,7 +108,6 @@ func authenticate(cfg *config.Config) (string, token.Cache, error) {
 	}
 
 	vlog.V1("auth: cache miss, requesting new token")
-	vlog.V2("auth: GET https://%s/api/v2/botx/bots/%s/token?signature=%s", cfg.Host, cfg.BotID, vlog.Mask(signature))
 	tok, err = auth.GetToken(ctx, cfg.Host, cfg.BotID, signature)
 	if err != nil {
 		return "", nil, fmt.Errorf("getting token: %w", err)

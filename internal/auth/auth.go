@@ -42,7 +42,7 @@ func getTokenWithClient(ctx context.Context, baseURL, botID, signature string, c
 }
 
 func doGetToken(ctx context.Context, url string, client *http.Client) (string, error) {
-	vlog.V2("auth: GET %s", url)
+	vlog.V2("auth: GET %s", maskSignatureInURL(url))
 
 	start := time.Now()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
@@ -73,4 +73,12 @@ func doGetToken(ctx context.Context, url string, client *http.Client) (string, e
 
 	vlog.V1("auth: <- %d %s (%dms)", resp.StatusCode, http.StatusText(resp.StatusCode), elapsed.Milliseconds())
 	return result.Result, nil
+}
+
+func maskSignatureInURL(url string) string {
+	if i := strings.Index(url, "signature="); i != -1 {
+		sig := url[i+len("signature="):]
+		return url[:i+len("signature=")] + vlog.Mask(sig)
+	}
+	return url
 }
