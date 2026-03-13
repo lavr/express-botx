@@ -1,7 +1,6 @@
 package config
 
 import (
-	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -80,18 +79,19 @@ func Load(flags Flags) (*Config, error) {
 
 	// Layer 1: YAML file
 	configPath := flags.ConfigPath
-	if configPath == "" {
-		configPath = defaultConfigPath()
+	explicit := configPath != ""
+	if !explicit {
+		configPath = findConfigFile()
 	}
 	cfg.configPath = configPath
-	if data, err := os.ReadFile(configPath); err == nil {
-		if err := yaml.Unmarshal(data, cfg); err != nil {
-			return nil, fmt.Errorf("parsing config %s: %w", configPath, err)
+	if configPath != "" {
+		if data, err := os.ReadFile(configPath); err == nil {
+			if err := yaml.Unmarshal(data, cfg); err != nil {
+				return nil, fmt.Errorf("parsing config %s: %w", configPath, err)
+			}
+		} else if explicit {
+			return nil, fmt.Errorf("reading config %s: %w", configPath, err)
 		}
-	} else if flags.ConfigPath != "" {
-		return nil, fmt.Errorf("reading config %s: %w", configPath, err)
-	} else if !errors.Is(err, os.ErrNotExist) {
-		return nil, fmt.Errorf("reading config %s: %w", configPath, err)
 	}
 
 	// Layer 2: resolve bot from config
@@ -254,18 +254,19 @@ func LoadMinimal(flags Flags) (*Config, error) {
 	}
 
 	configPath := flags.ConfigPath
-	if configPath == "" {
-		configPath = defaultConfigPath()
+	explicit := configPath != ""
+	if !explicit {
+		configPath = findConfigFile()
 	}
 	cfg.configPath = configPath
-	if data, err := os.ReadFile(configPath); err == nil {
-		if err := yaml.Unmarshal(data, cfg); err != nil {
-			return nil, fmt.Errorf("parsing config %s: %w", configPath, err)
+	if configPath != "" {
+		if data, err := os.ReadFile(configPath); err == nil {
+			if err := yaml.Unmarshal(data, cfg); err != nil {
+				return nil, fmt.Errorf("parsing config %s: %w", configPath, err)
+			}
+		} else if explicit {
+			return nil, fmt.Errorf("reading config %s: %w", configPath, err)
 		}
-	} else if flags.ConfigPath != "" {
-		return nil, fmt.Errorf("reading config %s: %w", configPath, err)
-	} else if !errors.Is(err, os.ErrNotExist) {
-		return nil, fmt.Errorf("reading config %s: %w", configPath, err)
 	}
 
 	// Apply only format flag for LoadMinimal
@@ -279,12 +280,44 @@ func LoadMinimal(flags Flags) (*Config, error) {
 	return cfg, nil
 }
 
-func defaultConfigPath() string {
-	if dir, err := os.UserConfigDir(); err == nil {
-		return filepath.Join(dir, "express-send", "config.yaml")
+// findConfigFile searches for a config file in standard locations:
+// 1. ./express-bot.yaml or ./express-bot.yml (current directory)
+// 2. <UserConfigDir>/express-bot/config.yaml (platform-specific)
+//    - macOS: ~/Library/Application Support/express-bot/config.yaml
+//    - Linux: ~/.config/express-bot/config.yaml
+//    - Windows: %AppData%/express-bot/config.yaml
+// Returns empty string if no config file is found.
+func findConfigFile() string {
+	// 1. Current directory
+	for _, name := range []string{"express-bot.yaml", "express-bot.yml"} {
+		if _, err := os.Stat(name); err == nil {
+			abs, err := filepath.Abs(name)
+			if err == nil {
+				return abs
+			}
+			return name
+		}
 	}
-	home, _ := os.UserHomeDir()
-	return filepath.Join(home, ".config", "express-send", "config.yaml")
+
+	// 2. Platform config directories
+	var configDirs []string
+	if dir, err := os.UserConfigDir(); err == nil {
+		configDirs = append(configDirs, dir)
+	}
+	if home, err := os.UserHomeDir(); err == nil {
+		dotConfig := filepath.Join(home, ".config")
+		if len(configDirs) == 0 || configDirs[0] != dotConfig {
+			configDirs = append(configDirs, dotConfig)
+		}
+	}
+	for _, dir := range configDirs {
+		p := filepath.Join(dir, "express-bot", "config.yaml")
+		if _, err := os.Stat(p); err == nil {
+			return p
+		}
+	}
+
+	return ""
 }
 
 func applyEnv(cfg *Config) {
