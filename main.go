@@ -9,7 +9,11 @@ import (
 	"github.com/lavr/express-bot/internal/cmd"
 )
 
+// version is set at build time via -ldflags.
+var version = "dev"
+
 func main() {
+	cmd.Version = version
 	deps := cmd.Deps{
 		Stdout:     os.Stdout,
 		Stderr:     os.Stderr,

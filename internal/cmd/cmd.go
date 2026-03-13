@@ -17,6 +17,9 @@ import (
 	"github.com/lavr/express-bot/internal/token"
 )
 
+// Version is set at build time via -ldflags.
+var Version = "dev"
+
 // Deps holds external dependencies injected from main.
 type Deps struct {
 	Stdout     io.Writer
@@ -52,6 +55,9 @@ func Run(args []string, deps Deps) error {
 		return runBot(args[1:], deps)
 	case "user":
 		return runUser(args[1:], deps)
+	case "--version", "version":
+		fmt.Fprintln(deps.Stdout, Version)
+		return nil
 	case "--help", "-h":
 		printUsage(deps.Stderr)
 		return nil
