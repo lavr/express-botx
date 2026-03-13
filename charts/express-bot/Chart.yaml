@@ -1,0 +1,11 @@
+apiVersion: v2
+name: express-bot
+description: eXpress BotX API gateway
+type: application
+version: 0.1.0
+appVersion: "0.1.0"
+home: https://github.com/lavr/express-bot
+sources:
+  - https://github.com/lavr/express-bot
+maintainers:
+  - name: lavr

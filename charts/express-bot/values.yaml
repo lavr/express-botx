@@ -1,0 +1,92 @@
+replicaCount: 1
+
+image:
+  repository: lavr/express-bot
+  tag: ""  # defaults to appVersion
+  pullPolicy: IfNotPresent
+
+imagePullSecrets: []
+nameOverride: ""
+fullnameOverride: ""
+
+# Config is mounted from a Secret into /etc/express-bot/config.yaml.
+# It contains secrets (bot secret, API keys), so it uses Secret, not ConfigMap.
+config:
+  bots:
+    prod:
+      host: express.example.com
+      id: "bot-uuid-here"
+      secret: "bot-secret-here"
+    # staging:
+    #   host: express-staging.example.com
+    #   id: "staging-bot-uuid"
+    #   secret: "staging-bot-secret"
+  chats:
+    deploy: "chat-uuid-here"
+    # alerts: "alerts-chat-uuid"
+    # monitoring: "monitoring-chat-uuid"
+  cache:
+    type: file
+    ttl: 3600
+  server:
+    listen: ":8080"
+    base_path: /api/v1
+    allow_bot_secret_auth: false
+    api_keys: []
+    #  - name: alertmanager
+    #    key: "change-me"
+    # alertmanager:
+    #   chat_id: alerts
+    # grafana:
+    #   chat_id: monitoring
+
+# Use an existing Secret instead of generating one from config.*.
+# The Secret must contain a "config.yaml" key with the full YAML config.
+existingSecret: ""
+
+service:
+  type: ClusterIP
+  port: 80
+  targetPort: 8080
+
+ingress:
+  enabled: false
+  className: ""
+  annotations: {}
+  hosts:
+    - host: express-bot.example.com
+      paths:
+        - path: /
+          pathType: Prefix
+  tls: []
+
+resources:
+  requests:
+    cpu: 50m
+    memory: 64Mi
+  limits:
+    memory: 128Mi
+
+autoscaling:
+  enabled: false
+  minReplicas: 1
+  maxReplicas: 5
+  targetCPUUtilizationPercentage: 80
+
+serviceAccount:
+  create: true
+  name: ""
+  annotations: {}
+
+podAnnotations: {}
+podLabels: {}
+nodeSelector: {}
+tolerations: []
+affinity: {}
+
+extraEnv: []
+#  - name: VAULT_TOKEN
+#    valueFrom:
+#      secretKeyRef:
+#        name: vault-token
+#        key: token

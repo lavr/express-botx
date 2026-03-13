@@ -1,0 +1,24 @@
+express-bot has been deployed.
+
+{{- if .Values.ingress.enabled }}
+Access the API at:
+{{- range .Values.ingress.hosts }}
+  http{{ if $.Values.ingress.tls }}s{{ end }}://{{ .host }}{{ (first .paths).path }}
+{{- end }}
+{{- else }}
+To access the API, run:
+  kubectl port-forward svc/{{ include "express-bot.fullname" . }} {{ .Values.service.port }}:{{ .Values.service.targetPort }}
+
+Then send a request:
+  curl http://localhost:{{ .Values.service.port }}/healthz
+{{- end }}
+
+Configured bots:
+{{- range $name, $bot := .Values.config.bots }}
+  - {{ $name }} ({{ $bot.host }})
+{{- end }}
+
+Configured chats:
+{{- range $alias, $uuid := .Values.config.chats }}
+  - {{ $alias }}
+{{- end }}
