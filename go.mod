@@ -1,4 +1,4 @@
-module github.com/lavr/express-send
+module github.com/lavr/express-bot
 
 go 1.25.5
 

@@ -10,9 +10,9 @@ import (
 	"os"
 	"path/filepath"
 
-	"github.com/lavr/express-send/internal/botapi"
-	"github.com/lavr/express-send/internal/config"
-	"github.com/lavr/express-send/internal/input"
+	"github.com/lavr/express-bot/internal/botapi"
+	"github.com/lavr/express-bot/internal/config"
+	"github.com/lavr/express-bot/internal/input"
 )
 
 func runSend(args []string, deps Deps) error {

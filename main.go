@@ -6,7 +6,7 @@ import (
 
 	"golang.org/x/term"
 
-	"github.com/lavr/express-send/internal/cmd"
+	"github.com/lavr/express-bot/internal/cmd"
 )
 
 func main() {

@@ -8,8 +8,8 @@ import (
 	"io"
 	"sort"
 
-	"github.com/lavr/express-send/internal/botapi"
-	"github.com/lavr/express-send/internal/config"
+	"github.com/lavr/express-bot/internal/botapi"
+	"github.com/lavr/express-bot/internal/config"
 )
 
 func runChats(args []string, deps Deps) error {

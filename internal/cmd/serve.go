@@ -10,11 +10,11 @@ import (
 	"os/signal"
 	"syscall"
 
-	"github.com/lavr/express-send/internal/auth"
-	"github.com/lavr/express-send/internal/botapi"
-	"github.com/lavr/express-send/internal/config"
-	"github.com/lavr/express-send/internal/secret"
-	"github.com/lavr/express-send/internal/server"
+	"github.com/lavr/express-bot/internal/auth"
+	"github.com/lavr/express-bot/internal/botapi"
+	"github.com/lavr/express-bot/internal/config"
+	"github.com/lavr/express-bot/internal/secret"
+	"github.com/lavr/express-bot/internal/server"
 )
 
 func runServe(args []string, deps Deps) error {

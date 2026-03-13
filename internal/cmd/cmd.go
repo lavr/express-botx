@@ -8,10 +8,10 @@ import (
 	"os"
 	"time"
 
-	"github.com/lavr/express-send/internal/auth"
-	"github.com/lavr/express-send/internal/config"
-	"github.com/lavr/express-send/internal/secret"
-	"github.com/lavr/express-send/internal/token"
+	"github.com/lavr/express-bot/internal/auth"
+	"github.com/lavr/express-bot/internal/config"
+	"github.com/lavr/express-bot/internal/secret"
+	"github.com/lavr/express-bot/internal/token"
 )
 
 // Deps holds external dependencies injected from main.
