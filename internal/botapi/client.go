@@ -188,35 +188,52 @@ var ErrUnauthorized = fmt.Errorf("unauthorized (HTTP 401)")
 
 // Send posts a notification (text and/or file) to a chat via BotX API.
 func (c *Client) Send(ctx context.Context, sr *SendRequest) error {
+	_, err := c.SendWithSyncID(ctx, sr)
+	return err
+}
+
+type sendAPIResponse struct {
+	Status string `json:"status"`
+	Result struct {
+		SyncID string `json:"sync_id"`
+	} `json:"result"`
+}
+
+// SendWithSyncID posts a notification and returns the sync_id from the response.
+func (c *Client) SendWithSyncID(ctx context.Context, sr *SendRequest) (string, error) {
 	body, err := json.Marshal(sr)
 	if err != nil {
-		return fmt.Errorf("marshaling request: %w", err)
+		return "", fmt.Errorf("marshaling request: %w", err)
 	}
 
 	url := c.BaseURL + "/api/v4/botx/notifications/direct"
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
 	if err != nil {
-		return fmt.Errorf("creating request: %w", err)
+		return "", fmt.Errorf("creating request: %w", err)
 	}
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+c.Token)
 
 	resp, err := c.HTTPClient.Do(req)
 	if err != nil {
-		return fmt.Errorf("sending: %w", err)
+		return "", fmt.Errorf("sending: %w", err)
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode == http.StatusUnauthorized {
-		return ErrUnauthorized
+		return "", ErrUnauthorized
 	}
 
 	switch resp.StatusCode {
 	case http.StatusOK, http.StatusCreated, http.StatusAccepted:
-		return nil
+		var apiResp sendAPIResponse
+		if err := json.NewDecoder(resp.Body).Decode(&apiResp); err != nil {
+			return "", nil // sent ok, but couldn't parse sync_id
+		}
+		return apiResp.Result.SyncID, nil
 	default:
 		respBody, _ := io.ReadAll(resp.Body)
-		return fmt.Errorf("send failed: HTTP %d: %s", resp.StatusCode, string(respBody))
+		return "", fmt.Errorf("send failed: HTTP %d: %s", resp.StatusCode, string(respBody))
 	}
 }
 
@@ -227,6 +244,19 @@ func BuildFileAttachment(filename string, data []byte) *SendFile {
 		mimeType = "application/octet-stream"
 	}
 	dataURI := fmt.Sprintf("data:%s;base64,%s", mimeType, base64.StdEncoding.EncodeToString(data))
+	return &SendFile{
+		FileName: filename,
+		Data:     dataURI,
+	}
+}
+
+// BuildFileAttachmentFromBase64 creates a SendFile from a filename and already-base64-encoded data.
+func BuildFileAttachmentFromBase64(filename, base64Data string) *SendFile {
+	mimeType, _, _ := mime.ParseMediaType(mime.TypeByExtension(filepath.Ext(filename)))
+	if mimeType == "" {
+		mimeType = "application/octet-stream"
+	}
+	dataURI := fmt.Sprintf("data:%s;base64,%s", mimeType, base64Data)
 	return &SendFile{
 		FileName: filename,
 		Data:     dataURI,

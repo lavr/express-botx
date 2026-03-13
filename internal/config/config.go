@@ -14,9 +14,10 @@ import (
 )
 
 type Config struct {
-	Bots  map[string]BotConfig `yaml:"bots,omitempty"`
-	Chats map[string]string    `yaml:"chats,omitempty"`
-	Cache CacheConfig          `yaml:"cache"`
+	Bots   map[string]BotConfig `yaml:"bots,omitempty"`
+	Chats  map[string]string    `yaml:"chats,omitempty"`
+	Cache  CacheConfig          `yaml:"cache"`
+	Server ServerConfig         `yaml:"server,omitempty"`
 
 	// Resolved at runtime (not persisted).
 	Host       string `yaml:"-"`
@@ -26,6 +27,20 @@ type Config struct {
 	ChatID     string `yaml:"-"`
 	Format     string `yaml:"-"`
 	configPath string
+}
+
+// ServerConfig holds HTTP server settings for the "serve" subcommand.
+type ServerConfig struct {
+	Listen             string         `yaml:"listen,omitempty"`
+	BasePath           string         `yaml:"base_path,omitempty"`
+	APIKeys            []APIKeyConfig `yaml:"api_keys,omitempty"`
+	AllowBotSecretAuth bool           `yaml:"allow_bot_secret_auth,omitempty"`
+}
+
+// APIKeyConfig defines a single API key for server authentication.
+type APIKeyConfig struct {
+	Name string `yaml:"name"`
+	Key  string `yaml:"key"` // literal, env:VAR, or vault:path#key
 }
 
 type BotConfig struct {

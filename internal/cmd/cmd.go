@@ -26,12 +26,14 @@ type Deps struct {
 func Run(args []string, deps Deps) error {
 	if len(args) == 0 {
 		printUsage(deps.Stderr)
-		return fmt.Errorf("subcommand required: send, chats, bot, user")
+		return fmt.Errorf("subcommand required: send, serve, chats, bot, user")
 	}
 
 	switch args[0] {
 	case "send":
 		return runSend(args[1:], deps)
+	case "serve":
+		return runServe(args[1:], deps)
 	case "chats":
 		return runChats(args[1:], deps)
 	case "bot":
@@ -133,6 +135,7 @@ func printUsage(w io.Writer) {
 
 Commands:
   send    Send a message and/or file to an eXpress chat
+  serve   Start HTTP server for sending messages via API
   chats   Manage chats (list, info, alias)
   bot     Bot management (ping, info, list, add, rm)
   user    User operations (search)
