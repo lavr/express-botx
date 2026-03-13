@@ -31,10 +31,19 @@ type Config struct {
 
 // ServerConfig holds HTTP server settings for the "serve" subcommand.
 type ServerConfig struct {
-	Listen             string         `yaml:"listen,omitempty"`
-	BasePath           string         `yaml:"base_path,omitempty"`
-	APIKeys            []APIKeyConfig `yaml:"api_keys,omitempty"`
-	AllowBotSecretAuth bool           `yaml:"allow_bot_secret_auth,omitempty"`
+	Listen             string                `yaml:"listen,omitempty"`
+	BasePath           string                `yaml:"base_path,omitempty"`
+	APIKeys            []APIKeyConfig        `yaml:"api_keys,omitempty"`
+	AllowBotSecretAuth bool                  `yaml:"allow_bot_secret_auth,omitempty"`
+	Alertmanager       *AlertmanagerYAMLConfig `yaml:"alertmanager,omitempty"`
+}
+
+// AlertmanagerYAMLConfig holds YAML settings for the alertmanager webhook endpoint.
+type AlertmanagerYAMLConfig struct {
+	DefaultChatID   string   `yaml:"default_chat_id,omitempty"`
+	ErrorSeverities []string `yaml:"error_severities,omitempty"`
+	Template        string   `yaml:"template,omitempty"`
+	TemplateFile    string   `yaml:"template_file,omitempty"`
 }
 
 // APIKeyConfig defines a single API key for server authentication.

@@ -8,11 +8,13 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 
 	"github.com/lavr/express-bot/internal/auth"
 	"github.com/lavr/express-bot/internal/botapi"
 	"github.com/lavr/express-bot/internal/config"
+	vlog "github.com/lavr/express-bot/internal/log"
 	"github.com/lavr/express-bot/internal/secret"
 	"github.com/lavr/express-bot/internal/server"
 )
@@ -150,7 +152,24 @@ Options:
 		return cfgCopy.ChatID, nil
 	}
 
-	srv := server.New(srvCfg, sendFn, chatResolver)
+	// Alertmanager endpoint
+	var srvOpts []server.Option
+	if am := cfg.Server.Alertmanager; am != nil {
+		amCfg, err := buildAlertmanagerConfig(am, cfg.ConfigPath())
+		if err != nil {
+			return err
+		}
+		// If no default_chat_id, use single chat alias as fallback
+		if amCfg.DefaultChatID == "" && len(cfg.Chats) == 1 {
+			for alias := range cfg.Chats {
+				amCfg.FallbackChatID = alias
+				vlog.V1("alertmanager: using single chat alias %q as fallback", alias)
+			}
+		}
+		srvOpts = append(srvOpts, server.WithAlertmanager(amCfg))
+	}
+
+	srv := server.New(srvCfg, sendFn, chatResolver, srvOpts...)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
@@ -216,6 +235,46 @@ func buildSendRequest(p *server.SendPayload) *botapi.SendRequest {
 	}
 
 	return sr
+}
+
+func buildAlertmanagerConfig(am *config.AlertmanagerYAMLConfig, configPath string) (*server.AlertmanagerConfig, error) {
+	severities := am.ErrorSeverities
+	if len(severities) == 0 {
+		severities = []string{"critical", "warning"}
+	}
+
+	// Determine template source: template_file > template > default
+	var tmplStr string
+	switch {
+	case am.TemplateFile != "":
+		path := am.TemplateFile
+		if !filepath.IsAbs(path) && configPath != "" {
+			path = filepath.Join(filepath.Dir(configPath), path)
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return nil, fmt.Errorf("reading alertmanager template %s: %w", path, err)
+		}
+		tmplStr = string(data)
+		vlog.V1("alertmanager: loaded template from %s", path)
+	case am.Template != "":
+		tmplStr = am.Template
+		vlog.V1("alertmanager: using inline template")
+	default:
+		tmplStr = server.DefaultAlertmanagerTemplate
+		vlog.V1("alertmanager: using default template")
+	}
+
+	tmpl, err := server.ParseAlertmanagerTemplate(tmplStr)
+	if err != nil {
+		return nil, err
+	}
+
+	return &server.AlertmanagerConfig{
+		DefaultChatID:   am.DefaultChatID,
+		ErrorSeverities: severities,
+		Template:        tmpl,
+	}, nil
 }
 
 // sendResponseJSON is used for encoding sync_id from the BotX API response.

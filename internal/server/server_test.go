@@ -34,6 +34,22 @@ func newTestServer(keys []ResolvedKey, opts ...func(*Config)) *Server {
 	return New(cfg, sendFn, chatResolver)
 }
 
+// newTestServerWithOpts creates a Server with stub functions and server Options.
+func newTestServerWithOpts(keys []ResolvedKey, srvOpts ...Option) *Server {
+	cfg := Config{
+		Listen:   ":0",
+		BasePath: "/api/v1",
+		Keys:     keys,
+	}
+	sendFn := func(ctx context.Context, p *SendPayload) (string, error) {
+		return "test-sync-id", nil
+	}
+	chatResolver := func(chatID string) (string, error) {
+		return chatID, nil
+	}
+	return New(cfg, sendFn, chatResolver, srvOpts...)
+}
+
 func doRequest(srv *Server, method, path string, body io.Reader, headers map[string]string) *httptest.ResponseRecorder {
 	req := httptest.NewRequest(method, path, body)
 	for k, v := range headers {
@@ -388,5 +404,290 @@ func TestSend_CustomBasePath(t *testing.T) {
 	})
 	if w.Code == 200 {
 		t.Fatalf("expected /api/v1/send to NOT match with custom base path")
+	}
+}
+
+// --- alertmanager ---
+
+func testAlertmanagerConfig(t *testing.T) *AlertmanagerConfig {
+	t.Helper()
+	tmpl, err := ParseAlertmanagerTemplate(DefaultAlertmanagerTemplate)
+	if err != nil {
+		t.Fatalf("parse default template: %v", err)
+	}
+	return &AlertmanagerConfig{
+		DefaultChatID:          "alert-chat-id",
+		ErrorSeverities: []string{"critical", "warning"},
+		Template:        tmpl,
+	}
+}
+
+func alertmanagerPayload(status string, alerts ...AlertItem) string {
+	w := AlertmanagerWebhook{
+		Version:     "4",
+		GroupKey:     "test-group",
+		Status:      status,
+		Receiver:    "express",
+		GroupLabels: map[string]string{"alertname": "TestAlert"},
+		Alerts:      alerts,
+	}
+	b, _ := json.Marshal(w)
+	return string(b)
+}
+
+func TestAlertmanager_Firing(t *testing.T) {
+	amCfg := testAlertmanagerConfig(t)
+	srv := newTestServerWithOpts(
+		[]ResolvedKey{{Name: "t", Key: "k"}},
+		WithAlertmanager(amCfg),
+	)
+
+	body := alertmanagerPayload("firing", AlertItem{
+		Status:      "firing",
+		Labels:      map[string]string{"alertname": "HighCPU", "severity": "critical", "instance": "web-01"},
+		Annotations: map[string]string{"summary": "CPU > 90%"},
+	})
+
+	w := doRequest(srv, "POST", "/api/v1/alertmanager", strings.NewReader(body), map[string]string{
+		"X-API-Key":    "k",
+		"Content-Type": "application/json",
+	})
+	if w.Code != 200 {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	resp := parseResponse(t, w)
+	if !resp.OK {
+		t.Fatalf("expected ok=true")
+	}
+}
+
+func TestAlertmanager_Resolved(t *testing.T) {
+	amCfg := testAlertmanagerConfig(t)
+	srv := newTestServerWithOpts(
+		[]ResolvedKey{{Name: "t", Key: "k"}},
+		WithAlertmanager(amCfg),
+	)
+
+	body := alertmanagerPayload("resolved", AlertItem{
+		Status:      "resolved",
+		Labels:      map[string]string{"alertname": "HighCPU", "severity": "critical", "instance": "web-01"},
+		Annotations: map[string]string{"summary": "CPU > 90%"},
+	})
+
+	w := doRequest(srv, "POST", "/api/v1/alertmanager", strings.NewReader(body), map[string]string{
+		"X-API-Key":    "k",
+		"Content-Type": "application/json",
+	})
+	if w.Code != 200 {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestAlertmanager_NoAlerts(t *testing.T) {
+	amCfg := testAlertmanagerConfig(t)
+	srv := newTestServerWithOpts(
+		[]ResolvedKey{{Name: "t", Key: "k"}},
+		WithAlertmanager(amCfg),
+	)
+
+	body := alertmanagerPayload("firing")
+	w := doRequest(srv, "POST", "/api/v1/alertmanager", strings.NewReader(body), map[string]string{
+		"X-API-Key":    "k",
+		"Content-Type": "application/json",
+	})
+	if w.Code != 400 {
+		t.Fatalf("expected 400, got %d", w.Code)
+	}
+}
+
+func TestAlertmanager_InvalidJSON(t *testing.T) {
+	amCfg := testAlertmanagerConfig(t)
+	srv := newTestServerWithOpts(
+		[]ResolvedKey{{Name: "t", Key: "k"}},
+		WithAlertmanager(amCfg),
+	)
+
+	w := doRequest(srv, "POST", "/api/v1/alertmanager", strings.NewReader("{bad"), map[string]string{
+		"X-API-Key":    "k",
+		"Content-Type": "application/json",
+	})
+	if w.Code != 400 {
+		t.Fatalf("expected 400, got %d", w.Code)
+	}
+}
+
+func TestAlertmanager_NotConfigured(t *testing.T) {
+	srv := newTestServerWithOpts([]ResolvedKey{{Name: "t", Key: "k"}})
+
+	body := alertmanagerPayload("firing", AlertItem{
+		Status: "firing",
+		Labels: map[string]string{"alertname": "Test"},
+	})
+	w := doRequest(srv, "POST", "/api/v1/alertmanager", strings.NewReader(body), map[string]string{
+		"X-API-Key":    "k",
+		"Content-Type": "application/json",
+	})
+	// Route not registered when amCfg is nil, expect 405 (method not allowed) or 404
+	if w.Code == 200 {
+		t.Fatalf("expected non-200 when alertmanager not configured, got 200")
+	}
+}
+
+func TestAlertmanager_StatusMapping(t *testing.T) {
+	amCfg := testAlertmanagerConfig(t)
+
+	tests := []struct {
+		name     string
+		webhook  AlertmanagerWebhook
+		expected string
+	}{
+		{
+			"resolved always ok",
+			AlertmanagerWebhook{Status: "resolved", Alerts: []AlertItem{{Labels: map[string]string{"severity": "critical"}}}},
+			"ok",
+		},
+		{
+			"firing critical is error",
+			AlertmanagerWebhook{Status: "firing", Alerts: []AlertItem{{Labels: map[string]string{"severity": "critical"}}}},
+			"error",
+		},
+		{
+			"firing warning is error",
+			AlertmanagerWebhook{Status: "firing", Alerts: []AlertItem{{Labels: map[string]string{"severity": "warning"}}}},
+			"error",
+		},
+		{
+			"firing info is ok",
+			AlertmanagerWebhook{Status: "firing", Alerts: []AlertItem{{Labels: map[string]string{"severity": "info"}}}},
+			"ok",
+		},
+	}
+
+	srv := &Server{amCfg: amCfg}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := srv.resolveAlertStatus(tt.webhook)
+			if got != tt.expected {
+				t.Errorf("expected %q, got %q", tt.expected, got)
+			}
+		})
+	}
+}
+
+func TestAlertmanager_ChatIDQueryParam(t *testing.T) {
+	tmpl, _ := ParseAlertmanagerTemplate(`test`)
+	amCfg := &AlertmanagerConfig{
+		DefaultChatID:          "default-chat",
+		ErrorSeverities: []string{"critical"},
+		Template:        tmpl,
+	}
+
+	var lastChatID string
+	cfg := Config{
+		Listen:   ":0",
+		BasePath: "/api/v1",
+		Keys:     []ResolvedKey{{Name: "t", Key: "k"}},
+	}
+	sendFn := func(ctx context.Context, p *SendPayload) (string, error) {
+		lastChatID = p.ChatID
+		return "id", nil
+	}
+	chatResolver := func(chatID string) (string, error) { return chatID, nil }
+	srv := New(cfg, sendFn, chatResolver, WithAlertmanager(amCfg))
+
+	body := alertmanagerPayload("firing", AlertItem{
+		Status: "firing",
+		Labels: map[string]string{"alertname": "Test", "severity": "critical"},
+	})
+
+	// With query param
+	w := doRequest(srv, "POST", "/api/v1/alertmanager?chat_id=override-chat", strings.NewReader(body), map[string]string{
+		"X-API-Key":    "k",
+		"Content-Type": "application/json",
+	})
+	if w.Code != 200 {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	if lastChatID != "override-chat" {
+		t.Errorf("expected chat_id=override-chat, got %q", lastChatID)
+	}
+
+	// Without query param — uses config default
+	w = doRequest(srv, "POST", "/api/v1/alertmanager", strings.NewReader(body), map[string]string{
+		"X-API-Key":    "k",
+		"Content-Type": "application/json",
+	})
+	if w.Code != 200 {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	if lastChatID != "default-chat" {
+		t.Errorf("expected chat_id=default-chat, got %q", lastChatID)
+	}
+}
+
+func TestAlertmanager_NoChatID(t *testing.T) {
+	tmpl, _ := ParseAlertmanagerTemplate(`test`)
+	amCfg := &AlertmanagerConfig{
+		DefaultChatID:          "", // no default
+		ErrorSeverities: []string{"critical"},
+		Template:        tmpl,
+	}
+	srv := newTestServerWithOpts(
+		[]ResolvedKey{{Name: "t", Key: "k"}},
+		WithAlertmanager(amCfg),
+	)
+
+	body := alertmanagerPayload("firing", AlertItem{
+		Status: "firing",
+		Labels: map[string]string{"alertname": "Test"},
+	})
+
+	w := doRequest(srv, "POST", "/api/v1/alertmanager", strings.NewReader(body), map[string]string{
+		"X-API-Key":    "k",
+		"Content-Type": "application/json",
+	})
+	if w.Code != 400 {
+		t.Fatalf("expected 400, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestAlertmanager_CustomTemplate(t *testing.T) {
+	tmpl, err := ParseAlertmanagerTemplate(`ALERT: {{ index .GroupLabels "alertname" }} is {{ .Status }}`)
+	if err != nil {
+		t.Fatalf("parse template: %v", err)
+	}
+	amCfg := &AlertmanagerConfig{
+		DefaultChatID:          "chat-1",
+		ErrorSeverities: []string{"critical"},
+		Template:        tmpl,
+	}
+
+	var lastMsg string
+	cfg := Config{
+		Listen:   ":0",
+		BasePath: "/api/v1",
+		Keys:     []ResolvedKey{{Name: "t", Key: "k"}},
+	}
+	sendFn := func(ctx context.Context, p *SendPayload) (string, error) {
+		lastMsg = p.Message
+		return "id", nil
+	}
+	chatResolver := func(chatID string) (string, error) { return chatID, nil }
+	srv := New(cfg, sendFn, chatResolver, WithAlertmanager(amCfg))
+
+	body := alertmanagerPayload("firing", AlertItem{
+		Status: "firing",
+		Labels: map[string]string{"alertname": "DiskFull", "severity": "critical"},
+	})
+
+	w := doRequest(srv, "POST", "/api/v1/alertmanager", strings.NewReader(body), map[string]string{
+		"X-API-Key":    "k",
+		"Content-Type": "application/json",
+	})
+	if w.Code != 200 {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	if !strings.Contains(lastMsg, "ALERT: TestAlert is firing") {
+		t.Errorf("unexpected message: %q", lastMsg)
 	}
 }

@@ -31,6 +31,7 @@ type Server struct {
 	send   SendFunc
 	chats  ChatResolver
 	keyMap map[string]string // key -> name
+	amCfg  *AlertmanagerConfig
 	srv    *http.Server
 }
 
@@ -40,8 +41,18 @@ type SendFunc func(ctx context.Context, req *SendPayload) (syncID string, err er
 // ChatResolver resolves a chat alias to a UUID. Returns the input unchanged if it is already a UUID.
 type ChatResolver func(chatID string) (string, error)
 
+// Option configures optional server features.
+type Option func(*Server)
+
+// WithAlertmanager enables the alertmanager webhook endpoint.
+func WithAlertmanager(cfg *AlertmanagerConfig) Option {
+	return func(s *Server) {
+		s.amCfg = cfg
+	}
+}
+
 // New creates a Server with the given configuration.
-func New(cfg Config, sendFn SendFunc, chatResolver ChatResolver) *Server {
+func New(cfg Config, sendFn SendFunc, chatResolver ChatResolver, opts ...Option) *Server {
 	s := &Server{
 		cfg:    cfg,
 		send:   sendFn,
@@ -50,6 +61,9 @@ func New(cfg Config, sendFn SendFunc, chatResolver ChatResolver) *Server {
 	}
 	for _, k := range cfg.Keys {
 		s.keyMap[k.Key] = k.Name
+	}
+	for _, o := range opts {
+		o(s)
 	}
 
 	mux := http.NewServeMux()
@@ -60,6 +74,18 @@ func New(cfg Config, sendFn SendFunc, chatResolver ChatResolver) *Server {
 	// API routes under base path, with auth
 	base := strings.TrimRight(cfg.BasePath, "/")
 	mux.Handle(fmt.Sprintf("POST %s/send", base), s.authMiddleware(http.HandlerFunc(s.handleSend)))
+
+	if s.amCfg != nil {
+		mux.Handle(fmt.Sprintf("POST %s/alertmanager", base), s.authMiddleware(http.HandlerFunc(s.handleAlertmanager)))
+		chatInfo := s.amCfg.DefaultChatID
+		if chatInfo == "" {
+			chatInfo = s.amCfg.FallbackChatID
+		}
+		if chatInfo == "" {
+			chatInfo = "from ?chat_id param"
+		}
+		vlog.V1("server: alertmanager endpoint enabled (chat: %s)", chatInfo)
+	}
 
 	s.srv = &http.Server{
 		Addr:              cfg.Listen,
