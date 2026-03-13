@@ -11,6 +11,8 @@ import (
 	"net/http"
 	"path/filepath"
 	"time"
+
+	vlog "github.com/lavr/express-bot/internal/log"
 )
 
 // Client is a BotX API client.
@@ -46,6 +48,9 @@ type listChatsResponse struct {
 // ListChats returns all chats the bot is a member of.
 func (c *Client) ListChats(ctx context.Context) ([]ChatInfo, error) {
 	url := c.BaseURL + "/api/v3/botx/chats/list"
+	vlog.V2("chats: GET %s", url)
+
+	start := time.Now()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return nil, fmt.Errorf("creating request: %w", err)
@@ -57,8 +62,10 @@ func (c *Client) ListChats(ctx context.Context) ([]ChatInfo, error) {
 		return nil, fmt.Errorf("listing chats: %w", err)
 	}
 	defer resp.Body.Close()
+	elapsed := time.Since(start)
 
 	if resp.StatusCode != http.StatusOK {
+		vlog.V1("chats: <- %d (%dms)", resp.StatusCode, elapsed.Milliseconds())
 		return nil, fmt.Errorf("list chats failed: HTTP %d", resp.StatusCode)
 	}
 
@@ -67,6 +74,7 @@ func (c *Client) ListChats(ctx context.Context) ([]ChatInfo, error) {
 		return nil, fmt.Errorf("decoding response: %w", err)
 	}
 
+	vlog.V1("chats: <- %d %s (%dms), %d chats", resp.StatusCode, http.StatusText(resp.StatusCode), elapsed.Milliseconds(), len(result.Result))
 	return result.Result, nil
 }
 
@@ -119,7 +127,11 @@ func (c *Client) GetUserByADLogin(ctx context.Context, login, domain string) (*U
 }
 
 func (c *Client) getUser(ctx context.Context, path string) (*UserInfo, error) {
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, c.BaseURL+path, nil)
+	url := c.BaseURL + path
+	vlog.V2("user: GET %s", url)
+
+	start := time.Now()
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return nil, fmt.Errorf("creating request: %w", err)
 	}
@@ -130,9 +142,11 @@ func (c *Client) getUser(ctx context.Context, path string) (*UserInfo, error) {
 		return nil, fmt.Errorf("getting user: %w", err)
 	}
 	defer resp.Body.Close()
+	elapsed := time.Since(start)
 
 	if resp.StatusCode != http.StatusOK {
 		respBody, _ := io.ReadAll(resp.Body)
+		vlog.V1("user: <- %d (%dms)", resp.StatusCode, elapsed.Milliseconds())
 		return nil, fmt.Errorf("get user failed: HTTP %d: %s", resp.StatusCode, string(respBody))
 	}
 
@@ -141,6 +155,7 @@ func (c *Client) getUser(ctx context.Context, path string) (*UserInfo, error) {
 		return nil, fmt.Errorf("decoding response: %w", err)
 	}
 
+	vlog.V1("user: <- %d %s (%dms)", resp.StatusCode, http.StatusText(resp.StatusCode), elapsed.Milliseconds())
 	return &result.Result, nil
 }
 
@@ -207,6 +222,11 @@ func (c *Client) SendWithSyncID(ctx context.Context, sr *SendRequest) (string, e
 	}
 
 	url := c.BaseURL + "/api/v4/botx/notifications/direct"
+	vlog.V2("send: POST %s", url)
+	vlog.V2("send: -> Authorization: Bearer %s", vlog.MaskBearer(c.Token))
+	vlog.V3("send: -> %s", string(body))
+
+	start := time.Now()
 	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
 	if err != nil {
 		return "", fmt.Errorf("creating request: %w", err)
@@ -219,20 +239,26 @@ func (c *Client) SendWithSyncID(ctx context.Context, sr *SendRequest) (string, e
 		return "", fmt.Errorf("sending: %w", err)
 	}
 	defer resp.Body.Close()
+	elapsed := time.Since(start)
 
 	if resp.StatusCode == http.StatusUnauthorized {
+		vlog.V1("send: <- 401 Unauthorized (%dms)", elapsed.Milliseconds())
 		return "", ErrUnauthorized
 	}
 
 	switch resp.StatusCode {
 	case http.StatusOK, http.StatusCreated, http.StatusAccepted:
+		vlog.V1("send: <- %d %s (%dms)", resp.StatusCode, http.StatusText(resp.StatusCode), elapsed.Milliseconds())
 		var apiResp sendAPIResponse
 		if err := json.NewDecoder(resp.Body).Decode(&apiResp); err != nil {
 			return "", nil // sent ok, but couldn't parse sync_id
 		}
+		vlog.V3("send: <- sync_id=%s", apiResp.Result.SyncID)
 		return apiResp.Result.SyncID, nil
 	default:
 		respBody, _ := io.ReadAll(resp.Body)
+		vlog.V1("send: <- %d (%dms)", resp.StatusCode, elapsed.Milliseconds())
+		vlog.V3("send: <- %s", string(respBody))
 		return "", fmt.Errorf("send failed: HTTP %d: %s", resp.StatusCode, string(respBody))
 	}
 }

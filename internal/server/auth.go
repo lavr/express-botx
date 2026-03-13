@@ -3,9 +3,10 @@ package server
 import (
 	"context"
 	"crypto/subtle"
-	"log"
 	"net/http"
 	"strings"
+
+	vlog "github.com/lavr/express-bot/internal/log"
 )
 
 type ctxKey int
@@ -25,7 +26,7 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 		// 1. Try API key (Bearer or X-API-Key)
 		if key := extractKey(r); key != "" {
 			if name, ok := s.keyMap[key]; ok {
-				log.Printf("%s %s [key: %s]", r.Method, r.URL.Path, name)
+				vlog.V1("server: %s %s [key: %s]", r.Method, r.URL.Path, name)
 				ctx := context.WithValue(r.Context(), keyNameKey, name)
 				next.ServeHTTP(w, r.WithContext(ctx))
 				return
@@ -36,7 +37,7 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 		if s.cfg.AllowBotSecretAuth && s.cfg.BotSignature != "" {
 			if sig := r.Header.Get("X-Bot-Signature"); sig != "" {
 				if subtle.ConstantTimeCompare([]byte(sig), []byte(s.cfg.BotSignature)) == 1 {
-					log.Printf("%s %s [key: bot_secret]", r.Method, r.URL.Path)
+					vlog.V1("server: %s %s [key: bot_secret]", r.Method, r.URL.Path)
 					ctx := context.WithValue(r.Context(), keyNameKey, "bot_secret")
 					next.ServeHTTP(w, r.WithContext(ctx))
 					return

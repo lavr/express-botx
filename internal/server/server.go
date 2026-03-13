@@ -3,10 +3,11 @@ package server
 import (
 	"context"
 	"fmt"
-	"log"
 	"net/http"
 	"strings"
 	"time"
+
+	vlog "github.com/lavr/express-bot/internal/log"
 )
 
 // ResolvedKey is an API key with its secret resolved.
@@ -74,7 +75,10 @@ func New(cfg Config, sendFn SendFunc, chatResolver ChatResolver) *Server {
 func (s *Server) Run(ctx context.Context) error {
 	errCh := make(chan error, 1)
 	go func() {
-		log.Printf("listening on %s (base_path: %s)", s.cfg.Listen, s.cfg.BasePath)
+		vlog.V1("server: listening on %s (base_path: %s)", s.cfg.Listen, s.cfg.BasePath)
+		if len(s.keyMap) > 0 {
+			vlog.V1("server: %d API keys loaded", len(s.keyMap))
+		}
 		if err := s.srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 			errCh <- err
 		}
@@ -89,7 +93,7 @@ func (s *Server) Run(ctx context.Context) error {
 
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
-	log.Println("shutting down...")
+	vlog.V1("server: shutting down...")
 	return s.srv.Shutdown(shutdownCtx)
 }
 

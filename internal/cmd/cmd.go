@@ -8,8 +8,11 @@ import (
 	"os"
 	"time"
 
+	"strconv"
+
 	"github.com/lavr/express-bot/internal/auth"
 	"github.com/lavr/express-bot/internal/config"
+	vlog "github.com/lavr/express-bot/internal/log"
 	"github.com/lavr/express-bot/internal/secret"
 	"github.com/lavr/express-bot/internal/token"
 )
@@ -24,6 +27,15 @@ type Deps struct {
 
 // Run is the top-level command dispatcher.
 func Run(args []string, deps Deps) error {
+	// Parse -v/-vv/-vvv before dispatching
+	level, args := vlog.ParseVerbosity(args)
+	if v := os.Getenv("EXPRESS_VERBOSE"); v != "" && level == 0 {
+		if n, err := strconv.Atoi(v); err == nil {
+			level = n
+		}
+	}
+	vlog.Level = level
+
 	if len(args) == 0 {
 		printUsage(deps.Stderr)
 		return fmt.Errorf("subcommand required: send, serve, chats, bot, user")
@@ -58,36 +70,56 @@ func globalFlags(fs *flag.FlagSet, flags *config.Flags) {
 	fs.StringVar(&flags.Secret, "secret", "", "bot secret (literal, env:VAR, or vault:path#key)")
 	fs.BoolVar(&flags.NoCache, "no-cache", false, "disable token caching")
 	fs.StringVar(&flags.Format, "format", "", "output format: text or json (default: text)")
+	fs.IntVar(&flags.Verbose, "verbose", 0, "verbosity level (1-3, same as -v/-vv/-vvv)")
+}
+
+// applyVerboseFlag applies --verbose flag if -v was not already set.
+func applyVerboseFlag(flags config.Flags) {
+	if flags.Verbose > 0 && vlog.Level == 0 {
+		vlog.Level = flags.Verbose
+	}
 }
 
 // authenticate resolves the secret, gets or loads a cached token.
 func authenticate(cfg *config.Config) (string, token.Cache, error) {
+	vlog.V1("auth: resolving secret")
 	secretKey, err := secret.Resolve(cfg.BotSecret)
 	if err != nil {
 		return "", nil, fmt.Errorf("resolving secret: %w", err)
 	}
 
 	signature := auth.BuildSignature(cfg.BotID, secretKey)
+	vlog.V2("auth: signature=%s", vlog.Mask(signature))
 	cache := newCache(cfg.Cache)
 
 	ctx := context.Background()
 	cacheKey := cfg.CacheKey()
 
 	tok, _ := cache.Get(ctx, cacheKey)
-	if tok == "" {
-		tok, err = auth.GetToken(ctx, cfg.Host, cfg.BotID, signature)
-		if err != nil {
-			return "", nil, fmt.Errorf("getting token: %w", err)
-		}
-		ttl := time.Duration(cfg.Cache.TTL) * time.Second
-		cache.Set(ctx, cacheKey, tok, ttl)
+	if tok != "" {
+		vlog.V1("auth: token loaded from cache")
+		return tok, cache, nil
 	}
+
+	vlog.V1("auth: cache miss, requesting new token")
+	vlog.V2("auth: GET https://%s/api/v2/botx/bots/%s/token?signature=%s", cfg.Host, cfg.BotID, vlog.Mask(signature))
+	tok, err = auth.GetToken(ctx, cfg.Host, cfg.BotID, signature)
+	if err != nil {
+		return "", nil, fmt.Errorf("getting token: %w", err)
+	}
+	vlog.V1("auth: token obtained")
+	vlog.V2("auth: token=%s", vlog.MaskBearer(tok))
+
+	ttl := time.Duration(cfg.Cache.TTL) * time.Second
+	cache.Set(ctx, cacheKey, tok, ttl)
+	vlog.V1("auth: token cached (ttl: %ds)", cfg.Cache.TTL)
 
 	return tok, cache, nil
 }
 
 // refreshToken forces a fresh token from the API.
 func refreshToken(cfg *config.Config, cache token.Cache) (string, error) {
+	vlog.V1("auth: refreshing token")
 	secretKey, err := secret.Resolve(cfg.BotSecret)
 	if err != nil {
 		return "", fmt.Errorf("resolving secret: %w", err)
@@ -103,6 +135,7 @@ func refreshToken(cfg *config.Config, cache token.Cache) (string, error) {
 
 	ttl := time.Duration(cfg.Cache.TTL) * time.Second
 	cache.Set(ctx, cfg.CacheKey(), tok, ttl)
+	vlog.V1("auth: token refreshed and cached (ttl: %ds)", cfg.Cache.TTL)
 	return tok, nil
 }
 

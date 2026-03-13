@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 
+	vlog "github.com/lavr/express-bot/internal/log"
 	"gopkg.in/yaml.v3"
 )
 
@@ -66,6 +67,7 @@ type Flags struct {
 	ChatID     string
 	NoCache    bool
 	Format     string
+	Verbose    int
 }
 
 // Load reads configuration with layering: YAML file → resolve bot → env → CLI flags.
@@ -86,11 +88,14 @@ func Load(flags Flags) (*Config, error) {
 	cfg.configPath = configPath
 	if configPath != "" {
 		if data, err := os.ReadFile(configPath); err == nil {
+			vlog.V1("config: loaded from %s", configPath)
 			if err := yaml.Unmarshal(data, cfg); err != nil {
 				return nil, fmt.Errorf("parsing config %s: %w", configPath, err)
 			}
 		} else if explicit {
 			return nil, fmt.Errorf("reading config %s: %w", configPath, err)
+		} else {
+			vlog.V2("config: %s not found, skipping", configPath)
 		}
 	}
 
@@ -98,12 +103,17 @@ func Load(flags Flags) (*Config, error) {
 	if err := cfg.resolveBot(flags.Bot); err != nil {
 		return nil, err
 	}
+	if cfg.BotName != "" {
+		vlog.V1("config: using bot %q (%s)", cfg.BotName, cfg.Host)
+	}
 
 	// Layer 3: environment variables (override resolved bot)
 	applyEnv(cfg)
 
 	// Layer 4: CLI flags (highest priority)
 	applyFlags(cfg, flags)
+
+	vlog.V2("config: host=%s bot_id=%s cache=%s", cfg.Host, cfg.BotID, cfg.Cache.Type)
 
 	// Validate required fields
 	if cfg.Host == "" {
@@ -258,15 +268,19 @@ func LoadMinimal(flags Flags) (*Config, error) {
 	if !explicit {
 		configPath = findConfigFile()
 	}
+	if configPath == "" {
+		configPath = "express-bot.yaml"
+	}
 	cfg.configPath = configPath
-	if configPath != "" {
-		if data, err := os.ReadFile(configPath); err == nil {
-			if err := yaml.Unmarshal(data, cfg); err != nil {
-				return nil, fmt.Errorf("parsing config %s: %w", configPath, err)
-			}
-		} else if explicit {
-			return nil, fmt.Errorf("reading config %s: %w", configPath, err)
+	if data, err := os.ReadFile(configPath); err == nil {
+		vlog.V1("config: loaded from %s", configPath)
+		if err := yaml.Unmarshal(data, cfg); err != nil {
+			return nil, fmt.Errorf("parsing config %s: %w", configPath, err)
 		}
+	} else if explicit {
+		return nil, fmt.Errorf("reading config %s: %w", configPath, err)
+	} else {
+		vlog.V2("config: %s not found, using defaults", configPath)
 	}
 
 	// Apply only format flag for LoadMinimal

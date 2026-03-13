@@ -12,6 +12,7 @@ import (
 	"github.com/lavr/express-bot/internal/auth"
 	"github.com/lavr/express-bot/internal/botapi"
 	"github.com/lavr/express-bot/internal/config"
+	vlog "github.com/lavr/express-bot/internal/log"
 	"github.com/lavr/express-bot/internal/secret"
 )
 
@@ -231,14 +232,15 @@ func runBotAdd(args []string, deps Deps) error {
 	fs := flag.NewFlagSet("bot add", flag.ContinueOnError)
 	fs.SetOutput(deps.Stderr)
 	var flags config.Flags
-	var host, botID, secretVal string
+	var name, host, botID, secretVal string
 
 	fs.StringVar(&flags.ConfigPath, "config", "", "path to config file")
+	fs.StringVar(&name, "name", "", "bot name (auto-generated as bot1, bot2, ... if omitted)")
 	fs.StringVar(&host, "host", "", "eXpress server host (required)")
 	fs.StringVar(&botID, "bot-id", "", "bot UUID (required)")
 	fs.StringVar(&secretVal, "secret", "", "bot secret (required)")
 	fs.Usage = func() {
-		fmt.Fprintf(deps.Stderr, "Usage: express-bot bot add <name> --host HOST --bot-id ID --secret SECRET [options]\n\nAdd or update a bot in the config file.\n\nOptions:\n")
+		fmt.Fprintf(deps.Stderr, "Usage: express-bot bot add --host HOST --bot-id ID --secret SECRET [options]\n\nAdd or update a bot in the config file.\nIf --name is omitted, it is auto-generated as bot1, bot2, etc.\n\nOptions:\n")
 		fs.PrintDefaults()
 	}
 
@@ -248,11 +250,6 @@ func runBotAdd(args []string, deps Deps) error {
 		}
 		return err
 	}
-
-	if fs.NArg() != 1 {
-		return fmt.Errorf("usage: bot add <name> --host HOST --bot-id ID --secret SECRET")
-	}
-	name := fs.Arg(0)
 
 	if host == "" {
 		return fmt.Errorf("--host is required")
@@ -273,6 +270,24 @@ func runBotAdd(args []string, deps Deps) error {
 		cfg.Bots = make(map[string]config.BotConfig)
 	}
 
+	// Check for existing bot with same host+bot_id under a different name
+	for existingName, b := range cfg.Bots {
+		if b.Host == host && b.ID == botID && (name == "" || existingName != name) {
+			return fmt.Errorf("bot with this host and id already exists as %q; use --name %s to update it", existingName, existingName)
+		}
+	}
+
+	if name == "" {
+		for i := 1; ; i++ {
+			candidate := fmt.Sprintf("bot%d", i)
+			if _, exists := cfg.Bots[candidate]; !exists {
+				name = candidate
+				vlog.V1("bot: auto-generated name %q", name)
+				break
+			}
+		}
+	}
+
 	action := "added"
 	if _, exists := cfg.Bots[name]; exists {
 		action = "updated"
@@ -282,10 +297,12 @@ func runBotAdd(args []string, deps Deps) error {
 		ID:     botID,
 		Secret: secretVal,
 	}
+	vlog.V2("bot: %s %s (host=%s, id=%s, secret=%s)", action, name, host, botID, vlog.Mask(secretVal))
 
 	if err := cfg.SaveConfig(); err != nil {
 		return err
 	}
+	vlog.V1("bot: config saved to %s", cfg.ConfigPath())
 
 	fmt.Fprintf(deps.Stdout, "Bot %s: %s (%s, %s)\n", action, name, host, botID)
 	return nil

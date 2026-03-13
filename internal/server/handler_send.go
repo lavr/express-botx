@@ -9,6 +9,9 @@ import (
 	"mime/multipart"
 	"net/http"
 	"strings"
+	"time"
+
+	vlog "github.com/lavr/express-bot/internal/log"
 )
 
 // SendPayload is the parsed request for sending a message.
@@ -86,12 +89,18 @@ func (s *Server) handleSend(w http.ResponseWriter, r *http.Request) {
 	}
 	payload.ChatID = chatID
 
+	start := time.Now()
 	syncID, err := s.send(r.Context(), &payload)
+	elapsed := time.Since(start)
+
+	keyName := KeyName(r.Context())
 	if err != nil {
+		vlog.V1("server: %s %s [key: %s] -> 502 (%dms)", r.Method, r.URL.Path, keyName, elapsed.Milliseconds())
 		writeError(w, http.StatusBadGateway, "upstream error: "+err.Error())
 		return
 	}
 
+	vlog.V1("server: %s %s [key: %s] -> 200 (%dms)", r.Method, r.URL.Path, keyName, elapsed.Milliseconds())
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(sendResponse{OK: true, SyncID: syncID})
 }

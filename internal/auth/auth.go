@@ -10,6 +10,8 @@ import (
 	"net/http"
 	"strings"
 	"time"
+
+	vlog "github.com/lavr/express-bot/internal/log"
 )
 
 // BuildSignature creates HMAC-SHA256 signature for BotX API authentication.
@@ -40,6 +42,9 @@ func getTokenWithClient(ctx context.Context, baseURL, botID, signature string, c
 }
 
 func doGetToken(ctx context.Context, url string, client *http.Client) (string, error) {
+	vlog.V2("auth: GET %s", url)
+
+	start := time.Now()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
 		return "", fmt.Errorf("creating request: %w", err)
@@ -50,8 +55,10 @@ func doGetToken(ctx context.Context, url string, client *http.Client) (string, e
 		return "", fmt.Errorf("requesting token: %w", err)
 	}
 	defer resp.Body.Close()
+	elapsed := time.Since(start)
 
 	if resp.StatusCode != http.StatusOK {
+		vlog.V1("auth: <- %d (%dms)", resp.StatusCode, elapsed.Milliseconds())
 		return "", fmt.Errorf("token request failed: HTTP %d", resp.StatusCode)
 	}
 
@@ -64,5 +71,6 @@ func doGetToken(ctx context.Context, url string, client *http.Client) (string, e
 		return "", fmt.Errorf("unexpected status: %s", result.Status)
 	}
 
+	vlog.V1("auth: <- %d %s (%dms)", resp.StatusCode, http.StatusText(resp.StatusCode), elapsed.Milliseconds())
 	return result.Result, nil
 }
