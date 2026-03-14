@@ -38,7 +38,7 @@ spec:
           image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           command: ["express-botx"]
-          args: ["serve", "--config", "/etc/express-botx/config.yaml"]
+          args: ["serve"]
           ports:
             - name: http
               containerPort: 8080
@@ -66,10 +66,12 @@ spec:
               readOnly: true
             - name: cache
               mountPath: /tmp/express-botx
-          {{- with .Values.extraEnv }}
           env:
+            - name: EXPRESS_BOTX_CONFIG
+              value: /etc/express-botx/config.yaml
+            {{- with .Values.extraEnv }}
             {{- toYaml . | nindent 12 }}
-          {{- end }}
+            {{- end }}
       volumes:
         - name: config
           secret:

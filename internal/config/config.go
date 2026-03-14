@@ -104,11 +104,7 @@ func Load(flags Flags) (*Config, error) {
 	}
 
 	// Layer 1: YAML file
-	configPath := flags.ConfigPath
-	explicit := configPath != ""
-	if !explicit {
-		configPath = findConfigFile()
-	}
+	configPath, explicit := resolveConfigPath(flags.ConfigPath)
 	cfg.configPath = configPath
 	if configPath != "" {
 		if data, err := os.ReadFile(configPath); err == nil {
@@ -175,11 +171,7 @@ func LoadForServe(flags Flags) (*Config, error) {
 	}
 
 	// Layer 1: YAML file
-	configPath := flags.ConfigPath
-	explicit := configPath != ""
-	if !explicit {
-		configPath = findConfigFile()
-	}
+	configPath, explicit := resolveConfigPath(flags.ConfigPath)
 	cfg.configPath = configPath
 	if configPath != "" {
 		if data, err := os.ReadFile(configPath); err == nil {
@@ -389,11 +381,7 @@ func LoadMinimal(flags Flags) (*Config, error) {
 		},
 	}
 
-	configPath := flags.ConfigPath
-	explicit := configPath != ""
-	if !explicit {
-		configPath = findConfigFile()
-	}
+	configPath, explicit := resolveConfigPath(flags.ConfigPath)
 	if configPath == "" {
 		configPath = "express-botx.yaml"
 	}
@@ -418,6 +406,21 @@ func LoadMinimal(flags Flags) (*Config, error) {
 	}
 
 	return cfg, nil
+}
+
+// resolveConfigPath determines the config file path from: CLI flag → env → auto-discovery.
+// Returns the path and whether it was explicitly specified (flag or env).
+func resolveConfigPath(flagPath string) (path string, explicit bool) {
+	if flagPath != "" {
+		return flagPath, true
+	}
+	if envPath := os.Getenv("EXPRESS_BOTX_CONFIG"); envPath != "" {
+		return envPath, true
+	}
+	if found := findConfigFile(); found != "" {
+		return found, false
+	}
+	return "", false
 }
 
 // findConfigFile searches for a config file in standard locations:
