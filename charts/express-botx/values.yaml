@@ -21,18 +21,18 @@ config:
     # deploy: "chat-uuid-here"
     # alerts: "alerts-chat-uuid"
   cache:
-    type: file
+    # type: file
   server:
     listen: ":8080"
-    base_path: /api/v1
-    allow_bot_secret_auth: false
-    api_keys: []
+    #base_path: /api/v1
+    #allow_bot_secret_auth: false
+    #api_keys: []
     #  - name: alertmanager
     #    key: "change-me"
     # alertmanager:
-    #   chat_id: alerts
+    #   default_chat_id: alerts
     # grafana:
-    #   chat_id: monitoring
+    #   default_chat_id: monitoring
 
 # Use an existing Secret instead of generating one from config.*.
 # The Secret must contain a "config.yaml" key with the full YAML config.
