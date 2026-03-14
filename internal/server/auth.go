@@ -11,11 +11,23 @@ import (
 
 type ctxKey int
 
-const keyNameKey ctxKey = iota
+const (
+	keyNameKey ctxKey = iota
+	authBotKey        // bot name bound by X-Bot-Signature auth
+)
 
 // KeyName returns the API key name from the request context.
 func KeyName(ctx context.Context) string {
 	if v, ok := ctx.Value(keyNameKey).(string); ok {
+		return v
+	}
+	return ""
+}
+
+// AuthBot returns the bot name bound by X-Bot-Signature authentication.
+// Empty string means no bot was bound (API-key auth or single-bot mode).
+func AuthBot(ctx context.Context) string {
+	if v, ok := ctx.Value(authBotKey).(string); ok {
 		return v
 	}
 	return ""
@@ -34,13 +46,18 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 		}
 
 		// 2. Try bot signature (if enabled)
-		if s.cfg.AllowBotSecretAuth && s.cfg.BotSignature != "" {
+		if s.cfg.AllowBotSecretAuth && len(s.cfg.BotSignatures) > 0 {
 			if sig := r.Header.Get("X-Bot-Signature"); sig != "" {
-				if subtle.ConstantTimeCompare([]byte(sig), []byte(s.cfg.BotSignature)) == 1 {
-					vlog.V1("server: %s %s [key: bot_secret]", r.Method, r.URL.Path)
-					ctx := context.WithValue(r.Context(), keyNameKey, "bot_secret")
-					next.ServeHTTP(w, r.WithContext(ctx))
-					return
+				for expected, botName := range s.cfg.BotSignatures {
+					if subtle.ConstantTimeCompare([]byte(sig), []byte(expected)) == 1 {
+						vlog.V1("server: %s %s [key: bot_secret, bot: %s]", r.Method, r.URL.Path, botName)
+						ctx := context.WithValue(r.Context(), keyNameKey, "bot_secret")
+						if botName != "" {
+							ctx = context.WithValue(ctx, authBotKey, botName)
+						}
+						next.ServeHTTP(w, r.WithContext(ctx))
+						return
+					}
 				}
 			}
 		}

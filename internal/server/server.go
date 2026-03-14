@@ -23,19 +23,21 @@ type Config struct {
 	BasePath           string
 	Keys               []ResolvedKey
 	AllowBotSecretAuth bool
-	BotSignature       string // expected HMAC-SHA256 signature for bot secret auth
+	BotSignatures      map[string]string // signature -> bot name (multi-bot) or "" (single-bot)
+	BotNames           []string          // available bot names; if len > 1, bot is required in requests
 }
 
 // Server is the HTTP server for express-botx.
 type Server struct {
-	cfg    Config
-	send   SendFunc
-	chats  ChatResolver
-	keyMap map[string]string // key -> name
-	apm    apm.Provider
-	amCfg  *AlertmanagerConfig
-	grCfg  *GrafanaConfig
-	srv    *http.Server
+	cfg        Config
+	send       SendFunc
+	chats      ChatResolver
+	keyMap     map[string]string // key -> name
+	botNameSet map[string]bool   // valid bot names for multi-bot mode
+	apm        apm.Provider
+	amCfg      *AlertmanagerConfig
+	grCfg      *GrafanaConfig
+	srv        *http.Server
 }
 
 // SendFunc sends a message via the BotX API. The server calls this for each request.
@@ -71,13 +73,17 @@ func WithAPM(p apm.Provider) Option {
 // New creates a Server with the given configuration.
 func New(cfg Config, sendFn SendFunc, chatResolver ChatResolver, opts ...Option) *Server {
 	s := &Server{
-		cfg:    cfg,
-		send:   sendFn,
-		chats:  chatResolver,
-		keyMap: make(map[string]string, len(cfg.Keys)),
+		cfg:        cfg,
+		send:       sendFn,
+		chats:      chatResolver,
+		keyMap:     make(map[string]string, len(cfg.Keys)),
+		botNameSet: make(map[string]bool, len(cfg.BotNames)),
 	}
 	for _, k := range cfg.Keys {
 		s.keyMap[k.Key] = k.Name
+	}
+	for _, name := range cfg.BotNames {
+		s.botNameSet[name] = true
 	}
 	for _, o := range opts {
 		o(s)
@@ -130,6 +136,36 @@ func New(cfg Config, sendFn SendFunc, chatResolver ChatResolver, opts ...Option)
 	s.srv.SetKeepAlivesEnabled(false)
 
 	return s
+}
+
+// isMultiBot returns true if the server is configured with multiple bots.
+func (s *Server) isMultiBot() bool {
+	return len(s.cfg.BotNames) > 1
+}
+
+// resolveRequestBot validates the bot name in multi-bot mode.
+// In bot-secret auth, the request is bound to the authenticated bot.
+// Returns the resolved bot name and an error message (empty on success).
+func (s *Server) resolveRequestBot(ctx context.Context, bot string) (string, string) {
+	if !s.isMultiBot() {
+		return bot, ""
+	}
+
+	// If authenticated via bot-secret, bind to that bot
+	if authBot := AuthBot(ctx); authBot != "" {
+		if bot != "" && bot != authBot {
+			return "", fmt.Sprintf("bot %q does not match authenticated bot %q", bot, authBot)
+		}
+		return authBot, ""
+	}
+
+	if bot == "" {
+		return "", fmt.Sprintf("bot is required, available: %s", strings.Join(s.cfg.BotNames, ", "))
+	}
+	if !s.botNameSet[bot] {
+		return "", fmt.Sprintf("unknown bot %q, available: %s", bot, strings.Join(s.cfg.BotNames, ", "))
+	}
+	return bot, ""
 }
 
 // Run starts the server and blocks until ctx is cancelled. It performs graceful shutdown.

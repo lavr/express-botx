@@ -72,6 +72,13 @@ func (s *Server) handleGrafana(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Resolve bot in multi-bot mode
+	botName, errMsg := s.resolveRequestBot(r.Context(), r.URL.Query().Get("bot"))
+	if errMsg != "" {
+		writeError(w, http.StatusBadRequest, errMsg)
+		return
+	}
+
 	vlog.V1("grafana: received %s with %d alerts (receiver: %s, state: %s)", webhook.Status, len(webhook.Alerts), webhook.Receiver, webhook.State)
 	vlog.V2("grafana: groupKey=%s title=%s", webhook.GroupKey, webhook.Title)
 
@@ -108,6 +115,7 @@ func (s *Server) handleGrafana(w http.ResponseWriter, r *http.Request) {
 
 	start := time.Now()
 	syncID, err := s.send(r.Context(), &SendPayload{
+		Bot:     botName,
 		ChatID:  chatID,
 		Message: message,
 		Status:  status,

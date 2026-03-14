@@ -135,7 +135,7 @@ func TestAuth_WrongKey(t *testing.T) {
 func TestAuth_BotSignature_Enabled(t *testing.T) {
 	srv := newTestServer(nil, func(c *Config) {
 		c.AllowBotSecretAuth = true
-		c.BotSignature = "ABCDEF123456"
+		c.BotSignatures = map[string]string{"ABCDEF123456": ""}
 	})
 	body := `{"chat_id":"chat-1","message":"hi"}`
 	w := doRequest(srv, "POST", "/api/v1/send", strings.NewReader(body), map[string]string{
@@ -150,7 +150,7 @@ func TestAuth_BotSignature_Enabled(t *testing.T) {
 func TestAuth_BotSignature_Disabled(t *testing.T) {
 	srv := newTestServer(nil, func(c *Config) {
 		c.AllowBotSecretAuth = false
-		c.BotSignature = "ABCDEF123456"
+		c.BotSignatures = map[string]string{"ABCDEF123456": ""}
 	})
 	body := `{"chat_id":"chat-1","message":"hi"}`
 	w := doRequest(srv, "POST", "/api/v1/send", strings.NewReader(body), map[string]string{
@@ -166,7 +166,7 @@ func TestAuth_BotSignature_Disabled(t *testing.T) {
 func TestAuth_BotSignature_Wrong(t *testing.T) {
 	srv := newTestServer(nil, func(c *Config) {
 		c.AllowBotSecretAuth = true
-		c.BotSignature = "ABCDEF123456"
+		c.BotSignatures = map[string]string{"ABCDEF123456": ""}
 	})
 	body := `{"chat_id":"chat-1","message":"hi"}`
 	w := doRequest(srv, "POST", "/api/v1/send", strings.NewReader(body), map[string]string{
@@ -979,6 +979,243 @@ func TestGrafana_CustomTemplate(t *testing.T) {
 	}
 	if !strings.Contains(lastMsg, "GRAFANA: [FIRING:1] DiskFull is alerting") {
 		t.Errorf("unexpected message: %q", lastMsg)
+	}
+}
+
+// --- multi-bot ---
+
+func newMultiBotTestServer(keys []ResolvedKey) *Server {
+	cfg := Config{
+		Listen:   ":0",
+		BasePath: "/api/v1",
+		Keys:     keys,
+		BotNames: []string{"prod", "test"},
+	}
+	sendFn := func(ctx context.Context, p *SendPayload) (string, error) {
+		return "sync-" + p.Bot, nil
+	}
+	chatResolver := func(chatID string) (string, error) {
+		return chatID, nil
+	}
+	return New(cfg, sendFn, chatResolver)
+}
+
+func TestSend_MultiBot_RequiresBot(t *testing.T) {
+	srv := newMultiBotTestServer([]ResolvedKey{{Name: "t", Key: "k"}})
+	body := `{"chat_id":"chat-1","message":"hi"}`
+	w := doRequest(srv, "POST", "/api/v1/send", strings.NewReader(body), map[string]string{
+		"X-API-Key":    "k",
+		"Content-Type": "application/json",
+	})
+	if w.Code != 400 {
+		t.Fatalf("expected 400, got %d: %s", w.Code, w.Body.String())
+	}
+	resp := parseResponse(t, w)
+	if !strings.Contains(resp.Error, "bot is required") {
+		t.Errorf("expected 'bot is required', got: %s", resp.Error)
+	}
+}
+
+func TestSend_MultiBot_UnknownBot(t *testing.T) {
+	srv := newMultiBotTestServer([]ResolvedKey{{Name: "t", Key: "k"}})
+	body := `{"bot":"staging","chat_id":"chat-1","message":"hi"}`
+	w := doRequest(srv, "POST", "/api/v1/send", strings.NewReader(body), map[string]string{
+		"X-API-Key":    "k",
+		"Content-Type": "application/json",
+	})
+	if w.Code != 400 {
+		t.Fatalf("expected 400, got %d: %s", w.Code, w.Body.String())
+	}
+	resp := parseResponse(t, w)
+	if !strings.Contains(resp.Error, "unknown bot") {
+		t.Errorf("expected 'unknown bot', got: %s", resp.Error)
+	}
+}
+
+func TestSend_MultiBot_ValidBot(t *testing.T) {
+	srv := newMultiBotTestServer([]ResolvedKey{{Name: "t", Key: "k"}})
+	body := `{"bot":"prod","chat_id":"chat-1","message":"hi"}`
+	w := doRequest(srv, "POST", "/api/v1/send", strings.NewReader(body), map[string]string{
+		"X-API-Key":    "k",
+		"Content-Type": "application/json",
+	})
+	if w.Code != 200 {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	resp := parseResponse(t, w)
+	if resp.SyncID != "sync-prod" {
+		t.Errorf("expected sync_id=sync-prod, got %q", resp.SyncID)
+	}
+}
+
+func TestSend_SingleBot_BotFieldOptional(t *testing.T) {
+	// Single-bot server (no BotNames) — bot field is not required
+	srv := newTestServer([]ResolvedKey{{Name: "t", Key: "k"}})
+	body := `{"chat_id":"chat-1","message":"hi"}`
+	w := doRequest(srv, "POST", "/api/v1/send", strings.NewReader(body), map[string]string{
+		"X-API-Key":    "k",
+		"Content-Type": "application/json",
+	})
+	if w.Code != 200 {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestAlertmanager_MultiBot_RequiresBot(t *testing.T) {
+	amCfg := testAlertmanagerConfig(t)
+	cfg := Config{
+		Listen:   ":0",
+		BasePath: "/api/v1",
+		Keys:     []ResolvedKey{{Name: "t", Key: "k"}},
+		BotNames: []string{"prod", "test"},
+	}
+	sendFn := func(ctx context.Context, p *SendPayload) (string, error) {
+		return "id", nil
+	}
+	chatResolver := func(chatID string) (string, error) { return chatID, nil }
+	srv := New(cfg, sendFn, chatResolver, WithAlertmanager(amCfg))
+
+	body := alertmanagerPayload("firing", AlertItem{
+		Status: "firing",
+		Labels: map[string]string{"alertname": "Test", "severity": "critical", "instance": "x"},
+		Annotations: map[string]string{"summary": "test"},
+	})
+
+	// Without ?bot= — should fail
+	w := doRequest(srv, "POST", "/api/v1/alertmanager", strings.NewReader(body), map[string]string{
+		"X-API-Key":    "k",
+		"Content-Type": "application/json",
+	})
+	if w.Code != 400 {
+		t.Fatalf("expected 400, got %d: %s", w.Code, w.Body.String())
+	}
+
+	// With ?bot=prod — should succeed
+	w = doRequest(srv, "POST", "/api/v1/alertmanager?bot=prod", strings.NewReader(body), map[string]string{
+		"X-API-Key":    "k",
+		"Content-Type": "application/json",
+	})
+	if w.Code != 200 {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestGrafana_MultiBot_RequiresBot(t *testing.T) {
+	grCfg := testGrafanaConfig(t)
+	cfg := Config{
+		Listen:   ":0",
+		BasePath: "/api/v1",
+		Keys:     []ResolvedKey{{Name: "t", Key: "k"}},
+		BotNames: []string{"prod", "test"},
+	}
+	sendFn := func(ctx context.Context, p *SendPayload) (string, error) {
+		return "id", nil
+	}
+	chatResolver := func(chatID string) (string, error) { return chatID, nil }
+	srv := New(cfg, sendFn, chatResolver, WithGrafana(grCfg))
+
+	body := grafanaPayload("firing", "alerting", "test", GrafanaAlertItem{
+		Status: "firing",
+		Labels: map[string]string{"alertname": "Test", "grafana_folder": "Prod"},
+		Annotations: map[string]string{"summary": "test"},
+	})
+
+	// Without ?bot= — should fail
+	w := doRequest(srv, "POST", "/api/v1/grafana", strings.NewReader(body), map[string]string{
+		"X-API-Key":    "k",
+		"Content-Type": "application/json",
+	})
+	if w.Code != 400 {
+		t.Fatalf("expected 400, got %d: %s", w.Code, w.Body.String())
+	}
+
+	// With ?bot=test — should succeed
+	w = doRequest(srv, "POST", "/api/v1/grafana?bot=test", strings.NewReader(body), map[string]string{
+		"X-API-Key":    "k",
+		"Content-Type": "application/json",
+	})
+	if w.Code != 200 {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestAuth_BotSignature_Multiple(t *testing.T) {
+	cfg := Config{
+		Listen:             ":0",
+		BasePath:           "/api/v1",
+		AllowBotSecretAuth: true,
+		BotSignatures:      map[string]string{"SIG_PROD": "prod", "SIG_TEST": "test"},
+		BotNames:           []string{"prod", "test"},
+	}
+	var lastBot string
+	sendFn := func(ctx context.Context, p *SendPayload) (string, error) {
+		lastBot = p.Bot
+		return "id", nil
+	}
+	chatResolver := func(chatID string) (string, error) { return chatID, nil }
+	srv := New(cfg, sendFn, chatResolver)
+
+	// Prod signature works and binds to prod bot
+	body := `{"chat_id":"chat-1","message":"hi"}`
+	w := doRequest(srv, "POST", "/api/v1/send", strings.NewReader(body), map[string]string{
+		"X-Bot-Signature": "SIG_PROD",
+		"Content-Type":    "application/json",
+	})
+	if w.Code != 200 {
+		t.Fatalf("expected 200 for prod sig, got %d: %s", w.Code, w.Body.String())
+	}
+	if lastBot != "prod" {
+		t.Errorf("expected bot=prod, got %q", lastBot)
+	}
+
+	// Test signature works and binds to test bot
+	w = doRequest(srv, "POST", "/api/v1/send", strings.NewReader(body), map[string]string{
+		"X-Bot-Signature": "SIG_TEST",
+		"Content-Type":    "application/json",
+	})
+	if w.Code != 200 {
+		t.Fatalf("expected 200 for test sig, got %d: %s", w.Code, w.Body.String())
+	}
+	if lastBot != "test" {
+		t.Errorf("expected bot=test, got %q", lastBot)
+	}
+
+	// Wrong signature rejected
+	w = doRequest(srv, "POST", "/api/v1/send", strings.NewReader(body), map[string]string{
+		"X-Bot-Signature": "SIG_WRONG",
+		"Content-Type":    "application/json",
+	})
+	if w.Code != 403 {
+		t.Fatalf("expected 403 for wrong sig, got %d", w.Code)
+	}
+}
+
+func TestAuth_BotSignature_PrivilegeEscalation(t *testing.T) {
+	cfg := Config{
+		Listen:             ":0",
+		BasePath:           "/api/v1",
+		AllowBotSecretAuth: true,
+		BotSignatures:      map[string]string{"SIG_TEST": "test"},
+		BotNames:           []string{"prod", "test"},
+	}
+	sendFn := func(ctx context.Context, p *SendPayload) (string, error) {
+		return "id", nil
+	}
+	chatResolver := func(chatID string) (string, error) { return chatID, nil }
+	srv := New(cfg, sendFn, chatResolver)
+
+	// Authenticated as test, trying to send as prod — should be rejected
+	body := `{"bot":"prod","chat_id":"chat-1","message":"hi"}`
+	w := doRequest(srv, "POST", "/api/v1/send", strings.NewReader(body), map[string]string{
+		"X-Bot-Signature": "SIG_TEST",
+		"Content-Type":    "application/json",
+	})
+	if w.Code != 400 {
+		t.Fatalf("expected 400 for privilege escalation, got %d: %s", w.Code, w.Body.String())
+	}
+	resp := parseResponse(t, w)
+	if !strings.Contains(resp.Error, "does not match authenticated bot") {
+		t.Errorf("expected mismatch error, got: %s", resp.Error)
 	}
 }
 

@@ -10,6 +10,7 @@ import (
 	"mime"
 	"net/http"
 	"path/filepath"
+	"strings"
 	"time"
 
 	vlog "github.com/lavr/express-botx/internal/log"
@@ -23,12 +24,23 @@ type Client struct {
 }
 
 // NewClient creates a Client for the given host and token.
+// Host can be a hostname ("express.company.ru") or a full URL ("http://localhost:8080").
 func NewClient(host, token string) *Client {
 	return &Client{
-		BaseURL:    fmt.Sprintf("https://%s", host),
+		BaseURL:    ResolveBaseURL(host),
 		Token:      token,
 		HTTPClient: &http.Client{Timeout: 30 * time.Second},
 	}
+}
+
+// ResolveBaseURL normalizes a host into a full base URL.
+// If host starts with http:// or https://, it is used as-is (with trailing slash removed).
+// Otherwise, https:// is prepended.
+func ResolveBaseURL(host string) string {
+	if strings.HasPrefix(host, "http://") || strings.HasPrefix(host, "https://") {
+		return strings.TrimRight(host, "/")
+	}
+	return "https://" + host
 }
 
 // ChatInfo holds information about a single chat.
@@ -196,6 +208,68 @@ type SendOpts struct {
 type DeliveryOpts struct {
 	Send     *bool `json:"send,omitempty"`
 	ForceDND bool  `json:"force_dnd,omitempty"`
+}
+
+// SendParams is a high-level description of a message to send.
+// Both the CLI send command and the HTTP /send endpoint use this
+// to build a SendRequest, avoiding duplicated construction logic.
+type SendParams struct {
+	ChatID   string
+	Message  string
+	Status   string // "ok" or "error"
+	File     *SendFile
+	Metadata json.RawMessage
+	Silent   bool
+	Stealth  bool
+	ForceDND bool
+	NoNotify bool
+}
+
+// BuildSendRequest converts high-level SendParams into a BotX API SendRequest.
+func BuildSendRequest(p *SendParams) *SendRequest {
+	sr := &SendRequest{
+		GroupChatID: p.ChatID,
+	}
+
+	if p.Message != "" {
+		sr.Notification = &SendNotification{
+			Status:   p.Status,
+			Body:     p.Message,
+			Metadata: p.Metadata,
+		}
+		if p.Silent {
+			sr.Notification.Opts = &NotificationMsgOpts{
+				SilentResponse: true,
+			}
+		}
+	}
+
+	sr.File = p.File
+
+	if p.Stealth || p.ForceDND || p.NoNotify {
+		sr.Opts = &SendOpts{
+			StealthMode: p.Stealth,
+		}
+		if p.ForceDND || p.NoNotify {
+			sr.Opts.NotificationOpts = &DeliveryOpts{
+				ForceDND: p.ForceDND,
+			}
+			if p.NoNotify {
+				f := false
+				sr.Opts.NotificationOpts.Send = &f
+			}
+		}
+	}
+
+	// File-only with metadata: still need a notification for metadata
+	if sr.Notification == nil && len(p.Metadata) > 0 {
+		sr.Notification = &SendNotification{
+			Status:   p.Status,
+			Metadata: p.Metadata,
+		}
+	}
+
+	return sr
 }
 
 // ErrUnauthorized indicates the token is invalid or expired.

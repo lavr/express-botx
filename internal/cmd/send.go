@@ -138,48 +138,28 @@ Options:
 		return fmt.Errorf("nothing to send: provide a message and/or --file")
 	}
 
+	// Validate metadata
+	var meta json.RawMessage
+	if metadata != "" {
+		raw := json.RawMessage(metadata)
+		if !json.Valid(raw) {
+			return fmt.Errorf("--metadata is not valid JSON")
+		}
+		meta = raw
+	}
+
 	// Build SendRequest
-	sr := &botapi.SendRequest{
-		GroupChatID: cfg.ChatID,
-	}
-
-	if message != "" {
-		sr.Notification = &botapi.SendNotification{
-			Status: status,
-			Body:   message,
-		}
-		if silent {
-			sr.Notification.Opts = &botapi.NotificationMsgOpts{
-				SilentResponse: true,
-			}
-		}
-		if metadata != "" {
-			raw := json.RawMessage(metadata)
-			if !json.Valid(raw) {
-				return fmt.Errorf("--metadata is not valid JSON")
-			}
-			sr.Notification.Metadata = raw
-		}
-	}
-
-	if fileAttachment != nil {
-		sr.File = fileAttachment
-	}
-
-	if stealth || forceDND || noNotify {
-		sr.Opts = &botapi.SendOpts{
-			StealthMode: stealth,
-		}
-		if forceDND || noNotify {
-			sr.Opts.NotificationOpts = &botapi.DeliveryOpts{
-				ForceDND: forceDND,
-			}
-			if noNotify {
-				f := false
-				sr.Opts.NotificationOpts.Send = &f
-			}
-		}
-	}
+	sr := botapi.BuildSendRequest(&botapi.SendParams{
+		ChatID:   cfg.ChatID,
+		Message:  message,
+		Status:   status,
+		File:     fileAttachment,
+		Metadata: meta,
+		Silent:   silent,
+		Stealth:  stealth,
+		ForceDND: forceDND,
+		NoNotify: noNotify,
+	})
 
 	// Authenticate and send
 	tok, cache, err := authenticate(cfg)

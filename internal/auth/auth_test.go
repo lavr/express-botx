@@ -70,8 +70,7 @@ func TestGetToken(t *testing.T) {
 	expectedSig := "test-signature"
 	expectedToken := "abc123token"
 
-	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// Verify request
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		wantPath := "/api/v2/botx/bots/" + botID + "/token"
 		if r.URL.Path != wantPath {
 			t.Errorf("path = %q, want %q", r.URL.Path, wantPath)
@@ -92,7 +91,7 @@ func TestGetToken(t *testing.T) {
 	defer srv.Close()
 
 	ctx := context.Background()
-	token, err := getTokenWithClient(ctx, srv.URL, botID, expectedSig, srv.Client())
+	token, err := GetToken(ctx, srv.URL, botID, expectedSig)
 	if err != nil {
 		t.Fatalf("GetToken() error: %v", err)
 	}
@@ -102,13 +101,13 @@ func TestGetToken(t *testing.T) {
 }
 
 func TestGetToken_HTTPError(t *testing.T) {
-	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusUnauthorized)
 	}))
 	defer srv.Close()
 
 	ctx := context.Background()
-	_, err := getTokenWithClient(ctx, srv.URL, "bot-id", "sig", srv.Client())
+	_, err := GetToken(ctx, srv.URL, "bot-id", "sig")
 	if err == nil {
 		t.Fatal("expected error for 401 response")
 	}
@@ -118,13 +117,13 @@ func TestGetToken_HTTPError(t *testing.T) {
 }
 
 func TestGetToken_BadJSON(t *testing.T) {
-	srv := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte("not json"))
 	}))
 	defer srv.Close()
 
 	ctx := context.Background()
-	_, err := getTokenWithClient(ctx, srv.URL, "bot-id", "sig", srv.Client())
+	_, err := GetToken(ctx, srv.URL, "bot-id", "sig")
 	if err == nil {
 		t.Fatal("expected error for bad JSON")
 	}

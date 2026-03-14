@@ -11,6 +11,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/lavr/express-botx/internal/botapi"
 	vlog "github.com/lavr/express-botx/internal/log"
 )
 
@@ -28,16 +29,12 @@ type tokenResponse struct {
 }
 
 // GetToken obtains a bot token from BotX API.
+// Host can be a hostname ("express.company.ru") or a full URL ("http://localhost:8080").
 // Endpoint: GET /api/v2/botx/bots/{bot_id}/token?signature={sig}
 func GetToken(ctx context.Context, host, botID, signature string) (string, error) {
-	url := fmt.Sprintf("https://%s/api/v2/botx/bots/%s/token?signature=%s", host, botID, signature)
-	client := &http.Client{Timeout: 30 * time.Second}
-	return doGetToken(ctx, url, client)
-}
-
-// getTokenWithClient is used by tests with a custom HTTP client (e.g., TLS test server).
-func getTokenWithClient(ctx context.Context, baseURL, botID, signature string, client *http.Client) (string, error) {
+	baseURL := botapi.ResolveBaseURL(host)
 	url := fmt.Sprintf("%s/api/v2/botx/bots/%s/token?signature=%s", baseURL, botID, signature)
+	client := &http.Client{Timeout: 30 * time.Second}
 	return doGetToken(ctx, url, client)
 }
 

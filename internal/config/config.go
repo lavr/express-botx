@@ -26,6 +26,7 @@ type Config struct {
 	BotName    string `yaml:"-"`
 	ChatID     string `yaml:"-"`
 	Format     string `yaml:"-"`
+	multiBot   bool   // true when serve starts with multiple bots, no --bot
 	configPath string
 }
 
@@ -117,12 +118,14 @@ func Load(flags Flags) (*Config, error) {
 		}
 	}
 
-	// Layer 2: resolve bot from config
-	if err := cfg.resolveBot(flags.Bot); err != nil {
-		return nil, err
-	}
-	if cfg.BotName != "" {
-		vlog.V1("config: using bot %q (%s)", cfg.BotName, cfg.Host)
+	// Layer 2: resolve bot from config (defer multi-bot error until after env/flags)
+	if flags.Bot != "" || len(cfg.Bots) <= 1 {
+		if err := cfg.resolveBot(flags.Bot); err != nil {
+			return nil, err
+		}
+		if cfg.BotName != "" {
+			vlog.V1("config: using bot %q (%s)", cfg.BotName, cfg.Host)
+		}
 	}
 
 	// Layer 3: environment variables (override resolved bot)
@@ -132,6 +135,14 @@ func Load(flags Flags) (*Config, error) {
 	applyFlags(cfg, flags)
 
 	vlog.V2("config: host=%s bot_id=%s cache=%s", cfg.Host, cfg.BotID, cfg.Cache.Type)
+
+	// Multiple bots, no --bot: error only if env/flags didn't provide full credentials
+	if flags.Bot == "" && len(cfg.Bots) > 1 && cfg.BotName == "" {
+		if cfg.Host == "" || cfg.BotID == "" || cfg.BotSecret == "" {
+			return nil, fmt.Errorf("multiple bots configured, specify one with --bot: %s", cfg.botNames())
+		}
+		vlog.V1("config: using bot from env/flags (%s)", cfg.Host)
+	}
 
 	// Validate required fields
 	if cfg.Host == "" {
@@ -145,6 +156,82 @@ func Load(flags Flags) (*Config, error) {
 	}
 
 	return cfg, nil
+}
+
+// LoadForServe reads configuration for the serve command.
+// Unlike Load, it does not require a single bot to be resolved when multiple bots are configured.
+// In multi-bot mode, the bot is selected per-request.
+func LoadForServe(flags Flags) (*Config, error) {
+	cfg := &Config{
+		Cache: CacheConfig{
+			Type: "file",
+			TTL:  31536000,
+		},
+	}
+
+	// Layer 1: YAML file
+	configPath := flags.ConfigPath
+	explicit := configPath != ""
+	if !explicit {
+		configPath = findConfigFile()
+	}
+	cfg.configPath = configPath
+	if configPath != "" {
+		if data, err := os.ReadFile(configPath); err == nil {
+			vlog.V1("config: loaded from %s", configPath)
+			if err := yaml.Unmarshal(data, cfg); err != nil {
+				return nil, fmt.Errorf("parsing config %s: %w", configPath, err)
+			}
+		} else if explicit {
+			return nil, fmt.Errorf("reading config %s: %w", configPath, err)
+		} else {
+			vlog.V2("config: %s not found, skipping", configPath)
+		}
+	}
+
+	// Layer 2: resolve bot — only if --bot is specified or there is exactly one bot
+	if flags.Bot != "" || len(cfg.Bots) <= 1 {
+		if err := cfg.resolveBot(flags.Bot); err != nil {
+			return nil, err
+		}
+		if cfg.BotName != "" {
+			vlog.V1("config: using bot %q (%s)", cfg.BotName, cfg.Host)
+		}
+	}
+
+	// Layer 3: environment variables
+	applyEnv(cfg)
+
+	// Layer 4: CLI flags
+	applyFlags(cfg, flags)
+
+	// Determine multi-bot mode AFTER all overrides are applied.
+	// If --bot was not specified, there are multiple bots in config,
+	// and env/flags did not supply host+bot_id+secret — it's multi-bot.
+	if flags.Bot == "" && len(cfg.Bots) > 1 && (cfg.Host == "" || cfg.BotID == "" || cfg.BotSecret == "") {
+		cfg.multiBot = true
+		vlog.V1("config: multi-bot mode (%d bots)", len(cfg.Bots))
+	}
+
+	// Validate required fields only in single-bot mode
+	if !cfg.multiBot {
+		if cfg.Host == "" {
+			return nil, fmt.Errorf("host is required (--host, EXPRESS_HOST, or config file)")
+		}
+		if cfg.BotID == "" {
+			return nil, fmt.Errorf("bot id is required (--bot-uuid, EXPRESS_BOT_ID, or config file)")
+		}
+		if cfg.BotSecret == "" {
+			return nil, fmt.Errorf("bot secret is required (--secret, EXPRESS_SECRET, or config file)")
+		}
+	}
+
+	return cfg, nil
+}
+
+// IsMultiBot returns true if the config was loaded in multi-bot serve mode.
+func (c *Config) IsMultiBot() bool {
+	return c.multiBot
 }
 
 // CacheKey returns the composite cache key for token storage.
@@ -182,12 +269,17 @@ func (c *Config) resolveBot(botFlag string) error {
 }
 
 func (c *Config) botNames() string {
+	return strings.Join(c.BotNames(), ", ")
+}
+
+// BotNames returns sorted bot names from the config.
+func (c *Config) BotNames() []string {
 	names := make([]string, 0, len(c.Bots))
 	for k := range c.Bots {
 		names = append(names, k)
 	}
 	sort.Strings(names)
-	return strings.Join(names, ", ")
+	return names
 }
 
 // ValidateFormat returns an error if Format is not "text" or "json".

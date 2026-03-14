@@ -16,6 +16,7 @@ import (
 
 // SendPayload is the parsed request for sending a message.
 type SendPayload struct {
+	Bot      string          `json:"bot,omitempty"`
 	ChatID   string          `json:"chat_id"`
 	Message  string          `json:"message"`
 	File     *FilePayload    `json:"file,omitempty"`
@@ -64,6 +65,14 @@ func (s *Server) handleSend(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, err.Error())
 		return
 	}
+
+	// Resolve bot in multi-bot mode
+	resolvedBot, errMsg := s.resolveRequestBot(r.Context(), payload.Bot)
+	if errMsg != "" {
+		writeError(w, http.StatusBadRequest, errMsg)
+		return
+	}
+	payload.Bot = resolvedBot
 
 	if payload.ChatID == "" {
 		writeError(w, http.StatusBadRequest, "chat_id is required")
@@ -120,6 +129,7 @@ func parseMultipart(r *http.Request, p *SendPayload) error {
 		return fmt.Errorf("parsing multipart form: %w", err)
 	}
 
+	p.Bot = r.FormValue("bot")
 	p.ChatID = r.FormValue("chat_id")
 	p.Message = r.FormValue("message")
 	p.Status = r.FormValue("status")

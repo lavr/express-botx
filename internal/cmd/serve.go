@@ -47,7 +47,7 @@ Options:
 		return err
 	}
 
-	cfg, err := config.Load(flags)
+	cfg, err := config.LoadForServe(flags)
 	if err != nil {
 		return err
 	}
@@ -105,12 +105,25 @@ Options:
 
 	// Bot secret auth
 	if cfg.Server.AllowBotSecretAuth {
-		secretKey, err := secret.Resolve(cfg.BotSecret)
-		if err != nil {
-			return fmt.Errorf("resolving bot secret for auth: %w", err)
+		srvCfg.BotSignatures = make(map[string]string)
+		if cfg.IsMultiBot() {
+			// Multi-bot: collect signatures from all bots, bind each to its name
+			for name, bot := range cfg.Bots {
+				secretKey, err := secret.Resolve(bot.Secret)
+				if err != nil {
+					return fmt.Errorf("resolving secret for bot %q: %w", name, err)
+				}
+				srvCfg.BotSignatures[auth.BuildSignature(bot.ID, secretKey)] = name
+			}
+		} else {
+			secretKey, err := secret.Resolve(cfg.BotSecret)
+			if err != nil {
+				return fmt.Errorf("resolving bot secret for auth: %w", err)
+			}
+			// Single-bot: empty bot name — no binding needed
+			srvCfg.BotSignatures[auth.BuildSignature(cfg.BotID, secretKey)] = ""
 		}
 		srvCfg.AllowBotSecretAuth = true
-		srvCfg.BotSignature = auth.BuildSignature(cfg.BotID, secretKey)
 	}
 
 	if len(keys) == 0 && !srvCfg.AllowBotSecretAuth {
@@ -118,29 +131,79 @@ Options:
 	}
 	srvCfg.Keys = keys
 
-	// Authenticate with BotX API
-	tok, cache, err := authenticate(cfg)
-	if err != nil {
-		return err
-	}
-	client := botapi.NewClient(cfg.Host, tok)
+	// Build send function and authenticate
+	var sendFn server.SendFunc
 
-	// Build send function with token refresh
-	sendFn := func(ctx context.Context, p *server.SendPayload) (string, error) {
-		sr := buildSendRequest(p)
-		syncID, err := client.SendWithSyncID(ctx, sr)
-		if err != nil {
-			if errors.Is(err, botapi.ErrUnauthorized) {
-				newTok, refreshErr := refreshToken(cfg, cache)
-				if refreshErr != nil {
-					return "", fmt.Errorf("refreshing token: %w", refreshErr)
-				}
-				client.Token = newTok
-				return client.SendWithSyncID(ctx, sr)
+	if cfg.IsMultiBot() {
+		// Multi-bot mode: authenticate all bots, build dispatcher
+		senders := make(map[string]server.SendFunc, len(cfg.Bots))
+		botNames := cfg.BotNames()
+		for _, name := range botNames {
+			bot := cfg.Bots[name]
+			botCfg := *cfg
+			botCfg.Host = bot.Host
+			botCfg.BotID = bot.ID
+			botCfg.BotSecret = bot.Secret
+			botCfg.BotName = name
+
+			tok, cache, err := authenticate(&botCfg)
+			if err != nil {
+				return fmt.Errorf("authenticating bot %q: %w", name, err)
 			}
-			return "", err
+			client := botapi.NewClient(botCfg.Host, tok)
+			localCfg := botCfg
+			localCache := cache
+
+			senders[name] = func(ctx context.Context, p *server.SendPayload) (string, error) {
+				sr := buildSendRequest(p)
+				syncID, err := client.SendWithSyncID(ctx, sr)
+				if err != nil {
+					if errors.Is(err, botapi.ErrUnauthorized) {
+						newTok, refreshErr := refreshToken(&localCfg, localCache)
+						if refreshErr != nil {
+							return "", fmt.Errorf("refreshing token: %w", refreshErr)
+						}
+						client.Token = newTok
+						return client.SendWithSyncID(ctx, sr)
+					}
+					return "", err
+				}
+				return syncID, nil
+			}
+
+			vlog.V1("serve: bot %q authenticated (%s)", name, bot.Host)
 		}
-		return syncID, nil
+
+		srvCfg.BotNames = botNames
+
+		sendFn = func(ctx context.Context, p *server.SendPayload) (string, error) {
+			fn := senders[p.Bot]
+			return fn(ctx, p)
+		}
+	} else {
+		// Single-bot mode
+		tok, cache, err := authenticate(cfg)
+		if err != nil {
+			return err
+		}
+		client := botapi.NewClient(cfg.Host, tok)
+
+		sendFn = func(ctx context.Context, p *server.SendPayload) (string, error) {
+			sr := buildSendRequest(p)
+			syncID, err := client.SendWithSyncID(ctx, sr)
+			if err != nil {
+				if errors.Is(err, botapi.ErrUnauthorized) {
+					newTok, refreshErr := refreshToken(cfg, cache)
+					if refreshErr != nil {
+						return "", fmt.Errorf("refreshing token: %w", refreshErr)
+					}
+					client.Token = newTok
+					return client.SendWithSyncID(ctx, sr)
+				}
+				return "", err
+			}
+			return syncID, nil
+		}
 	}
 
 	// Build chat resolver
@@ -212,51 +275,22 @@ func resolveAPIKeys(keys []config.APIKeyConfig) ([]server.ResolvedKey, error) {
 }
 
 func buildSendRequest(p *server.SendPayload) *botapi.SendRequest {
-	sr := &botapi.SendRequest{
-		GroupChatID: p.ChatID,
+	params := &botapi.SendParams{
+		ChatID:   p.ChatID,
+		Message:  p.Message,
+		Status:   p.Status,
+		Metadata: p.Metadata,
 	}
-
-	if p.Message != "" {
-		sr.Notification = &botapi.SendNotification{
-			Status:   p.Status,
-			Body:     p.Message,
-			Metadata: p.Metadata,
-		}
-		if p.Opts != nil && p.Opts.Silent {
-			sr.Notification.Opts = &botapi.NotificationMsgOpts{
-				SilentResponse: true,
-			}
-		}
-	}
-
 	if p.File != nil {
-		sr.File = botapi.BuildFileAttachmentFromBase64(p.File.Name, p.File.Data)
+		params.File = botapi.BuildFileAttachmentFromBase64(p.File.Name, p.File.Data)
 	}
-
-	if p.Opts != nil && (p.Opts.Stealth || p.Opts.ForceDND || p.Opts.NoNotify) {
-		sr.Opts = &botapi.SendOpts{
-			StealthMode: p.Opts.Stealth,
-		}
-		if p.Opts.ForceDND || p.Opts.NoNotify {
-			sr.Opts.NotificationOpts = &botapi.DeliveryOpts{
-				ForceDND: p.Opts.ForceDND,
-			}
-			if p.Opts.NoNotify {
-				f := false
-				sr.Opts.NotificationOpts.Send = &f
-			}
-		}
+	if p.Opts != nil {
+		params.Silent = p.Opts.Silent
+		params.Stealth = p.Opts.Stealth
+		params.ForceDND = p.Opts.ForceDND
+		params.NoNotify = p.Opts.NoNotify
 	}
-
-	// If only file (no message) but we have metadata, still create notification
-	if sr.Notification == nil && len(p.Metadata) > 0 {
-		sr.Notification = &botapi.SendNotification{
-			Status:   p.Status,
-			Metadata: p.Metadata,
-		}
-	}
-
-	return sr
+	return botapi.BuildSendRequest(params)
 }
 
 func buildAlertmanagerConfig(am *config.AlertmanagerYAMLConfig, configPath string) (*server.AlertmanagerConfig, error) {

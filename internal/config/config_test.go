@@ -141,6 +141,70 @@ bots:
 	}
 }
 
+func TestLoad_MultipleBots_EnvOverride(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "config.yaml")
+	content := `
+bots:
+  prod:
+    host: prod.com
+    id: prod-bot
+    secret: prod-secret
+  test:
+    host: test.com
+    id: test-bot
+    secret: test-secret
+`
+	if err := os.WriteFile(cfgPath, []byte(content), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	t.Setenv("EXPRESS_HOST", "env.com")
+	t.Setenv("EXPRESS_BOT_ID", "env-bot")
+	t.Setenv("EXPRESS_SECRET", "env-secret")
+
+	cfg, err := Load(Flags{ConfigPath: cfgPath})
+	if err != nil {
+		t.Fatalf("Load() should succeed when env provides full credentials: %v", err)
+	}
+	if cfg.Host != "env.com" {
+		t.Errorf("Host = %q, want %q", cfg.Host, "env.com")
+	}
+	if cfg.BotID != "env-bot" {
+		t.Errorf("BotID = %q, want %q", cfg.BotID, "env-bot")
+	}
+}
+
+func TestLoad_MultipleBots_PartialEnv_StillErrors(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "config.yaml")
+	content := `
+bots:
+  prod:
+    host: prod.com
+    id: prod-bot
+    secret: prod-secret
+  test:
+    host: test.com
+    id: test-bot
+    secret: test-secret
+`
+	if err := os.WriteFile(cfgPath, []byte(content), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Only partial env — should still error
+	t.Setenv("EXPRESS_HOST", "env.com")
+
+	_, err := Load(Flags{ConfigPath: cfgPath})
+	if err == nil {
+		t.Fatal("expected error for multiple bots with partial env")
+	}
+	if !strings.Contains(err.Error(), "multiple bots") {
+		t.Errorf("error = %q, should mention multiple bots", err.Error())
+	}
+}
+
 func TestLoad_MultipleBots_WithFlag(t *testing.T) {
 	dir := t.TempDir()
 	cfgPath := filepath.Join(dir, "config.yaml")
@@ -538,6 +602,183 @@ func TestLoad_EnvCacheTTL(t *testing.T) {
 	}
 	if cfg.Cache.TTL != 600 {
 		t.Errorf("Cache.TTL = %d, want 600", cfg.Cache.TTL)
+	}
+}
+
+// --- LoadForServe ---
+
+func TestLoadForServe_MultipleBots_NoFlag(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "config.yaml")
+	content := `
+bots:
+  prod:
+    host: prod.com
+    id: prod-bot
+    secret: prod-secret
+  test:
+    host: test.com
+    id: test-bot
+    secret: test-secret
+`
+	if err := os.WriteFile(cfgPath, []byte(content), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := LoadForServe(Flags{ConfigPath: cfgPath})
+	if err != nil {
+		t.Fatalf("LoadForServe() should not error for multi-bot: %v", err)
+	}
+	if !cfg.IsMultiBot() {
+		t.Fatal("expected IsMultiBot() = true")
+	}
+	if len(cfg.Bots) != 2 {
+		t.Errorf("expected 2 bots, got %d", len(cfg.Bots))
+	}
+	// Host/BotID/BotSecret should NOT be resolved
+	if cfg.BotID != "" {
+		t.Errorf("BotID should be empty in multi-bot mode, got %q", cfg.BotID)
+	}
+}
+
+func TestLoadForServe_MultipleBots_WithFlag(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "config.yaml")
+	content := `
+bots:
+  prod:
+    host: prod.com
+    id: prod-bot
+    secret: prod-secret
+  test:
+    host: test.com
+    id: test-bot
+    secret: test-secret
+`
+	if err := os.WriteFile(cfgPath, []byte(content), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := LoadForServe(Flags{ConfigPath: cfgPath, Bot: "prod"})
+	if err != nil {
+		t.Fatalf("LoadForServe() error: %v", err)
+	}
+	if cfg.IsMultiBot() {
+		t.Fatal("expected IsMultiBot() = false when --bot specified")
+	}
+	if cfg.Host != "prod.com" {
+		t.Errorf("Host = %q, want %q", cfg.Host, "prod.com")
+	}
+}
+
+func TestLoadForServe_SingleBot(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "config.yaml")
+	content := `
+bots:
+  main:
+    host: h
+    id: b
+    secret: s
+`
+	if err := os.WriteFile(cfgPath, []byte(content), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := LoadForServe(Flags{ConfigPath: cfgPath})
+	if err != nil {
+		t.Fatalf("LoadForServe() error: %v", err)
+	}
+	if cfg.IsMultiBot() {
+		t.Fatal("expected IsMultiBot() = false for single bot")
+	}
+	if cfg.Host != "h" {
+		t.Errorf("Host = %q, want %q", cfg.Host, "h")
+	}
+}
+
+func TestLoadForServe_EnvOverridesCollapsesToSingleBot(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "config.yaml")
+	content := `
+bots:
+  prod:
+    host: prod.com
+    id: prod-bot
+    secret: prod-secret
+  test:
+    host: test.com
+    id: test-bot
+    secret: test-secret
+`
+	if err := os.WriteFile(cfgPath, []byte(content), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// If env provides full bot credentials, multi-bot should collapse to single-bot
+	t.Setenv("EXPRESS_HOST", "env.com")
+	t.Setenv("EXPRESS_BOT_ID", "env-bot")
+	t.Setenv("EXPRESS_SECRET", "env-secret")
+
+	cfg, err := LoadForServe(Flags{ConfigPath: cfgPath})
+	if err != nil {
+		t.Fatalf("LoadForServe() error: %v", err)
+	}
+	if cfg.IsMultiBot() {
+		t.Fatal("expected IsMultiBot() = false when env provides full credentials")
+	}
+	if cfg.Host != "env.com" {
+		t.Errorf("Host = %q, want %q", cfg.Host, "env.com")
+	}
+}
+
+func TestLoadForServe_PartialEnvStaysMultiBot(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "config.yaml")
+	content := `
+bots:
+  prod:
+    host: prod.com
+    id: prod-bot
+    secret: prod-secret
+  test:
+    host: test.com
+    id: test-bot
+    secret: test-secret
+`
+	if err := os.WriteFile(cfgPath, []byte(content), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	// Only partial env — should stay multi-bot
+	t.Setenv("EXPRESS_HOST", "env.com")
+
+	cfg, err := LoadForServe(Flags{ConfigPath: cfgPath})
+	if err != nil {
+		t.Fatalf("LoadForServe() error: %v", err)
+	}
+	if !cfg.IsMultiBot() {
+		t.Fatal("expected IsMultiBot() = true when env only partially overrides")
+	}
+}
+
+func TestBotNames(t *testing.T) {
+	cfg := &Config{
+		Bots: map[string]BotConfig{
+			"prod": {Host: "p"},
+			"test": {Host: "t"},
+			"dev":  {Host: "d"},
+		},
+	}
+	names := cfg.BotNames()
+	want := []string{"dev", "prod", "test"}
+	if len(names) != len(want) {
+		t.Fatalf("BotNames() = %v, want %v", names, want)
+	}
+	for i, n := range names {
+		if n != want[i] {
+			t.Errorf("BotNames()[%d] = %q, want %q", i, n, want[i])
+		}
 	}
 }
 
