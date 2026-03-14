@@ -9,9 +9,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
-	"sync"
 	"syscall"
-	"time"
 
 	"github.com/lavr/express-botx/internal/apm"
 	"github.com/lavr/express-botx/internal/auth"
@@ -344,83 +342,49 @@ func buildGrafanaConfig(gr *config.GrafanaYAMLConfig, configPath string) (*serve
 	}, nil
 }
 
-// botSender wraps a bot client with graceful startup: if authentication fails
-// at startup, it retries in the background. Requests return 503 until ready.
+// botSender wraps a bot client with lazy authentication: if auth fails at
+// startup, the first request triggers authentication on the fly.
 type botSender struct {
 	cfg    *config.Config
 	client *botapi.Client
 	cache  token.Cache
-	mu     sync.RWMutex
-	ready  bool
-	done   chan struct{}
 }
 
 func newBotSender(cfg *config.Config, failFast bool) (*botSender, error) {
-	bs := &botSender{
-		cfg:  cfg,
-		done: make(chan struct{}),
-	}
-
 	name := cfg.BotName
 	if name == "" {
 		name = cfg.Host
 	}
 
 	tok, cache, err := authenticate(cfg)
-	bs.cache = cache
 	if err != nil {
 		if failFast {
 			return nil, fmt.Errorf("authenticating bot %s: %w", name, err)
 		}
-		vlog.Info("serve: bot %s auth failed, will retry in background: %v", name, err)
-		bs.client = botapi.NewClient(cfg.Host, "")
-		go bs.retryAuth()
-	} else {
-		bs.client = botapi.NewClient(cfg.Host, tok)
-		bs.ready = true
-		close(bs.done)
-		vlog.Info("serve: bot %s authenticated", name)
+		vlog.Info("serve: bot %s auth failed at startup, will authenticate on first request: %v", name, err)
+		return &botSender{
+			cfg:    cfg,
+			client: botapi.NewClient(cfg.Host, ""),
+			cache:  cache,
+		}, nil
 	}
 
-	return bs, nil
-}
-
-func (bs *botSender) retryAuth() {
-	ticker := time.NewTicker(10 * time.Second)
-	defer ticker.Stop()
-	for range ticker.C {
-		name := bs.cfg.BotName
-		if name == "" {
-			name = bs.cfg.Host
-		}
-		vlog.V2("serve: retrying auth for bot %s", name)
-		tok, cache, err := authenticate(bs.cfg)
-		if err != nil {
-			vlog.Info("serve: bot %s auth retry failed: %v", name, err)
-			continue
-		}
-		bs.mu.Lock()
-		bs.client.Token = tok
-		bs.cache = cache
-		bs.ready = true
-		bs.mu.Unlock()
-		close(bs.done)
-		vlog.Info("serve: bot %s authenticated", name)
-		return
-	}
+	vlog.Info("serve: bot %s authenticated", name)
+	return &botSender{
+		cfg:    cfg,
+		client: botapi.NewClient(cfg.Host, tok),
+		cache:  cache,
+	}, nil
 }
 
 func (bs *botSender) Send(ctx context.Context, p *server.SendPayload) (string, error) {
-	bs.mu.RLock()
-	ready := bs.ready
-	bs.mu.RUnlock()
-
-	if !ready {
-		name := bs.cfg.BotName
-		if name == "" {
-			name = bs.cfg.Host
+	// Lazy auth: if token is empty, authenticate now
+	if bs.client.Token == "" {
+		tok, err := refreshToken(bs.cfg, bs.cache)
+		if err != nil {
+			return "", fmt.Errorf("authenticating bot: %w", err)
 		}
-		return "", fmt.Errorf("bot %q is not ready: authentication pending, retrying in background", name)
+		bs.client.Token = tok
 	}
 
 	sr := buildSendRequest(p)
@@ -431,9 +395,7 @@ func (bs *botSender) Send(ctx context.Context, p *server.SendPayload) (string, e
 			if refreshErr != nil {
 				return "", fmt.Errorf("refreshing token: %w", refreshErr)
 			}
-			bs.mu.Lock()
 			bs.client.Token = newTok
-			bs.mu.Unlock()
 			return bs.client.SendWithSyncID(ctx, sr)
 		}
 		return "", err
