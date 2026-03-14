@@ -84,6 +84,12 @@ Options:
 		srvCfg.BasePath = "/api/v1"
 	}
 
+	// External URL for OpenAPI docs
+	srvCfg.ExternalURL = cfg.Server.ExternalURL
+	if v := os.Getenv("EXPRESS_BOTX_SERVER_EXTERNAL_URL"); v != "" {
+		srvCfg.ExternalURL = v
+	}
+
 	// Docs: enabled by default
 	srvCfg.EnableDocs = true
 	if cfg.Server.Docs != nil && !*cfg.Server.Docs {

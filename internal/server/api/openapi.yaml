@@ -2,7 +2,7 @@ openapi: "3.1.0"
 info:
   title: express-botx API
   description: HTTP API for sending messages to eXpress corporate messenger via BotX API. Supports webhooks from Alertmanager and Grafana.
-  version: "0.11.0"
+  version: "0.16.0"
   license:
     name: MIT
     url: https://github.com/lavr/express-botx/blob/main/LICENSE

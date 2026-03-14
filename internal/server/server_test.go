@@ -1305,6 +1305,117 @@ func TestDocs_Enabled(t *testing.T) {
 	}
 }
 
+func TestResolveOrigin(t *testing.T) {
+	tests := []struct {
+		name       string
+		extScheme  string
+		extHost    string
+		headers    map[string]string
+		reqHost    string
+		wantScheme string
+		wantHost   string
+	}{
+		{
+			name:       "external URL takes priority",
+			extScheme:  "https",
+			extHost:    "express-botx.invitro-dev.k8s",
+			headers:    map[string]string{"X-Forwarded-Host": "other.host", "X-Forwarded-Proto": "http"},
+			reqHost:    "localhost:8080",
+			wantScheme: "https",
+			wantHost:   "express-botx.invitro-dev.k8s",
+		},
+		{
+			name:       "external URL without scheme defaults to http",
+			extHost:    "express-botx.invitro-dev.k8s",
+			reqHost:    "localhost:8080",
+			wantScheme: "http",
+			wantHost:   "express-botx.invitro-dev.k8s",
+		},
+		{
+			name:       "X-Forwarded headers",
+			headers:    map[string]string{"X-Forwarded-Host": "app.example.com", "X-Forwarded-Proto": "https"},
+			reqHost:    "localhost:8080",
+			wantScheme: "https",
+			wantHost:   "app.example.com",
+		},
+		{
+			name:       "X-Forwarded-Host only, scheme defaults to http",
+			headers:    map[string]string{"X-Forwarded-Host": "app.example.com"},
+			reqHost:    "localhost:8080",
+			wantScheme: "http",
+			wantHost:   "app.example.com",
+		},
+		{
+			name:       "Host header fallback",
+			reqHost:    "myhost:9090",
+			wantScheme: "http",
+			wantHost:   "myhost:9090",
+		},
+		{
+			name:       "strip default http port 80",
+			headers:    map[string]string{"X-Forwarded-Host": "app.example.com:80", "X-Forwarded-Proto": "http"},
+			wantScheme: "http",
+			wantHost:   "app.example.com",
+		},
+		{
+			name:       "strip default https port 443",
+			headers:    map[string]string{"X-Forwarded-Host": "app.example.com:443", "X-Forwarded-Proto": "https"},
+			wantScheme: "https",
+			wantHost:   "app.example.com",
+		},
+		{
+			name:       "keep non-default port",
+			headers:    map[string]string{"X-Forwarded-Host": "app.example.com:8443", "X-Forwarded-Proto": "https"},
+			wantScheme: "https",
+			wantHost:   "app.example.com:8443",
+		},
+		{
+			name:       "no headers and no host defaults to localhost:8080",
+			wantScheme: "http",
+			wantHost:   "localhost:8080",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			r := httptest.NewRequest("GET", "/openapi.yaml", nil)
+			r.Host = tt.reqHost
+			for k, v := range tt.headers {
+				r.Header.Set(k, v)
+			}
+			scheme, host := resolveOrigin(r, tt.extScheme, tt.extHost)
+			if scheme != tt.wantScheme {
+				t.Errorf("scheme = %q, want %q", scheme, tt.wantScheme)
+			}
+			if host != tt.wantHost {
+				t.Errorf("host = %q, want %q", host, tt.wantHost)
+			}
+		})
+	}
+}
+
+func TestDocs_OpenAPISpecReplacesHostAndScheme(t *testing.T) {
+	srv := newTestServer([]ResolvedKey{{Name: "t", Key: "k"}}, func(c *Config) {
+		c.EnableDocs = true
+		c.ExternalURL = "https://express-botx.invitro-dev.k8s"
+	})
+
+	w := doRequest(srv, "GET", "/docs/openapi.yaml", nil, nil)
+	if w.Code != 200 {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	body := w.Body.String()
+	if !strings.Contains(body, "default: express-botx.invitro-dev.k8s") {
+		t.Errorf("expected host from external_url, got:\n%s", body)
+	}
+	if !strings.Contains(body, "default: https\n") {
+		t.Errorf("expected scheme https from external_url, got:\n%s", body)
+	}
+	if strings.Contains(body, "localhost:8080") {
+		t.Error("spec should not contain localhost:8080")
+	}
+}
+
 func TestDocs_Disabled(t *testing.T) {
 	srv := newTestServer([]ResolvedKey{{Name: "t", Key: "k"}}, func(c *Config) {
 		c.EnableDocs = false

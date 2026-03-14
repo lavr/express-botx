@@ -26,6 +26,7 @@ type Config struct {
 	BotSignatures      map[string]string // signature -> bot name (multi-bot) or "" (single-bot)
 	BotNames           []string          // available bot names; if len > 1, bot is required in requests
 	EnableDocs         bool              // serve /docs (Swagger UI) and /docs/openapi.yaml
+	ExternalURL        string            // public URL for OpenAPI docs server variable
 }
 
 // Server is the HTTP server for express-botx.
@@ -105,7 +106,7 @@ func New(cfg Config, sendFn SendFunc, chatResolver ChatResolver, opts ...Option)
 	mux.HandleFunc("GET /healthz", s.handleHealthz)
 
 	if cfg.EnableDocs {
-		mux.Handle("/docs/", http.StripPrefix("/docs", docsHandler()))
+		mux.Handle("/docs/", http.StripPrefix("/docs", docsHandler(cfg.ExternalURL)))
 		mux.HandleFunc("GET /docs", func(w http.ResponseWriter, r *http.Request) {
 			http.Redirect(w, r, "/docs/", http.StatusMovedPermanently)
 		})
