@@ -65,7 +65,7 @@ func runChatsList(args []string, deps Deps) error {
 		return err
 	}
 
-	client := botapi.NewClient(cfg.Host, tok)
+	client := botapi.NewClient(cfg.Host, tok, cfg.HTTPTimeout())
 	chats, err := client.ListChats(context.Background())
 	if err != nil {
 		return fmt.Errorf("listing chats: %w", err)
@@ -125,7 +125,7 @@ func runChatsInfo(args []string, deps Deps) error {
 		return err
 	}
 
-	client := botapi.NewClient(cfg.Host, tok)
+	client := botapi.NewClient(cfg.Host, tok, cfg.HTTPTimeout())
 	chat, err := client.GetChatInfo(context.Background(), cfg.ChatID)
 	if err != nil {
 		return fmt.Errorf("getting chat info: %w", err)

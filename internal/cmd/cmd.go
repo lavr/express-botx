@@ -120,7 +120,7 @@ func authenticate(cfg *config.Config) (string, token.Cache, error) {
 	}
 
 	vlog.V1("auth: cache miss, requesting new token")
-	tok, err = auth.GetToken(ctx, cfg.Host, cfg.BotID, signature)
+	tok, err = auth.GetToken(ctx, cfg.Host, cfg.BotID, signature, cfg.HTTPTimeout())
 	if err != nil {
 		return "", nil, fmt.Errorf("getting token: %w", err)
 	}
@@ -145,7 +145,7 @@ func refreshToken(cfg *config.Config, cache token.Cache) (string, error) {
 	signature := auth.BuildSignature(cfg.BotID, secretKey)
 	ctx := context.Background()
 
-	tok, err := auth.GetToken(ctx, cfg.Host, cfg.BotID, signature)
+	tok, err := auth.GetToken(ctx, cfg.Host, cfg.BotID, signature, cfg.HTTPTimeout())
 	if err != nil {
 		return "", err
 	}

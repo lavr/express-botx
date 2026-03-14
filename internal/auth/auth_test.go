@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestBuildSignature(t *testing.T) {
@@ -91,7 +92,7 @@ func TestGetToken(t *testing.T) {
 	defer srv.Close()
 
 	ctx := context.Background()
-	token, err := GetToken(ctx, srv.URL, botID, expectedSig)
+	token, err := GetToken(ctx, srv.URL, botID, expectedSig, 10*time.Second)
 	if err != nil {
 		t.Fatalf("GetToken() error: %v", err)
 	}
@@ -107,7 +108,7 @@ func TestGetToken_HTTPError(t *testing.T) {
 	defer srv.Close()
 
 	ctx := context.Background()
-	_, err := GetToken(ctx, srv.URL, "bot-id", "sig")
+	_, err := GetToken(ctx, srv.URL, "bot-id", "sig", 10*time.Second)
 	if err == nil {
 		t.Fatal("expected error for 401 response")
 	}
@@ -123,7 +124,7 @@ func TestGetToken_BadJSON(t *testing.T) {
 	defer srv.Close()
 
 	ctx := context.Background()
-	_, err := GetToken(ctx, srv.URL, "bot-id", "sig")
+	_, err := GetToken(ctx, srv.URL, "bot-id", "sig", 10*time.Second)
 	if err == nil {
 		t.Fatal("expected error for bad JSON")
 	}

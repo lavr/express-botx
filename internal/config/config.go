@@ -8,6 +8,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	vlog "github.com/lavr/express-botx/internal/log"
 	"gopkg.in/yaml.v3"
@@ -24,6 +25,7 @@ type Config struct {
 	BotID      string `yaml:"-"`
 	BotSecret  string `yaml:"-"`
 	BotName    string `yaml:"-"`
+	BotTimeout int    `yaml:"-"` // HTTP timeout in seconds (from bot config)
 	ChatID     string `yaml:"-"`
 	Format     string `yaml:"-"`
 	multiBot   bool   // true when serve starts with multiple bots, no --bot
@@ -65,9 +67,10 @@ type APIKeyConfig struct {
 }
 
 type BotConfig struct {
-	Host   string `yaml:"host"`
-	ID     string `yaml:"id"`
-	Secret string `yaml:"secret"`
+	Host    string `yaml:"host"`
+	ID      string `yaml:"id"`
+	Secret  string `yaml:"secret"`
+	Timeout int    `yaml:"timeout,omitempty"` // HTTP timeout in seconds (default: 10)
 }
 
 type CacheConfig struct {
@@ -236,6 +239,15 @@ func (c *Config) IsMultiBot() bool {
 	return c.multiBot
 }
 
+// HTTPTimeout returns the HTTP client timeout for the bot.
+// Defaults to 10 seconds if not configured.
+func (c *Config) HTTPTimeout() time.Duration {
+	if c.BotTimeout > 0 {
+		return time.Duration(c.BotTimeout) * time.Second
+	}
+	return 10 * time.Second
+}
+
 // CacheKey returns the composite cache key for token storage.
 func (c *Config) CacheKey() string {
 	return c.Host + ":" + c.BotID
@@ -251,6 +263,7 @@ func (c *Config) resolveBot(botFlag string) error {
 		c.BotID = bot.ID
 		c.BotSecret = bot.Secret
 		c.BotName = botFlag
+		c.BotTimeout = bot.Timeout
 		return nil
 	}
 
@@ -263,6 +276,7 @@ func (c *Config) resolveBot(botFlag string) error {
 			c.BotID = bot.ID
 			c.BotSecret = bot.Secret
 			c.BotName = name
+			c.BotTimeout = bot.Timeout
 		}
 	default:
 		return fmt.Errorf("multiple bots configured, specify one with --bot: %s", c.botNames())

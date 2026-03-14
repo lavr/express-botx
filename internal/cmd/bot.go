@@ -78,7 +78,7 @@ func runBotPing(args []string, deps Deps) error {
 	}
 
 	signature := auth.BuildSignature(cfg.BotID, secretKey)
-	tok, err := auth.GetToken(context.Background(), cfg.Host, cfg.BotID, signature)
+	tok, err := auth.GetToken(context.Background(), cfg.Host, cfg.BotID, signature, cfg.HTTPTimeout())
 	if err != nil {
 		if !quiet {
 			fmt.Fprintf(deps.Stdout, "FAIL auth: %v\n", err)
@@ -86,7 +86,7 @@ func runBotPing(args []string, deps Deps) error {
 		return fmt.Errorf("ping failed: %w", err)
 	}
 
-	client := botapi.NewClient(cfg.Host, tok)
+	client := botapi.NewClient(cfg.Host, tok, cfg.HTTPTimeout())
 	_, err = client.ListChats(context.Background())
 	if err != nil {
 		if !quiet {

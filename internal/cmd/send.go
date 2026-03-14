@@ -167,7 +167,7 @@ Options:
 		return err
 	}
 
-	client := botapi.NewClient(cfg.Host, tok)
+	client := botapi.NewClient(cfg.Host, tok, cfg.HTTPTimeout())
 	err = client.Send(context.Background(), sr)
 	if err != nil {
 		if errors.Is(err, botapi.ErrUnauthorized) {

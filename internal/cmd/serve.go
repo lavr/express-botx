@@ -377,7 +377,7 @@ func newBotSender(cfg *config.Config, failFast bool) (*botSender, error) {
 		vlog.Info("serve: bot %s auth failed at startup, will authenticate on first request: %v", name, err)
 		return &botSender{
 			cfg:    cfg,
-			client: botapi.NewClient(cfg.Host, ""),
+			client: botapi.NewClient(cfg.Host, "", cfg.HTTPTimeout()),
 			cache:  cache,
 		}, nil
 	}
@@ -385,7 +385,7 @@ func newBotSender(cfg *config.Config, failFast bool) (*botSender, error) {
 	vlog.Info("serve: bot %s authenticated", name)
 	return &botSender{
 		cfg:    cfg,
-		client: botapi.NewClient(cfg.Host, tok),
+		client: botapi.NewClient(cfg.Host, tok, cfg.HTTPTimeout()),
 		cache:  cache,
 	}, nil
 }

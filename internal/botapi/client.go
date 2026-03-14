@@ -25,11 +25,11 @@ type Client struct {
 
 // NewClient creates a Client for the given host and token.
 // Host can be a hostname ("express.company.ru") or a full URL ("http://localhost:8080").
-func NewClient(host, token string) *Client {
+func NewClient(host, token string, timeout time.Duration) *Client {
 	return &Client{
 		BaseURL:    ResolveBaseURL(host),
 		Token:      token,
-		HTTPClient: &http.Client{Timeout: 30 * time.Second},
+		HTTPClient: &http.Client{Timeout: timeout},
 	}
 }
 

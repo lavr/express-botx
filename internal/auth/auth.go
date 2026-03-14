@@ -31,10 +31,10 @@ type tokenResponse struct {
 // GetToken obtains a bot token from BotX API.
 // Host can be a hostname ("express.company.ru") or a full URL ("http://localhost:8080").
 // Endpoint: GET /api/v2/botx/bots/{bot_id}/token?signature={sig}
-func GetToken(ctx context.Context, host, botID, signature string) (string, error) {
+func GetToken(ctx context.Context, host, botID, signature string, timeout time.Duration) (string, error) {
 	baseURL := botapi.ResolveBaseURL(host)
 	url := fmt.Sprintf("%s/api/v2/botx/bots/%s/token?signature=%s", baseURL, botID, signature)
-	client := &http.Client{Timeout: 30 * time.Second}
+	client := &http.Client{Timeout: timeout}
 	return doGetToken(ctx, url, client)
 }
 

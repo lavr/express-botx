@@ -84,7 +84,7 @@ func runUserSearch(args []string, deps Deps) error {
 		return err
 	}
 
-	client := botapi.NewClient(cfg.Host, tok)
+	client := botapi.NewClient(cfg.Host, tok, cfg.HTTPTimeout())
 	ctx := context.Background()
 
 	var user *botapi.UserInfo
