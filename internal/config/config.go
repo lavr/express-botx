@@ -328,6 +328,46 @@ func (c *Config) BotNames() []string {
 	return names
 }
 
+// BotEntry is a bot summary for display (no secrets).
+type BotEntry struct {
+	Name string `json:"name"`
+	Host string `json:"host"`
+	ID   string `json:"id"`
+}
+
+// BotEntries returns sorted bot entries for display.
+func (c *Config) BotEntries() []BotEntry {
+	names := c.BotNames()
+	entries := make([]BotEntry, 0, len(names))
+	for _, name := range names {
+		b := c.Bots[name]
+		entries = append(entries, BotEntry{Name: name, Host: b.Host, ID: b.ID})
+	}
+	return entries
+}
+
+// ChatEntry is a chat alias summary for display.
+type ChatEntry struct {
+	Name string `json:"name"`
+	ID   string `json:"id"`
+	Bot  string `json:"bot,omitempty"`
+}
+
+// ChatEntries returns sorted chat entries for display.
+func (c *Config) ChatEntries() []ChatEntry {
+	names := make([]string, 0, len(c.Chats))
+	for k := range c.Chats {
+		names = append(names, k)
+	}
+	sort.Strings(names)
+	entries := make([]ChatEntry, 0, len(names))
+	for _, name := range names {
+		chat := c.Chats[name]
+		entries = append(entries, ChatEntry{Name: name, ID: chat.ID, Bot: chat.Bot})
+	}
+	return entries
+}
+
 // ValidateFormat returns an error if Format is not "text" or "json".
 func (c *Config) ValidateFormat() error {
 	if c.Format != "text" && c.Format != "json" {

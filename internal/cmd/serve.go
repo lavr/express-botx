@@ -219,6 +219,7 @@ Options:
 	var srvOpts []server.Option
 	srvOpts = append(srvOpts, server.WithAPM(provider))
 	srvOpts = append(srvOpts, server.WithErrTracker(tracker))
+	srvOpts = append(srvOpts, server.WithConfigInfo(runtimeBotEntries(cfg), runtimeChatEntries(cfg)))
 
 	// Alertmanager endpoint
 	if am := cfg.Server.Alertmanager; am != nil {
@@ -447,4 +448,34 @@ type sendResponseJSON struct {
 func init() {
 	// Ensure json package is used (metadata field).
 	_ = json.RawMessage{}
+}
+
+// runtimeBotEntries returns bot entries reflecting the actual runtime state.
+// In multi-bot mode, returns all configured bots.
+// In single-bot mode with a named bot, returns only that bot.
+// In single-bot mode from env/flags (unnamed), returns empty list.
+func runtimeBotEntries(cfg *config.Config) []config.BotEntry {
+	if cfg.IsMultiBot() {
+		return cfg.BotEntries()
+	}
+	if cfg.BotName == "" {
+		return nil
+	}
+	return []config.BotEntry{{Name: cfg.BotName, Host: cfg.Host, ID: cfg.BotID}}
+}
+
+// runtimeChatEntries returns chat entries reflecting the actual runtime state.
+// Bot bindings that reference bots not available at runtime are cleared.
+func runtimeChatEntries(cfg *config.Config) []config.ChatEntry {
+	entries := cfg.ChatEntries()
+	if cfg.IsMultiBot() {
+		return entries
+	}
+	// Single-bot mode: clear bot bindings that don't match the running bot
+	for i := range entries {
+		if entries[i].Bot != "" && entries[i].Bot != cfg.BotName {
+			entries[i].Bot = ""
+		}
+	}
+	return entries
 }

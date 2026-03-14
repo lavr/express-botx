@@ -613,3 +613,79 @@ server:
 		t.Fatalf("expected 200 for alertmanager with chat-bound bot, got %d: %v", code, resp)
 	}
 }
+
+func TestServeIntegration_ConfigEndpoints(t *testing.T) {
+	mock := newMockBotxAPI()
+	botxSrv := httptest.NewServer(mock.handler())
+	defer botxSrv.Close()
+
+	port := freePort(t)
+	listenAddr := fmt.Sprintf("127.0.0.1:%d", port)
+
+	cfgPath := writeTestConfig(t, fmt.Sprintf(`
+bots:
+  deploy-bot:
+    host: %s
+    id: bot-deploy
+    secret: secret-deploy
+  alert-bot:
+    host: %s
+    id: bot-alert
+    secret: secret-alert
+chats:
+  deploy:
+    id: a0000000-0000-0000-0000-000000000001
+    bot: deploy-bot
+  general: b0000000-0000-0000-0000-000000000002
+server:
+  listen: "%s"
+  api_keys:
+    - name: test
+      key: test-key
+`, botxSrv.URL, botxSrv.URL, listenAddr))
+
+	startServe(t, []string{"--config", cfgPath, "--listen", listenAddr, "--no-cache"})
+	baseURL := fmt.Sprintf("http://%s/api/v1", listenAddr)
+
+	// GET /bot/list
+	req, _ := http.NewRequest("GET", baseURL+"/bot/list", nil)
+	req.Header.Set("X-API-Key", "test-key")
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("bot/list request error: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		t.Fatalf("expected 200 for /bot/list, got %d", resp.StatusCode)
+	}
+	var bots []map[string]string
+	json.NewDecoder(resp.Body).Decode(&bots)
+	if len(bots) != 2 {
+		t.Fatalf("expected 2 bots, got %d", len(bots))
+	}
+
+	// GET /chats/alias/list
+	req, _ = http.NewRequest("GET", baseURL+"/chats/alias/list", nil)
+	req.Header.Set("X-API-Key", "test-key")
+	resp, err = http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatalf("chats/alias/list request error: %v", err)
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode != 200 {
+		t.Fatalf("expected 200 for /chats/alias/list, got %d", resp.StatusCode)
+	}
+	var chats []map[string]string
+	json.NewDecoder(resp.Body).Decode(&chats)
+	if len(chats) != 2 {
+		t.Fatalf("expected 2 chats, got %d", len(chats))
+	}
+
+	// Verify no auth → 401
+	req, _ = http.NewRequest("GET", baseURL+"/bot/list", nil)
+	resp, _ = http.DefaultClient.Do(req)
+	resp.Body.Close()
+	if resp.StatusCode != 401 {
+		t.Fatalf("expected 401 without auth, got %d", resp.StatusCode)
+	}
+}

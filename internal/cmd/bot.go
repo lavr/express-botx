@@ -6,7 +6,6 @@ import (
 	"flag"
 	"fmt"
 	"io"
-	"sort"
 	"time"
 
 	"github.com/lavr/express-botx/internal/auth"
@@ -197,23 +196,7 @@ func runBotList(args []string, deps Deps) error {
 		return err
 	}
 
-	type botEntry struct {
-		Name string `json:"name"`
-		Host string `json:"host"`
-		ID   string `json:"id"`
-	}
-
-	names := make([]string, 0, len(cfg.Bots))
-	for k := range cfg.Bots {
-		names = append(names, k)
-	}
-	sort.Strings(names)
-
-	entries := make([]botEntry, 0, len(names))
-	for _, name := range names {
-		b := cfg.Bots[name]
-		entries = append(entries, botEntry{Name: name, Host: b.Host, ID: b.ID})
-	}
+	entries := cfg.BotEntries()
 
 	return printOutput(deps.Stdout, cfg.Format, func() {
 		if len(entries) == 0 {

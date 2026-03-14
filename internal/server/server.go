@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/lavr/express-botx/internal/apm"
+	"github.com/lavr/express-botx/internal/config"
 	"github.com/lavr/express-botx/internal/errtrack"
 	vlog "github.com/lavr/express-botx/internal/log"
 )
@@ -41,9 +42,11 @@ type Server struct {
 	botNameSet map[string]bool   // valid bot names for multi-bot mode
 	apm        apm.Provider
 	errTracker errtrack.Tracker
-	amCfg      *AlertmanagerConfig
-	grCfg      *GrafanaConfig
-	srv        *http.Server
+	botEntries  []config.BotEntry  // for GET /bot/list
+	chatEntries []config.ChatEntry // for GET /chats/alias/list
+	amCfg       *AlertmanagerConfig
+	grCfg       *GrafanaConfig
+	srv         *http.Server
 }
 
 // SendFunc sends a message via the BotX API. The server calls this for each request.
@@ -134,6 +137,8 @@ func New(cfg Config, sendFn SendFunc, chatResolver ChatResolver, opts ...Option)
 	}
 
 	route("POST", "/send", s.handleSend)
+	route("GET", "/bot/list", s.handleBotList)
+	route("GET", "/chats/alias/list", s.handleChatsAliasList)
 
 	if s.amCfg != nil {
 		route("POST", "/alertmanager", s.handleAlertmanager)

@@ -10,6 +10,8 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"github.com/lavr/express-botx/internal/config"
 )
 
 // newTestServer creates a Server with stub send/chat functions for testing.
@@ -1412,6 +1414,90 @@ func TestGrafana_StatusSentToUpstream(t *testing.T) {
 }
 
 // --- docs ---
+
+// --- config endpoints ---
+
+func TestBotList(t *testing.T) {
+	cfg := Config{
+		Listen:   ":0",
+		BasePath: "/api/v1",
+		Keys:     []ResolvedKey{{Name: "t", Key: "k"}},
+	}
+	sendFn := func(ctx context.Context, p *SendPayload) (string, error) { return "", nil }
+	chatResolver := func(chatID string) (ChatResolveResult, error) { return ChatResolveResult{ChatID: chatID}, nil }
+	srv := New(cfg, sendFn, chatResolver, WithConfigInfo(
+		[]config.BotEntry{
+			{Name: "alert-bot", Host: "h2", ID: "id-2"},
+			{Name: "deploy-bot", Host: "h1", ID: "id-1"},
+		},
+		nil,
+	))
+
+	w := doRequest(srv, "GET", "/api/v1/bot/list", nil, map[string]string{"X-API-Key": "k"})
+	if w.Code != 200 {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	var bots []config.BotEntry
+	json.NewDecoder(w.Body).Decode(&bots)
+	if len(bots) != 2 {
+		t.Fatalf("expected 2 bots, got %d", len(bots))
+	}
+	if bots[0].Name != "alert-bot" {
+		t.Errorf("bots[0].Name = %q, want %q", bots[0].Name, "alert-bot")
+	}
+}
+
+func TestBotList_NoAuth(t *testing.T) {
+	srv := newTestServer([]ResolvedKey{{Name: "t", Key: "k"}})
+	w := doRequest(srv, "GET", "/api/v1/bot/list", nil, nil)
+	if w.Code != 401 {
+		t.Fatalf("expected 401, got %d", w.Code)
+	}
+}
+
+func TestChatsAliasList(t *testing.T) {
+	cfg := Config{
+		Listen:   ":0",
+		BasePath: "/api/v1",
+		Keys:     []ResolvedKey{{Name: "t", Key: "k"}},
+	}
+	sendFn := func(ctx context.Context, p *SendPayload) (string, error) { return "", nil }
+	chatResolver := func(chatID string) (ChatResolveResult, error) { return ChatResolveResult{ChatID: chatID}, nil }
+	srv := New(cfg, sendFn, chatResolver, WithConfigInfo(
+		nil,
+		[]config.ChatEntry{
+			{Name: "deploy", ID: "uuid-1", Bot: "deploy-bot"},
+			{Name: "general", ID: "uuid-2"},
+		},
+	))
+
+	w := doRequest(srv, "GET", "/api/v1/chats/alias/list", nil, map[string]string{"X-API-Key": "k"})
+	if w.Code != 200 {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	var chats []config.ChatEntry
+	json.NewDecoder(w.Body).Decode(&chats)
+	if len(chats) != 2 {
+		t.Fatalf("expected 2 chats, got %d", len(chats))
+	}
+	if chats[0].Bot != "deploy-bot" {
+		t.Errorf("chats[0].Bot = %q, want %q", chats[0].Bot, "deploy-bot")
+	}
+	if chats[1].Bot != "" {
+		t.Errorf("chats[1].Bot = %q, want empty", chats[1].Bot)
+	}
+}
+
+func TestBotList_Empty(t *testing.T) {
+	srv := newTestServer([]ResolvedKey{{Name: "t", Key: "k"}})
+	w := doRequest(srv, "GET", "/api/v1/bot/list", nil, map[string]string{"X-API-Key": "k"})
+	if w.Code != 200 {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+	if !strings.Contains(w.Body.String(), "null") && !strings.Contains(w.Body.String(), "[]") {
+		t.Errorf("expected null or [], got: %s", w.Body.String())
+	}
+}
 
 func TestDocs_Enabled(t *testing.T) {
 	srv := newTestServer([]ResolvedKey{{Name: "t", Key: "k"}}, func(c *Config) {

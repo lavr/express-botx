@@ -41,6 +41,76 @@ paths:
                     type: boolean
                     example: true
 
+  /bot/list:
+    get:
+      operationId: botList
+      summary: List configured bots
+      description: Returns the list of bots from the config file. Secrets are not exposed.
+      responses:
+        "200":
+          description: List of bots
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/BotEntry"
+              example:
+                - name: deploy-bot
+                  host: express.company.ru
+                  id: 054af49e-5e18-4dca-ad73-4f96b6de63fa
+                - name: alert-bot
+                  host: express.company.ru
+                  id: 99887766-5544-3322-1100-aabbccddeeff
+        "401":
+          description: No credentials provided
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "403":
+          description: Invalid credentials
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /chats/alias/list:
+    get:
+      operationId: chatsAliasList
+      summary: List chat aliases
+      description: Returns the list of chat aliases from the config file, including bot bindings.
+      responses:
+        "200":
+          description: List of chat aliases
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/ChatEntry"
+              example:
+                - name: deploy
+                  id: 7ee8aaa9-c6cb-5ee6-8445-7d654819b285
+                  bot: deploy-bot
+                - name: alerts
+                  id: a1b2c3d4-e5f6-7890-abcd-ef1234567890
+                  bot: alert-bot
+                - name: general
+                  id: f40f109f-3c15-577c-987a-55473e7390d1
+        "401":
+          description: No credentials provided
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "403":
+          description: Invalid credentials
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
   /send:
     post:
       operationId: send
@@ -564,6 +634,33 @@ components:
         sync_id:
           type: string
           example: "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+
+    BotEntry:
+      type: object
+      properties:
+        name:
+          type: string
+          example: deploy-bot
+        host:
+          type: string
+          example: express.company.ru
+        id:
+          type: string
+          example: "054af49e-5e18-4dca-ad73-4f96b6de63fa"
+
+    ChatEntry:
+      type: object
+      properties:
+        name:
+          type: string
+          example: deploy
+        id:
+          type: string
+          example: "7ee8aaa9-c6cb-5ee6-8445-7d654819b285"
+        bot:
+          type: string
+          description: Default bot for this chat (empty if not bound)
+          example: deploy-bot
 
     ErrorResponse:
       type: object

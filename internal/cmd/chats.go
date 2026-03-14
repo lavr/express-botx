@@ -6,7 +6,6 @@ import (
 	"flag"
 	"fmt"
 	"io"
-	"sort"
 
 	"github.com/lavr/express-botx/internal/botapi"
 	"github.com/lavr/express-botx/internal/config"
@@ -197,18 +196,7 @@ func runChatsAliasList(args []string, deps Deps) error {
 		return err
 	}
 
-	type aliasEntry struct {
-		Name string `json:"name"`
-		UUID string `json:"uuid"`
-		Bot  string `json:"bot,omitempty"`
-	}
-
-	entries := make([]aliasEntry, 0, len(cfg.Chats))
-	names := sortedChatKeys(cfg.Chats)
-	for _, name := range names {
-		chat := cfg.Chats[name]
-		entries = append(entries, aliasEntry{Name: name, UUID: chat.ID, Bot: chat.Bot})
-	}
+	entries := cfg.ChatEntries()
 
 	return printOutput(deps.Stdout, cfg.Format, func() {
 		if len(entries) == 0 {
@@ -219,9 +207,9 @@ func runChatsAliasList(args []string, deps Deps) error {
 		fmt.Fprintf(deps.Stdout, "Chat aliases (%d):\n", len(entries))
 		for _, e := range entries {
 			if e.Bot != "" {
-				fmt.Fprintf(deps.Stdout, "  %-20s %s  (bot: %s)\n", e.Name, e.UUID, e.Bot)
+				fmt.Fprintf(deps.Stdout, "  %-20s %s  (bot: %s)\n", e.Name, e.ID, e.Bot)
 			} else {
-				fmt.Fprintf(deps.Stdout, "  %-20s %s\n", e.Name, e.UUID)
+				fmt.Fprintf(deps.Stdout, "  %-20s %s\n", e.Name, e.ID)
 			}
 		}
 	}, entries)
@@ -332,14 +320,6 @@ func runChatsAliasRm(args []string, deps Deps) error {
 	return nil
 }
 
-func sortedChatKeys(m map[string]config.ChatConfig) []string {
-	keys := make([]string, 0, len(m))
-	for k := range m {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
-	return keys
-}
 
 func printChatsAliasUsage(w io.Writer) {
 	fmt.Fprintf(w, `Usage: express-botx chats alias <command> [options]
