@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 func testDeps() (Deps, *bytes.Buffer, *bytes.Buffer) {
@@ -476,5 +477,62 @@ func TestChatsAlias_Unknown(t *testing.T) {
 	err := runChatsAlias([]string{"foobar"}, deps)
 	if err == nil || !strings.Contains(err.Error(), "unknown subcommand") {
 		t.Errorf("expected unknown subcommand, got: %v", err)
+	}
+}
+
+// --- serve --fail-fast ---
+
+func TestServe_FailFast(t *testing.T) {
+	cfg := writeTestConfig(t, `
+bots:
+  test:
+    host: unreachable.invalid
+    id: "00000000-0000-0000-0000-000000000000"
+    secret: fake-secret
+server:
+  api_keys:
+    - name: test
+      key: test-key
+`)
+	deps, _, _ := testDeps()
+	err := runServe([]string{"--config", cfg, "--fail-fast"}, deps)
+	if err == nil {
+		t.Fatal("expected error with --fail-fast and unreachable host")
+	}
+	if !strings.Contains(err.Error(), "authenticating bot") {
+		t.Errorf("expected auth error, got: %v", err)
+	}
+}
+
+func TestServe_GracefulStart(t *testing.T) {
+	cfg := writeTestConfig(t, `
+bots:
+  test:
+    host: unreachable.invalid
+    id: "00000000-0000-0000-0000-000000000000"
+    secret: fake-secret
+server:
+  listen: ":0"
+  api_keys:
+    - name: test
+      key: test-key
+`)
+	deps, _, _ := testDeps()
+
+	// Without --fail-fast, runServe should not return an auth error.
+	// It will block on srv.Run(), so run in a goroutine and check it starts.
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- runServe([]string{"--config", cfg}, deps)
+	}()
+
+	// Give it time to start (if it fails fast, error arrives quickly)
+	select {
+	case err := <-errCh:
+		if err != nil && strings.Contains(err.Error(), "authenticating bot") {
+			t.Fatalf("server should not fail on auth without --fail-fast, got: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		// Server is running — graceful start works
 	}
 }

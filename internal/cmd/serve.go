@@ -9,7 +9,9 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"sync"
 	"syscall"
+	"time"
 
 	"github.com/lavr/express-botx/internal/apm"
 	"github.com/lavr/express-botx/internal/auth"
@@ -18,6 +20,7 @@ import (
 	vlog "github.com/lavr/express-botx/internal/log"
 	"github.com/lavr/express-botx/internal/secret"
 	"github.com/lavr/express-botx/internal/server"
+	"github.com/lavr/express-botx/internal/token"
 )
 
 func runServe(args []string, deps Deps) error {
@@ -26,10 +29,12 @@ func runServe(args []string, deps Deps) error {
 	var flags config.Flags
 	var listenFlag string
 	var apiKeyFlag string
+	var failFast bool
 
 	globalFlags(fs, &flags)
 	fs.StringVar(&listenFlag, "listen", "", "address to listen on (overrides config)")
 	fs.StringVar(&apiKeyFlag, "api-key", "", "API key for quick start (overrides config)")
+	fs.BoolVar(&failFast, "fail-fast", false, "exit if bot authentication fails at startup")
 	fs.Usage = func() {
 		fmt.Fprintf(deps.Stderr, `Usage: express-botx serve [options]
 
@@ -137,12 +142,14 @@ Options:
 	}
 	srvCfg.Keys = keys
 
-	// Build send function and authenticate
+	// Build send function and authenticate.
+	// If eXpress is unavailable at startup, the server still starts —
+	// bots that failed auth are retried in the background every 10 seconds.
+	// Requests to unavailable bots return 503 until auth succeeds.
 	var sendFn server.SendFunc
 
 	if cfg.IsMultiBot() {
-		// Multi-bot mode: authenticate all bots, build dispatcher
-		senders := make(map[string]server.SendFunc, len(cfg.Bots))
+		senders := make(map[string]*botSender, len(cfg.Bots))
 		botNames := cfg.BotNames()
 		for _, name := range botNames {
 			bot := cfg.Bots[name]
@@ -151,65 +158,24 @@ Options:
 			botCfg.BotID = bot.ID
 			botCfg.BotSecret = bot.Secret
 			botCfg.BotName = name
-
-			tok, cache, err := authenticate(&botCfg)
+			sender, err := newBotSender(&botCfg, failFast)
 			if err != nil {
-				return fmt.Errorf("authenticating bot %q: %w", name, err)
+				return err
 			}
-			client := botapi.NewClient(botCfg.Host, tok)
-			localCfg := botCfg
-			localCache := cache
-
-			senders[name] = func(ctx context.Context, p *server.SendPayload) (string, error) {
-				sr := buildSendRequest(p)
-				syncID, err := client.SendWithSyncID(ctx, sr)
-				if err != nil {
-					if errors.Is(err, botapi.ErrUnauthorized) {
-						newTok, refreshErr := refreshToken(&localCfg, localCache)
-						if refreshErr != nil {
-							return "", fmt.Errorf("refreshing token: %w", refreshErr)
-						}
-						client.Token = newTok
-						return client.SendWithSyncID(ctx, sr)
-					}
-					return "", err
-				}
-				return syncID, nil
-			}
-
-			vlog.V1("serve: bot %q authenticated (%s)", name, bot.Host)
+			senders[name] = sender
 		}
 
 		srvCfg.BotNames = botNames
 
 		sendFn = func(ctx context.Context, p *server.SendPayload) (string, error) {
-			fn := senders[p.Bot]
-			return fn(ctx, p)
+			return senders[p.Bot].Send(ctx, p)
 		}
 	} else {
-		// Single-bot mode
-		tok, cache, err := authenticate(cfg)
+		sender, err := newBotSender(cfg, failFast)
 		if err != nil {
 			return err
 		}
-		client := botapi.NewClient(cfg.Host, tok)
-
-		sendFn = func(ctx context.Context, p *server.SendPayload) (string, error) {
-			sr := buildSendRequest(p)
-			syncID, err := client.SendWithSyncID(ctx, sr)
-			if err != nil {
-				if errors.Is(err, botapi.ErrUnauthorized) {
-					newTok, refreshErr := refreshToken(cfg, cache)
-					if refreshErr != nil {
-						return "", fmt.Errorf("refreshing token: %w", refreshErr)
-					}
-					client.Token = newTok
-					return client.SendWithSyncID(ctx, sr)
-				}
-				return "", err
-			}
-			return syncID, nil
-		}
+		sendFn = sender.Send
 	}
 
 	// Build chat resolver
@@ -376,6 +342,103 @@ func buildGrafanaConfig(gr *config.GrafanaYAMLConfig, configPath string) (*serve
 		ErrorStates:   states,
 		Template:      tmpl,
 	}, nil
+}
+
+// botSender wraps a bot client with graceful startup: if authentication fails
+// at startup, it retries in the background. Requests return 503 until ready.
+type botSender struct {
+	cfg    *config.Config
+	client *botapi.Client
+	cache  token.Cache
+	mu     sync.RWMutex
+	ready  bool
+	done   chan struct{}
+}
+
+func newBotSender(cfg *config.Config, failFast bool) (*botSender, error) {
+	bs := &botSender{
+		cfg:  cfg,
+		done: make(chan struct{}),
+	}
+
+	name := cfg.BotName
+	if name == "" {
+		name = cfg.Host
+	}
+
+	tok, cache, err := authenticate(cfg)
+	bs.cache = cache
+	if err != nil {
+		if failFast {
+			return nil, fmt.Errorf("authenticating bot %s: %w", name, err)
+		}
+		vlog.V1("serve: bot %s auth failed, will retry in background: %v", name, err)
+		bs.client = botapi.NewClient(cfg.Host, "")
+		go bs.retryAuth()
+	} else {
+		bs.client = botapi.NewClient(cfg.Host, tok)
+		bs.ready = true
+		close(bs.done)
+		vlog.V1("serve: bot %s authenticated", name)
+	}
+
+	return bs, nil
+}
+
+func (bs *botSender) retryAuth() {
+	ticker := time.NewTicker(10 * time.Second)
+	defer ticker.Stop()
+	for range ticker.C {
+		name := bs.cfg.BotName
+		if name == "" {
+			name = bs.cfg.Host
+		}
+		vlog.V2("serve: retrying auth for bot %s", name)
+		tok, cache, err := authenticate(bs.cfg)
+		if err != nil {
+			vlog.V1("serve: bot %s auth retry failed: %v", name, err)
+			continue
+		}
+		bs.mu.Lock()
+		bs.client.Token = tok
+		bs.cache = cache
+		bs.ready = true
+		bs.mu.Unlock()
+		close(bs.done)
+		vlog.V1("serve: bot %s authenticated", name)
+		return
+	}
+}
+
+func (bs *botSender) Send(ctx context.Context, p *server.SendPayload) (string, error) {
+	bs.mu.RLock()
+	ready := bs.ready
+	bs.mu.RUnlock()
+
+	if !ready {
+		name := bs.cfg.BotName
+		if name == "" {
+			name = bs.cfg.Host
+		}
+		return "", fmt.Errorf("bot %q is not ready: authentication pending, retrying in background", name)
+	}
+
+	sr := buildSendRequest(p)
+	syncID, err := bs.client.SendWithSyncID(ctx, sr)
+	if err != nil {
+		if errors.Is(err, botapi.ErrUnauthorized) {
+			newTok, refreshErr := refreshToken(bs.cfg, bs.cache)
+			if refreshErr != nil {
+				return "", fmt.Errorf("refreshing token: %w", refreshErr)
+			}
+			bs.mu.Lock()
+			bs.client.Token = newTok
+			bs.mu.Unlock()
+			return bs.client.SendWithSyncID(ctx, sr)
+		}
+		return "", err
+	}
+	return syncID, nil
 }
 
 // sendResponseJSON is used for encoding sync_id from the BotX API response.
