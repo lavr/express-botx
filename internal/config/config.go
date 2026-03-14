@@ -185,7 +185,7 @@ func Load(flags Flags) (*Config, error) {
 		return nil, fmt.Errorf("host is required (--host, EXPRESS_BOTX_HOST, or config file)")
 	}
 	if cfg.BotID == "" {
-		return nil, fmt.Errorf("bot id is required (--bot-uuid, EXPRESS_BOTX_BOT_ID, or config file)")
+		return nil, fmt.Errorf("bot id is required (--bot-id, EXPRESS_BOTX_BOT_ID, or config file)")
 	}
 	if cfg.BotSecret == "" {
 		return nil, fmt.Errorf("bot secret is required (--secret, EXPRESS_BOTX_SECRET, or config file)")
@@ -254,7 +254,7 @@ func LoadForServe(flags Flags) (*Config, error) {
 			return nil, fmt.Errorf("host is required (--host, EXPRESS_BOTX_HOST, or config file)")
 		}
 		if cfg.BotID == "" {
-			return nil, fmt.Errorf("bot id is required (--bot-uuid, EXPRESS_BOTX_BOT_ID, or config file)")
+			return nil, fmt.Errorf("bot id is required (--bot-id, EXPRESS_BOTX_BOT_ID, or config file)")
 		}
 		if cfg.BotSecret == "" {
 			return nil, fmt.Errorf("bot secret is required (--secret, EXPRESS_BOTX_SECRET, or config file)")

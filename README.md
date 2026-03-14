@@ -133,7 +133,7 @@ express-botx send --file report.pdf "Отчёт за март"
 cat image.png | express-botx send --file - --file-name image.png
 
 # Все параметры через флаги
-express-botx send --host express.company.ru --bot-uuid UUID --secret KEY --chat-id UUID "Hello"
+express-botx send --host express.company.ru --bot-id UUID --secret KEY --chat-id UUID "Hello"
 ```
 
 При успехе утилита завершается молча (exit 0). Ошибки выводятся в stderr (exit 1).
@@ -179,7 +179,7 @@ express-botx serve --config config.yaml --api-key env:MY_API_KEY
 ```bash
 # Отправить сообщение
 docker run --rm lavr/express-botx send \
-  --host express.company.ru --bot-uuid UUID --secret KEY \
+  --host express.company.ru --bot-id UUID --secret KEY \
   --chat-id UUID "Hello from Docker"
 
 # С конфигом
@@ -301,7 +301,7 @@ bots:
 
 ```
 --host          хост сервера eXpress
---bot-uuid      UUID бота
+--bot-id      ID бота (UUID)
 --bot           имя бота из конфига
 --secret        секрет бота (литерал, env:VAR или vault:path#key)
 --config        путь к файлу конфигурации

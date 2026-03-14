@@ -201,7 +201,7 @@ func runBotList(args []string, deps Deps) error {
 	return printOutput(deps.Stdout, cfg.Format, func() {
 		if len(entries) == 0 {
 			fmt.Fprintln(deps.Stdout, "No bots configured.")
-			fmt.Fprintln(deps.Stdout, "Add one with: express-botx bot add --host HOST --bot-uuid UUID --secret SECRET")
+			fmt.Fprintln(deps.Stdout, "Add one with: express-botx bot add --host HOST --bot-id UUID --secret SECRET")
 			return
 		}
 		fmt.Fprintf(deps.Stdout, "Bots (%d):\n", len(entries))
@@ -220,10 +220,10 @@ func runBotAdd(args []string, deps Deps) error {
 	fs.StringVar(&flags.ConfigPath, "config", "", "path to config file")
 	fs.StringVar(&name, "name", "", "bot name (auto-generated as bot1, bot2, ... if omitted)")
 	fs.StringVar(&host, "host", "", "eXpress server host (required)")
-	fs.StringVar(&botID, "bot-uuid", "", "bot UUID (required)")
+	fs.StringVar(&botID, "bot-id", "", "bot ID (required)")
 	fs.StringVar(&secretVal, "secret", "", "bot secret (required)")
 	fs.Usage = func() {
-		fmt.Fprintf(deps.Stderr, "Usage: express-botx bot add --host HOST --bot-uuid UUID --secret SECRET [options]\n\nAdd or update a bot in the config file.\nIf --name is omitted, it is auto-generated as bot1, bot2, etc.\n\nOptions:\n")
+		fmt.Fprintf(deps.Stderr, "Usage: express-botx bot add --host HOST --bot-id UUID --secret SECRET [options]\n\nAdd or update a bot in the config file.\nIf --name is omitted, it is auto-generated as bot1, bot2, etc.\n\nOptions:\n")
 		fs.PrintDefaults()
 	}
 
@@ -238,7 +238,7 @@ func runBotAdd(args []string, deps Deps) error {
 		return fmt.Errorf("--host is required")
 	}
 	if botID == "" {
-		return fmt.Errorf("--bot-uuid is required")
+		return fmt.Errorf("--bot-id is required")
 	}
 	if secretVal == "" {
 		return fmt.Errorf("--secret is required")

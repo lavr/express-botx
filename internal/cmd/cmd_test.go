@@ -185,7 +185,7 @@ func TestBotAdd(t *testing.T) {
 	err := runBotAdd([]string{
 		"--config", cfgPath,
 		"--host", "new.com",
-		"--bot-uuid", "new-id",
+		"--bot-id", "new-id",
 		"--secret", "new-secret",
 		"--name", "newbot",
 	}, deps)
@@ -216,7 +216,7 @@ bots:
 	err := runBotAdd([]string{
 		"--config", cfgPath,
 		"--host", "updated.com",
-		"--bot-uuid", "updated-id",
+		"--bot-id", "updated-id",
 		"--secret", "updated-s",
 		"--name", "existing",
 	}, deps)
@@ -235,7 +235,7 @@ func TestBotAdd_AutoName(t *testing.T) {
 	err := runBotAdd([]string{
 		"--config", cfgPath,
 		"--host", "auto.com",
-		"--bot-uuid", "auto-id",
+		"--bot-id", "auto-id",
 		"--secret", "auto-s",
 	}, deps)
 	if err != nil {
@@ -259,7 +259,7 @@ bots:
 	err := runBotAdd([]string{
 		"--config", cfgPath,
 		"--host", "new.com",
-		"--bot-uuid", "new-id",
+		"--bot-id", "new-id",
 		"--secret", "new-s",
 	}, deps)
 	if err != nil {
@@ -279,9 +279,9 @@ func TestBotAdd_MissingFlags(t *testing.T) {
 		args []string
 		want string
 	}{
-		{"no host", []string{"--config", cfgPath, "--bot-uuid", "b", "--secret", "s", "--name", "bot1"}, "--host is required"},
-		{"no bot-uuid", []string{"--config", cfgPath, "--host", "h", "--secret", "s", "--name", "bot1"}, "--bot-uuid is required"},
-		{"no secret", []string{"--config", cfgPath, "--host", "h", "--bot-uuid", "b", "--name", "bot1"}, "--secret is required"},
+		{"no host", []string{"--config", cfgPath, "--bot-id", "b", "--secret", "s", "--name", "bot1"}, "--host is required"},
+		{"no bot-id", []string{"--config", cfgPath, "--host", "h", "--secret", "s", "--name", "bot1"}, "--bot-id is required"},
+		{"no secret", []string{"--config", cfgPath, "--host", "h", "--bot-id", "b", "--name", "bot1"}, "--secret is required"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

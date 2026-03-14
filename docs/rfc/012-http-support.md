@@ -40,7 +40,7 @@ bots:
 CLI:
 
 ```bash
-express-botx send --host http://localhost:8080 --bot-uuid ... --secret ... "test"
+express-botx send --host http://localhost:8080 --bot-id ... --secret ... "test"
 ```
 
 Env:

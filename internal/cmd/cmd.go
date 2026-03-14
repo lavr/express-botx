@@ -84,7 +84,7 @@ func globalFlags(fs *flag.FlagSet, flags *config.Flags) {
 	fs.StringVar(&flags.ConfigPath, "config", "", "path to config file (default: ~/.config/express-send/config.yaml)")
 	fs.StringVar(&flags.Bot, "bot", "", "bot name from config")
 	fs.StringVar(&flags.Host, "host", "", "eXpress server host")
-	fs.StringVar(&flags.BotID, "bot-uuid", "", "bot UUID")
+	fs.StringVar(&flags.BotID, "bot-id", "", "bot ID (UUID)")
 	fs.StringVar(&flags.Secret, "secret", "", "bot secret (literal, env:VAR, or vault:path#key)")
 	fs.BoolVar(&flags.NoCache, "no-cache", false, "disable token caching")
 	fs.StringVar(&flags.Format, "format", "", "output format: text or json (default: text)")
