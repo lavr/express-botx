@@ -3,6 +3,9 @@ module github.com/lavr/express-botx
 go 1.25.5
 
 require (
+	github.com/newrelic/go-agent/v3 v3.42.0
+	go.elastic.co/apm/module/apmhttp/v2 v2.7.4
+	go.elastic.co/apm/v2 v2.7.4
 	golang.org/x/term v0.41.0
 	gopkg.in/yaml.v3 v3.0.1
 )
@@ -11,12 +14,10 @@ require (
 	github.com/armon/go-radix v1.0.0 // indirect
 	github.com/elastic/go-sysinfo v1.7.1 // indirect
 	github.com/elastic/go-windows v1.0.0 // indirect
+	github.com/getsentry/sentry-go v0.43.0 // indirect
 	github.com/joeshaw/multierror v0.0.0-20140124173710-69b34d4ec901 // indirect
-	github.com/newrelic/go-agent/v3 v3.42.0 // indirect
 	github.com/pkg/errors v0.9.1 // indirect
 	github.com/prometheus/procfs v0.0.0-20190425082905-87a4384529e0 // indirect
-	go.elastic.co/apm/module/apmhttp/v2 v2.7.4 // indirect
-	go.elastic.co/apm/v2 v2.7.4 // indirect
 	go.elastic.co/fastjson v1.5.1 // indirect
 	golang.org/x/net v0.25.0 // indirect
 	golang.org/x/sys v0.42.0 // indirect

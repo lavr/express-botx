@@ -15,6 +15,7 @@ import (
 
 	"github.com/lavr/express-botx/internal/apm"
 	"github.com/lavr/express-botx/internal/auth"
+	"github.com/lavr/express-botx/internal/errtrack"
 	"github.com/lavr/express-botx/internal/botapi"
 	"github.com/lavr/express-botx/internal/config"
 	vlog "github.com/lavr/express-botx/internal/log"
@@ -203,8 +204,13 @@ Options:
 	provider := apm.New()
 	defer provider.Shutdown()
 
+	// Error tracking
+	tracker := errtrack.New()
+	defer tracker.Flush()
+
 	var srvOpts []server.Option
 	srvOpts = append(srvOpts, server.WithAPM(provider))
+	srvOpts = append(srvOpts, server.WithErrTracker(tracker))
 
 	// Alertmanager endpoint
 	if am := cfg.Server.Alertmanager; am != nil {

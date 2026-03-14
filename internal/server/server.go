@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/lavr/express-botx/internal/apm"
+	"github.com/lavr/express-botx/internal/errtrack"
 	vlog "github.com/lavr/express-botx/internal/log"
 )
 
@@ -37,6 +38,7 @@ type Server struct {
 	keyMap     map[string]string // key -> name
 	botNameSet map[string]bool   // valid bot names for multi-bot mode
 	apm        apm.Provider
+	errTracker errtrack.Tracker
 	amCfg      *AlertmanagerConfig
 	grCfg      *GrafanaConfig
 	srv        *http.Server
@@ -72,6 +74,13 @@ func WithAPM(p apm.Provider) Option {
 	}
 }
 
+// WithErrTracker sets the error tracker for panic/error capture.
+func WithErrTracker(t errtrack.Tracker) Option {
+	return func(s *Server) {
+		s.errTracker = t
+	}
+}
+
 // New creates a Server with the given configuration.
 func New(cfg Config, sendFn SendFunc, chatResolver ChatResolver, opts ...Option) *Server {
 	s := &Server{
@@ -92,6 +101,9 @@ func New(cfg Config, sendFn SendFunc, chatResolver ChatResolver, opts ...Option)
 	}
 	if s.apm == nil {
 		s.apm = apm.New()
+	}
+	if s.errTracker == nil {
+		s.errTracker = errtrack.New()
 	}
 
 	mux := http.NewServeMux()
@@ -139,9 +151,12 @@ func New(cfg Config, sendFn SendFunc, chatResolver ChatResolver, opts ...Option)
 		vlog.Info("server: grafana endpoint enabled (chat: %s)", chatInfo)
 	}
 
+	var handler http.Handler = mux
+	handler = s.errTracker.Middleware(handler)
+
 	s.srv = &http.Server{
 		Addr:              cfg.Listen,
-		Handler:           mux,
+		Handler:           handler,
 		ReadHeaderTimeout: 10 * time.Second,
 	}
 	s.srv.SetKeepAlivesEnabled(false)
