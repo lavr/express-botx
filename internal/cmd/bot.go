@@ -227,7 +227,7 @@ func runBotAdd(args []string, deps Deps) error {
 	fs.SetOutput(deps.Stderr)
 	var flags config.Flags
 	var name, host, botID, secretVal, tokenVal string
-	var saveSecret bool
+	var saveSecret, dryRun bool
 
 	fs.StringVar(&flags.ConfigPath, "config", "", "path to config file")
 	fs.StringVar(&name, "name", "", "bot name (auto-generated as bot1, bot2, ... if omitted)")
@@ -236,6 +236,7 @@ func runBotAdd(args []string, deps Deps) error {
 	fs.StringVar(&secretVal, "secret", "", "bot secret (exchanges for token by default)")
 	fs.StringVar(&tokenVal, "token", "", "bot token (alternative to --secret)")
 	fs.BoolVar(&saveSecret, "save-secret", false, "save secret instead of exchanging for token")
+	fs.BoolVar(&dryRun, "dry-run", false, "exchange secret for token and print it, don't save")
 	fs.Usage = func() {
 		fmt.Fprintf(deps.Stderr, "Usage: express-botx bot add --host HOST --bot-id ID (--secret SECRET | --token TOKEN) [options]\n\nAdd or update a bot in the config file.\nWith --secret: exchanges for token via API (use --save-secret to keep secret).\nWith --token: saves token as-is.\n\nOptions:\n")
 		fs.PrintDefaults()
@@ -262,6 +263,12 @@ func runBotAdd(args []string, deps Deps) error {
 	}
 	if saveSecret && secretVal == "" {
 		return fmt.Errorf("--save-secret requires --secret")
+	}
+	if dryRun && secretVal == "" {
+		return fmt.Errorf("--dry-run requires --secret")
+	}
+	if dryRun && saveSecret {
+		return fmt.Errorf("--dry-run and --save-secret are mutually exclusive")
 	}
 
 	cfg, err := config.LoadMinimal(flags)
@@ -296,27 +303,43 @@ func runBotAdd(args []string, deps Deps) error {
 		action = "updated"
 	}
 
-	var botCfg config.BotConfig
-	var detail string
-	switch {
-	case tokenVal != "":
-		// --token: save as-is
-		botCfg = config.BotConfig{Host: host, ID: botID, Token: tokenVal}
-		detail = "token saved"
-	case saveSecret:
-		// --secret --save-secret: save secret
-		botCfg = config.BotConfig{Host: host, ID: botID, Secret: secretVal}
-		detail = "secret saved"
-	default:
-		// --secret (default): exchange for token
+	// Exchange secret → token (used by default mode and --dry-run)
+	exchangeToken := func() (string, error) {
 		secretKey, err := secret.Resolve(secretVal)
 		if err != nil {
-			return fmt.Errorf("resolving secret: %w", err)
+			return "", fmt.Errorf("resolving secret: %w", err)
 		}
 		signature := auth.BuildSignature(botID, secretKey)
 		tok, err := auth.GetToken(context.Background(), host, botID, signature, cfg.HTTPTimeout())
 		if err != nil {
-			return fmt.Errorf("exchanging secret for token: %w", err)
+			return "", fmt.Errorf("exchanging secret for token: %w", err)
+		}
+		return tok, nil
+	}
+
+	// --dry-run: exchange and print, don't save
+	if dryRun {
+		tok, err := exchangeToken()
+		if err != nil {
+			return err
+		}
+		fmt.Fprintln(deps.Stdout, tok)
+		return nil
+	}
+
+	var botCfg config.BotConfig
+	var detail string
+	switch {
+	case tokenVal != "":
+		botCfg = config.BotConfig{Host: host, ID: botID, Token: tokenVal}
+		detail = "token saved"
+	case saveSecret:
+		botCfg = config.BotConfig{Host: host, ID: botID, Secret: secretVal}
+		detail = "secret saved"
+	default:
+		tok, err := exchangeToken()
+		if err != nil {
+			return err
 		}
 		botCfg = config.BotConfig{Host: host, ID: botID, Token: tok}
 		detail = "token obtained"
