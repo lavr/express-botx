@@ -18,7 +18,7 @@ import (
 func runBot(args []string, deps Deps) error {
 	if len(args) == 0 {
 		printBotUsage(deps.Stderr)
-		return fmt.Errorf("subcommand required: ping, info, list, add, rm")
+		return fmt.Errorf("subcommand required: ping, info, token, list, add, rm")
 	}
 
 	switch args[0] {
@@ -26,6 +26,8 @@ func runBot(args []string, deps Deps) error {
 		return runBotPing(args[1:], deps)
 	case "info":
 		return runBotInfo(args[1:], deps)
+	case "token":
+		return runBotToken(args[1:], deps)
 	case "list":
 		return runBotList(args[1:], deps)
 	case "add":
@@ -227,7 +229,7 @@ func runBotAdd(args []string, deps Deps) error {
 	fs.SetOutput(deps.Stderr)
 	var flags config.Flags
 	var name, host, botID, secretVal, tokenVal string
-	var saveSecret, dryRun bool
+	var saveSecret bool
 
 	fs.StringVar(&flags.ConfigPath, "config", "", "path to config file")
 	fs.StringVar(&name, "name", "", "bot name (auto-generated as bot1, bot2, ... if omitted)")
@@ -236,7 +238,6 @@ func runBotAdd(args []string, deps Deps) error {
 	fs.StringVar(&secretVal, "secret", "", "bot secret (exchanges for token by default)")
 	fs.StringVar(&tokenVal, "token", "", "bot token (alternative to --secret)")
 	fs.BoolVar(&saveSecret, "save-secret", false, "save secret instead of exchanging for token")
-	fs.BoolVar(&dryRun, "dry-run", false, "exchange secret for token and print it, don't save")
 	fs.Usage = func() {
 		fmt.Fprintf(deps.Stderr, "Usage: express-botx bot add --host HOST --bot-id ID (--secret SECRET | --token TOKEN) [options]\n\nAdd or update a bot in the config file.\nWith --secret: exchanges for token via API (use --save-secret to keep secret).\nWith --token: saves token as-is.\n\nOptions:\n")
 		fs.PrintDefaults()
@@ -264,13 +265,6 @@ func runBotAdd(args []string, deps Deps) error {
 	if saveSecret && secretVal == "" {
 		return fmt.Errorf("--save-secret requires --secret")
 	}
-	if dryRun && secretVal == "" {
-		return fmt.Errorf("--dry-run requires --secret")
-	}
-	if dryRun && saveSecret {
-		return fmt.Errorf("--dry-run and --save-secret are mutually exclusive")
-	}
-
 	cfg, err := config.LoadMinimal(flags)
 	if err != nil {
 		return err
@@ -315,16 +309,6 @@ func runBotAdd(args []string, deps Deps) error {
 			return "", fmt.Errorf("exchanging secret for token: %w", err)
 		}
 		return tok, nil
-	}
-
-	// --dry-run: exchange and print, don't save
-	if dryRun {
-		tok, err := exchangeToken()
-		if err != nil {
-			return err
-		}
-		fmt.Fprintln(deps.Stdout, tok)
-		return nil
 	}
 
 	var botCfg config.BotConfig
@@ -401,12 +385,59 @@ func runBotRm(args []string, deps Deps) error {
 	return nil
 }
 
+func runBotToken(args []string, deps Deps) error {
+	fs := flag.NewFlagSet("bot token", flag.ContinueOnError)
+	fs.SetOutput(deps.Stderr)
+	var flags config.Flags
+
+	globalFlags(fs, &flags)
+	fs.Usage = func() {
+		fmt.Fprintf(deps.Stderr, "Usage: express-botx bot token [options]\n\nGet a bot token by exchanging the secret via eXpress API.\nPrints the token to stdout (useful for scripts).\n\nWith --bot or a single-bot config, uses the bot from config.\nWith --host/--bot-id/--secret, uses the provided credentials.\n\nOptions:\n")
+		fs.PrintDefaults()
+	}
+
+	if err := fs.Parse(args); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return nil
+		}
+		return err
+	}
+
+	cfg, err := config.Load(flags)
+	if err != nil {
+		return err
+	}
+
+	if cfg.BotToken != "" {
+		// Already have a static token — just resolve and print
+		tok, err := secret.Resolve(cfg.BotToken)
+		if err != nil {
+			return fmt.Errorf("resolving token: %w", err)
+		}
+		fmt.Fprintln(deps.Stdout, tok)
+		return nil
+	}
+
+	secretKey, err := secret.Resolve(cfg.BotSecret)
+	if err != nil {
+		return fmt.Errorf("resolving secret: %w", err)
+	}
+	signature := auth.BuildSignature(cfg.BotID, secretKey)
+	tok, err := auth.GetToken(context.Background(), cfg.Host, cfg.BotID, signature, cfg.HTTPTimeout())
+	if err != nil {
+		return fmt.Errorf("getting token: %w", err)
+	}
+	fmt.Fprintln(deps.Stdout, tok)
+	return nil
+}
+
 func printBotUsage(w io.Writer) {
 	fmt.Fprintf(w, `Usage: express-botx bot <command> [options]
 
 Commands:
   ping    Check bot authentication and API connectivity
   info    Show bot configuration and auth status
+  token   Get bot token (exchange secret via API or print static token)
   list    List bots configured in the config file
   add     Add or update a bot in the config file
   rm      Remove a bot from the config file

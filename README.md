@@ -109,6 +109,7 @@ ingress:
 | `chats alias` | Управление алиасами чатов (set, list, rm) |
 | `bot ping` | Проверить авторизацию и доступность API |
 | `bot info` | Показать информацию о боте |
+| `bot token` | Получить токен бота (для скриптов) |
 | `bot list` | Показать боты из конфига |
 | `bot add` | Добавить бота в конфиг |
 | `bot rm` | Удалить бота из конфига |
@@ -366,8 +367,22 @@ express-botx bot add mybot --host h --bot-id ID --secret SECRET --save-secret
 # Готовый token
 express-botx bot add mybot --host h --bot-id ID --token TOKEN
 
-# Получить token без сохранения (для скриптов)
-express-botx bot add mybot --host h --bot-id ID --secret SECRET --dry-run
+```
+
+### `bot token` — получение токена для скриптов
+
+```bash
+# Из конфига (бот с secret)
+express-botx bot token --bot prod
+
+# С явными флагами
+express-botx bot token --host h --bot-id ID --secret SECRET
+
+# Использование в скриптах
+TOKEN=$(express-botx bot token --bot prod)
+
+# Если бот уже с token — просто выводит его
+express-botx bot token --bot token-bot
 ```
 
 ### Форматы значений
