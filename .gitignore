@@ -2,3 +2,6 @@ dist/
 /express-botx
 config-local.yaml
 .*.json
+.claude/
+
+.ralphex/progress/

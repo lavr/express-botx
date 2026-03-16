@@ -102,6 +102,11 @@ Options:
 	}
 	srvCfg.AppVersion = Version
 
+	// Default chat alias for /send when chat_id is omitted
+	if alias, _ := cfg.DefaultChat(); alias != "" {
+		srvCfg.DefaultChatAlias = alias
+	}
+
 	// Resolve API keys
 	keys, err := resolveAPIKeys(cfg.Server.APIKeys)
 	if err != nil {

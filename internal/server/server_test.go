@@ -246,6 +246,66 @@ func TestSend_JSON_MissingChatID(t *testing.T) {
 	}
 }
 
+func TestSend_JSON_MissingChatID_WithDefaultChat(t *testing.T) {
+	var capturedChatID string
+	cfg := Config{
+		Listen:           ":0",
+		BasePath:         "/api/v1",
+		Keys:             []ResolvedKey{{Name: "t", Key: "k"}},
+		DefaultChatAlias: "general",
+	}
+	sendFn := func(ctx context.Context, p *SendPayload) (string, error) {
+		capturedChatID = p.ChatID
+		return "test-sync-id", nil
+	}
+	chatResolver := func(chatID string) (ChatResolveResult, error) {
+		return ChatResolveResult{ChatID: chatID}, nil
+	}
+	srv := New(cfg, sendFn, chatResolver)
+
+	body := `{"message":"hello"}`
+	w := doRequest(srv, "POST", "/api/v1/send", strings.NewReader(body), map[string]string{
+		"X-API-Key":    "k",
+		"Content-Type": "application/json",
+	})
+	if w.Code != 200 {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	if capturedChatID != "general" {
+		t.Fatalf("expected chat_id 'general' (default), got %q", capturedChatID)
+	}
+}
+
+func TestSend_JSON_ExplicitChatID_OverridesDefault(t *testing.T) {
+	var capturedChatID string
+	cfg := Config{
+		Listen:           ":0",
+		BasePath:         "/api/v1",
+		Keys:             []ResolvedKey{{Name: "t", Key: "k"}},
+		DefaultChatAlias: "general",
+	}
+	sendFn := func(ctx context.Context, p *SendPayload) (string, error) {
+		capturedChatID = p.ChatID
+		return "test-sync-id", nil
+	}
+	chatResolver := func(chatID string) (ChatResolveResult, error) {
+		return ChatResolveResult{ChatID: chatID}, nil
+	}
+	srv := New(cfg, sendFn, chatResolver)
+
+	body := `{"chat_id":"deploy","message":"hello"}`
+	w := doRequest(srv, "POST", "/api/v1/send", strings.NewReader(body), map[string]string{
+		"X-API-Key":    "k",
+		"Content-Type": "application/json",
+	})
+	if w.Code != 200 {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	if capturedChatID != "deploy" {
+		t.Fatalf("expected chat_id 'deploy', got %q", capturedChatID)
+	}
+}
+
 func TestSend_JSON_EmptyBody(t *testing.T) {
 	srv := newTestServer([]ResolvedKey{{Name: "t", Key: "k"}})
 	body := `{"chat_id":"chat-1"}`
@@ -653,6 +713,86 @@ func TestAlertmanager_NoChatID(t *testing.T) {
 	}
 }
 
+func TestAlertmanager_GlobalDefaultChat(t *testing.T) {
+	tmpl, _ := ParseAlertmanagerTemplate(`test`)
+	amCfg := &AlertmanagerConfig{
+		DefaultChatID:   "", // no webhook default
+		ErrorSeverities: []string{"critical"},
+		Template:        tmpl,
+	}
+
+	var capturedChatID string
+	cfg := Config{
+		Listen:           ":0",
+		BasePath:         "/api/v1",
+		Keys:             []ResolvedKey{{Name: "t", Key: "k"}},
+		DefaultChatAlias: "general",
+	}
+	sendFn := func(ctx context.Context, p *SendPayload) (string, error) {
+		capturedChatID = p.ChatID
+		return "id", nil
+	}
+	chatResolver := func(chatID string) (ChatResolveResult, error) {
+		return ChatResolveResult{ChatID: chatID}, nil
+	}
+	srv := New(cfg, sendFn, chatResolver, WithAlertmanager(amCfg))
+
+	body := alertmanagerPayload("firing", AlertItem{
+		Status: "firing",
+		Labels: map[string]string{"alertname": "Test", "severity": "critical"},
+	})
+	w := doRequest(srv, "POST", "/api/v1/alertmanager", strings.NewReader(body), map[string]string{
+		"X-API-Key":    "k",
+		"Content-Type": "application/json",
+	})
+	if w.Code != 200 {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	if capturedChatID != "general" {
+		t.Errorf("expected chat_id=general (global default), got %q", capturedChatID)
+	}
+}
+
+func TestAlertmanager_WebhookDefaultOverridesGlobalDefault(t *testing.T) {
+	tmpl, _ := ParseAlertmanagerTemplate(`test`)
+	amCfg := &AlertmanagerConfig{
+		DefaultChatID:   "alerts", // webhook default takes priority
+		ErrorSeverities: []string{"critical"},
+		Template:        tmpl,
+	}
+
+	var capturedChatID string
+	cfg := Config{
+		Listen:           ":0",
+		BasePath:         "/api/v1",
+		Keys:             []ResolvedKey{{Name: "t", Key: "k"}},
+		DefaultChatAlias: "general",
+	}
+	sendFn := func(ctx context.Context, p *SendPayload) (string, error) {
+		capturedChatID = p.ChatID
+		return "id", nil
+	}
+	chatResolver := func(chatID string) (ChatResolveResult, error) {
+		return ChatResolveResult{ChatID: chatID}, nil
+	}
+	srv := New(cfg, sendFn, chatResolver, WithAlertmanager(amCfg))
+
+	body := alertmanagerPayload("firing", AlertItem{
+		Status: "firing",
+		Labels: map[string]string{"alertname": "Test", "severity": "critical"},
+	})
+	w := doRequest(srv, "POST", "/api/v1/alertmanager", strings.NewReader(body), map[string]string{
+		"X-API-Key":    "k",
+		"Content-Type": "application/json",
+	})
+	if w.Code != 200 {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	if capturedChatID != "alerts" {
+		t.Errorf("expected chat_id=alerts (webhook default), got %q", capturedChatID)
+	}
+}
+
 func TestAlertmanager_CustomTemplate(t *testing.T) {
 	tmpl, err := ParseAlertmanagerTemplate(`ALERT: {{ index .GroupLabels "alertname" }} is {{ .Status }}`)
 	if err != nil {
@@ -940,6 +1080,86 @@ func TestGrafana_NoChatID(t *testing.T) {
 	})
 	if w.Code != 400 {
 		t.Fatalf("expected 400, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestGrafana_GlobalDefaultChat(t *testing.T) {
+	tmpl, _ := ParseGrafanaTemplate(`test`)
+	grCfg := &GrafanaConfig{
+		DefaultChatID: "", // no webhook default
+		ErrorStates:   []string{"alerting"},
+		Template:      tmpl,
+	}
+
+	var capturedChatID string
+	cfg := Config{
+		Listen:           ":0",
+		BasePath:         "/api/v1",
+		Keys:             []ResolvedKey{{Name: "t", Key: "k"}},
+		DefaultChatAlias: "general",
+	}
+	sendFn := func(ctx context.Context, p *SendPayload) (string, error) {
+		capturedChatID = p.ChatID
+		return "id", nil
+	}
+	chatResolver := func(chatID string) (ChatResolveResult, error) {
+		return ChatResolveResult{ChatID: chatID}, nil
+	}
+	srv := New(cfg, sendFn, chatResolver, WithGrafana(grCfg))
+
+	body := grafanaPayload("firing", "alerting", "test", GrafanaAlertItem{
+		Status: "firing",
+		Labels: map[string]string{"alertname": "Test"},
+	})
+	w := doRequest(srv, "POST", "/api/v1/grafana", strings.NewReader(body), map[string]string{
+		"X-API-Key":    "k",
+		"Content-Type": "application/json",
+	})
+	if w.Code != 200 {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	if capturedChatID != "general" {
+		t.Errorf("expected chat_id=general (global default), got %q", capturedChatID)
+	}
+}
+
+func TestGrafana_WebhookDefaultOverridesGlobalDefault(t *testing.T) {
+	tmpl, _ := ParseGrafanaTemplate(`test`)
+	grCfg := &GrafanaConfig{
+		DefaultChatID: "alerts", // webhook default takes priority
+		ErrorStates:   []string{"alerting"},
+		Template:      tmpl,
+	}
+
+	var capturedChatID string
+	cfg := Config{
+		Listen:           ":0",
+		BasePath:         "/api/v1",
+		Keys:             []ResolvedKey{{Name: "t", Key: "k"}},
+		DefaultChatAlias: "general",
+	}
+	sendFn := func(ctx context.Context, p *SendPayload) (string, error) {
+		capturedChatID = p.ChatID
+		return "id", nil
+	}
+	chatResolver := func(chatID string) (ChatResolveResult, error) {
+		return ChatResolveResult{ChatID: chatID}, nil
+	}
+	srv := New(cfg, sendFn, chatResolver, WithGrafana(grCfg))
+
+	body := grafanaPayload("firing", "alerting", "test", GrafanaAlertItem{
+		Status: "firing",
+		Labels: map[string]string{"alertname": "Test"},
+	})
+	w := doRequest(srv, "POST", "/api/v1/grafana", strings.NewReader(body), map[string]string{
+		"X-API-Key":    "k",
+		"Content-Type": "application/json",
+	})
+	if w.Code != 200 {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	if capturedChatID != "alerts" {
+		t.Errorf("expected chat_id=alerts (webhook default), got %q", capturedChatID)
 	}
 }
 

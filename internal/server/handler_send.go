@@ -67,8 +67,12 @@ func (s *Server) handleSend(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if payload.ChatID == "" {
-		writeError(w, http.StatusBadRequest, "chat_id is required")
-		return
+		if s.cfg.DefaultChatAlias != "" {
+			payload.ChatID = s.cfg.DefaultChatAlias
+		} else {
+			writeError(w, http.StatusBadRequest, "chat_id is required")
+			return
+		}
 	}
 	if payload.Message == "" && payload.File == nil {
 		writeError(w, http.StatusBadRequest, "message or file required")

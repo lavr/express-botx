@@ -145,7 +145,7 @@ express-botx send --host express.company.ru --bot-id UUID --secret KEY --chat-id
 ### Флаги send
 
 ```
---chat-id       UUID или алиас целевого чата
+--chat-id       UUID или алиас целевого чата (опционально при наличии default)
 --body-from     прочитать сообщение из файла
 --file          путь к файлу-вложению (или - для stdin)
 --file-name     имя файла (обязательно при --file -)
@@ -220,7 +220,7 @@ chats:
   # Короткая форма: только UUID
   chat1: 1a2b3c4d-5e6f-7890-abcd-ef1234567890
   chat2: 2a2b3c4d-6e6f-8890-bbcd-ff1234567890
-  
+
   # С привязкой к боту: бот подставляется автоматически
   deploy:
     id: 2b3c4d5e-6f7a-8901-bcde-f12345678901
@@ -228,6 +228,11 @@ chats:
   alerts:
     id: 3c4d5e6f-7a8b-9012-cdef-123456789012
     bot: alert-bot
+
+  # Чат по умолчанию — используется когда --chat-id / chat_id не указан
+  general:
+    id: 4d5e6f7a-8b9c-0123-def0-234567890123
+    default: true
 
 cache:
   type: file                              # none | file | vault (по умолчанию: file)
@@ -269,6 +274,22 @@ curl /api/v1/send -d '{"chat_id":"deploy","message":"OK"}'
 curl /api/v1/send -d '{"bot":"alert-bot","chat_id":"deploy","message":"!"}'
 curl /api/v1/alertmanager?bot=deploy-bot
 ```
+
+### Чат по умолчанию
+
+Один чат можно пометить как `default: true`. Он будет использоваться когда `--chat-id` (CLI) или `chat_id` (API) не указан:
+
+```bash
+# Управление через CLI
+express-botx config chat add --chat-id UUID --alias general --default
+express-botx config chat set general UUID --default
+express-botx config chat set general UUID --no-default   # снять пометку
+express-botx config chat list                             # покажет (default)
+```
+
+Приоритет выбора чата в HTTP-сервере:
+- `/send`: `chat_id` из запроса → чат по умолчанию → ошибка
+- `/alertmanager`, `/grafana`: `?chat_id=` → `default_chat_id` из конфига вебхука → чат по умолчанию → единственный чат → ошибка
 
 Формат `host`:
 
@@ -404,6 +425,9 @@ express-botx config chat add --chat-id UUID --alias deploy
 
 # С привязкой к боту
 express-botx config chat add --name "Deploy Alerts" --alias deploy --bot deploy-bot
+
+# С пометкой как чат по умолчанию
+express-botx config chat add --chat-id UUID --alias general --default
 ```
 
 При `--name` выполняется поиск по подстроке (case-insensitive). Если найдено несколько чатов — выводится список и предлагается уточнить через `--chat-id`. Если `--alias` не указан — генерируется из имени чата (`"Deploy Alerts"` → `deploy-alerts`).

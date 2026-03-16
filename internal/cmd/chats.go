@@ -12,6 +12,16 @@ import (
 	"github.com/lavr/express-botx/internal/config"
 )
 
+// checkDefaultConflict returns an error if another chat (other than exclude) is already the default.
+func checkDefaultConflict(chats map[string]config.ChatConfig, exclude string) error {
+	for name, ch := range chats {
+		if ch.Default && name != exclude {
+			return fmt.Errorf("chat %q is already marked as default; to change default, first run: config chat set %s <uuid> --no-default", name, name)
+		}
+	}
+	return nil
+}
+
 func runChats(args []string, deps Deps) error {
 	if len(args) == 0 {
 		printChatsUsage(deps.Stderr)
@@ -183,8 +193,15 @@ func runChatsAliasList(args []string, deps Deps) error {
 		}
 		fmt.Fprintf(deps.Stdout, "Chat aliases (%d):\n", len(entries))
 		for _, e := range entries {
+			var tags []string
 			if e.Bot != "" {
-				fmt.Fprintf(deps.Stdout, "  %-20s %s  (bot: %s)\n", e.Name, e.ID, e.Bot)
+				tags = append(tags, "bot: "+e.Bot)
+			}
+			if e.Default {
+				tags = append(tags, "default")
+			}
+			if len(tags) > 0 {
+				fmt.Fprintf(deps.Stdout, "  %-20s %s  (%s)\n", e.Name, e.ID, strings.Join(tags, ", "))
 			} else {
 				fmt.Fprintf(deps.Stdout, "  %-20s %s\n", e.Name, e.ID)
 			}
@@ -198,8 +215,11 @@ func runChatsAliasSet(args []string, deps Deps) error {
 	var flags config.Flags
 
 	var botFlag string
+	var setDefault, unsetDefault bool
 	fs.StringVar(&flags.ConfigPath, "config", "", "path to config file")
 	fs.StringVar(&botFlag, "bot", "", "default bot for this chat")
+	fs.BoolVar(&setDefault, "default", false, "mark this chat as the default")
+	fs.BoolVar(&unsetDefault, "no-default", false, "remove the default flag from this chat")
 	fs.Usage = func() {
 		fmt.Fprintf(deps.Stderr, "Usage: express-botx config chat set <name> <uuid> [options]\n\nAdd or update a chat alias in the config file.\n\nOptions:\n")
 		fs.PrintDefaults()
@@ -210,6 +230,10 @@ func runChatsAliasSet(args []string, deps Deps) error {
 			return nil
 		}
 		return err
+	}
+
+	if setDefault && unsetDefault {
+		return fmt.Errorf("--default and --no-default are mutually exclusive")
 	}
 
 	if fs.NArg() != 2 {
@@ -233,12 +257,23 @@ func runChatsAliasSet(args []string, deps Deps) error {
 		action = "updated"
 	}
 
+	if setDefault {
+		if err := checkDefaultConflict(cfg.Chats, name); err != nil {
+			return err
+		}
+	}
+
 	// Preserve existing bot binding if --bot not explicitly provided
 	bot := botFlag
 	if bot == "" && exists {
 		bot = existing.Bot
 	}
-	cfg.Chats[name] = config.ChatConfig{ID: uuid, Bot: bot}
+	// Resolve default: --default sets, --no-default clears, otherwise preserve existing
+	isDefault := setDefault
+	if !setDefault && !unsetDefault && exists {
+		isDefault = existing.Default
+	}
+	cfg.Chats[name] = config.ChatConfig{ID: uuid, Bot: bot, Default: isDefault}
 
 	if err := cfg.SaveConfig(); err != nil {
 		return err
@@ -302,11 +337,14 @@ func runChatsAdd(args []string, deps Deps) error {
 	fs.SetOutput(deps.Stderr)
 	var flags config.Flags
 	var nameFilter, alias string
+	var setDefault, unsetDefault bool
 
 	globalFlags(fs, &flags)
 	fs.StringVar(&flags.ChatID, "chat-id", "", "chat UUID (skip API lookup)")
 	fs.StringVar(&nameFilter, "name", "", "chat name to search for (substring match)")
 	fs.StringVar(&alias, "alias", "", "alias name (auto-generated from chat name if omitted)")
+	fs.BoolVar(&setDefault, "default", false, "mark this chat as the default")
+	fs.BoolVar(&unsetDefault, "no-default", false, "remove the default flag from this chat")
 	fs.Usage = func() {
 		fmt.Fprintf(deps.Stderr, "Usage: express-botx config chat add [options]\n\nFind a chat by name via API and add it as an alias to the config.\n\nOptions:\n")
 		fs.PrintDefaults()
@@ -317,6 +355,10 @@ func runChatsAdd(args []string, deps Deps) error {
 			return nil
 		}
 		return err
+	}
+
+	if setDefault && unsetDefault {
+		return fmt.Errorf("--default and --no-default are mutually exclusive")
 	}
 
 	if nameFilter == "" && flags.ChatID == "" {
@@ -336,12 +378,24 @@ func runChatsAdd(args []string, deps Deps) error {
 			cfg.Chats = make(map[string]config.ChatConfig)
 		}
 
+		if setDefault {
+			if err := checkDefaultConflict(cfg.Chats, alias); err != nil {
+				return err
+			}
+		}
+
 		action := "added"
-		if _, exists := cfg.Chats[alias]; exists {
+		existing, exists := cfg.Chats[alias]
+		if exists {
 			action = "updated"
 		}
 
-		cfg.Chats[alias] = config.ChatConfig{ID: flags.ChatID, Bot: flags.Bot}
+		// Resolve default: --default sets, --no-default clears, otherwise preserve existing
+		isDefault := setDefault
+		if !setDefault && !unsetDefault && exists {
+			isDefault = existing.Default
+		}
+		cfg.Chats[alias] = config.ChatConfig{ID: flags.ChatID, Bot: flags.Bot, Default: isDefault}
 		if err := cfg.SaveConfig(); err != nil {
 			return err
 		}
@@ -397,12 +451,24 @@ func runChatsAdd(args []string, deps Deps) error {
 			saveCfg.Chats = make(map[string]config.ChatConfig)
 		}
 
+		if setDefault {
+			if err := checkDefaultConflict(saveCfg.Chats, alias); err != nil {
+				return err
+			}
+		}
+
 		action := "added"
-		if _, exists := saveCfg.Chats[alias]; exists {
+		existing, exists := saveCfg.Chats[alias]
+		if exists {
 			action = "updated"
 		}
 
-		saveCfg.Chats[alias] = config.ChatConfig{ID: chat.GroupChatID, Bot: flags.Bot}
+		// Resolve default: --default sets, --no-default clears, otherwise preserve existing
+		isDefault := setDefault
+		if !setDefault && !unsetDefault && exists {
+			isDefault = existing.Default
+		}
+		saveCfg.Chats[alias] = config.ChatConfig{ID: chat.GroupChatID, Bot: flags.Bot, Default: isDefault}
 		if err := saveCfg.SaveConfig(); err != nil {
 			return err
 		}

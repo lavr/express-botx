@@ -1273,6 +1273,172 @@ bots:
 	}
 }
 
+// --- Default chat ---
+
+func TestChatConfig_UnmarshalYAML_DefaultFlag(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "config.yaml")
+	content := `
+bots:
+  main:
+    host: h
+    id: b
+    secret: s
+chats:
+  general:
+    id: uuid-general
+    default: true
+  deploy: uuid-deploy
+`
+	os.WriteFile(cfgPath, []byte(content), 0644)
+	cfg, err := Load(Flags{ConfigPath: cfgPath})
+	if err != nil {
+		t.Fatalf("Load() error: %v", err)
+	}
+	if !cfg.Chats["general"].Default {
+		t.Error("general.Default = false, want true")
+	}
+	if cfg.Chats["deploy"].Default {
+		t.Error("deploy.Default = true, want false")
+	}
+}
+
+func TestChatConfig_MarshalYAML_DefaultUsesObjectForm(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "config.yaml")
+
+	cfg := &Config{
+		Bots: map[string]BotConfig{
+			"main": {Host: "h", ID: "b", Secret: "s"},
+		},
+		Chats: map[string]ChatConfig{
+			"general": {ID: "uuid-general", Default: true},
+			"deploy":  {ID: "uuid-deploy"},
+		},
+		Cache: CacheConfig{Type: "file", TTL: 3600},
+	}
+	cfg.configPath = cfgPath
+
+	if err := cfg.SaveConfig(); err != nil {
+		t.Fatalf("SaveConfig() error: %v", err)
+	}
+
+	loaded, err := Load(Flags{ConfigPath: cfgPath})
+	if err != nil {
+		t.Fatalf("Load() error: %v", err)
+	}
+	if !loaded.Chats["general"].Default {
+		t.Error("general.Default = false after round-trip, want true")
+	}
+	if loaded.Chats["deploy"].Default {
+		t.Error("deploy.Default = true after round-trip, want false")
+	}
+}
+
+func TestValidateDefaultChat_None(t *testing.T) {
+	cfg := &Config{
+		Chats: map[string]ChatConfig{
+			"a": {ID: "uuid-a"},
+			"b": {ID: "uuid-b"},
+		},
+	}
+	if err := cfg.ValidateDefaultChat(); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestValidateDefaultChat_One(t *testing.T) {
+	cfg := &Config{
+		Chats: map[string]ChatConfig{
+			"a": {ID: "uuid-a", Default: true},
+			"b": {ID: "uuid-b"},
+		},
+	}
+	if err := cfg.ValidateDefaultChat(); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestValidateDefaultChat_Multiple(t *testing.T) {
+	cfg := &Config{
+		Chats: map[string]ChatConfig{
+			"a": {ID: "uuid-a", Default: true},
+			"b": {ID: "uuid-b", Default: true},
+		},
+	}
+	err := cfg.ValidateDefaultChat()
+	if err == nil {
+		t.Fatal("expected error for multiple defaults")
+	}
+	if !strings.Contains(err.Error(), "multiple chats marked as default") {
+		t.Errorf("error = %q, should mention multiple defaults", err.Error())
+	}
+}
+
+func TestDefaultChat_Found(t *testing.T) {
+	cfg := &Config{
+		Chats: map[string]ChatConfig{
+			"a": {ID: "uuid-a"},
+			"b": {ID: "uuid-b", Default: true},
+		},
+	}
+	alias, chat := cfg.DefaultChat()
+	if alias != "b" {
+		t.Errorf("alias = %q, want %q", alias, "b")
+	}
+	if chat.ID != "uuid-b" {
+		t.Errorf("chat.ID = %q, want %q", chat.ID, "uuid-b")
+	}
+}
+
+func TestDefaultChat_NotFound(t *testing.T) {
+	cfg := &Config{
+		Chats: map[string]ChatConfig{
+			"a": {ID: "uuid-a"},
+			"b": {ID: "uuid-b"},
+		},
+	}
+	alias, _ := cfg.DefaultChat()
+	if alias != "" {
+		t.Errorf("alias = %q, want empty", alias)
+	}
+}
+
+func TestRequireChatIDWithBot_DefaultChat(t *testing.T) {
+	cfg := &Config{
+		Chats: map[string]ChatConfig{
+			"a": {ID: "uuid-a"},
+			"b": {ID: "uuid-b", Default: true, Bot: "some-bot"},
+		},
+	}
+	botName, err := cfg.RequireChatIDWithBot()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if cfg.ChatID != "uuid-b" {
+		t.Errorf("ChatID = %q, want %q", cfg.ChatID, "uuid-b")
+	}
+	if botName != "some-bot" {
+		t.Errorf("botName = %q, want %q", botName, "some-bot")
+	}
+}
+
+func TestRequireChatIDWithBot_NoDefault_MultipleChats(t *testing.T) {
+	cfg := &Config{
+		Chats: map[string]ChatConfig{
+			"a": {ID: "uuid-a"},
+			"b": {ID: "uuid-b"},
+		},
+	}
+	_, err := cfg.RequireChatIDWithBot()
+	if err == nil {
+		t.Fatal("expected error for multiple chats without default")
+	}
+	if !strings.Contains(err.Error(), "multiple chats") {
+		t.Errorf("error = %q, should mention multiple chats", err.Error())
+	}
+}
+
 func TestValidateBotConfigs_MultiBotOneWithTokenAndSecret(t *testing.T) {
 	cfg := &Config{
 		Bots: map[string]BotConfig{
@@ -1286,5 +1452,103 @@ func TestValidateBotConfigs_MultiBotOneWithTokenAndSecret(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "bad") {
 		t.Errorf("error should mention bad bot, got: %v", err)
+	}
+}
+
+func TestLoad_MultipleDefaultChats_Error(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "config.yaml")
+	content := `
+bots:
+  main:
+    host: express.example.com
+    id: bot-123
+    secret: my-secret
+chats:
+  alerts:
+    id: chat-111
+    default: true
+  general:
+    id: chat-222
+    default: true
+`
+	if err := os.WriteFile(cfgPath, []byte(content), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := Load(Flags{ConfigPath: cfgPath})
+	if err == nil {
+		t.Fatal("expected error for multiple default chats")
+	}
+	if !strings.Contains(err.Error(), "multiple chats marked as default") {
+		t.Errorf("unexpected error: %v", err)
+	}
+}
+
+func TestLoad_MultiBotDefaultChatBotBinding(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "config.yaml")
+	content := `
+bots:
+  deploy-bot:
+    host: express.example.com
+    id: bot-deploy
+    secret: secret-deploy
+  alert-bot:
+    host: express.example.com
+    id: bot-alert
+    secret: secret-alert
+chats:
+  deploy:
+    id: chat-deploy
+    bot: deploy-bot
+  alerts:
+    id: chat-alerts
+    bot: alert-bot
+  general:
+    id: chat-general
+    bot: deploy-bot
+    default: true
+`
+	if err := os.WriteFile(cfgPath, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg, err := Load(Flags{ConfigPath: cfgPath})
+	if err != nil {
+		t.Fatalf("Load() should succeed with default chat bot binding, got: %v", err)
+	}
+	if cfg.BotID != "bot-deploy" {
+		t.Errorf("BotID = %q, want %q (from default chat's bot binding)", cfg.BotID, "bot-deploy")
+	}
+}
+
+func TestLoadForServe_MultipleDefaultChats_Error(t *testing.T) {
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "config.yaml")
+	content := `
+bots:
+  main:
+    host: express.example.com
+    id: bot-123
+    secret: my-secret
+chats:
+  alerts:
+    id: chat-111
+    default: true
+  general:
+    id: chat-222
+    default: true
+`
+	if err := os.WriteFile(cfgPath, []byte(content), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := LoadForServe(Flags{ConfigPath: cfgPath})
+	if err == nil {
+		t.Fatal("expected error for multiple default chats")
+	}
+	if !strings.Contains(err.Error(), "multiple chats marked as default") {
+		t.Errorf("unexpected error: %v", err)
 	}
 }

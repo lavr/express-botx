@@ -28,6 +28,7 @@ type Config struct {
 	BotSignatures      map[string]string // signature -> bot name (multi-bot) or "" (single-bot)
 	BotNames           []string          // available bot names; if len > 1, bot is required in requests
 	SingleBotName      string            // name of the single bot (when not multi-bot); used to reject mismatched chat bindings
+	DefaultChatAlias   string            // alias of the chat marked as default; used when chat_id is omitted
 	EnableDocs         bool              // serve /docs (Swagger UI) and /docs/openapi.yaml
 	ExternalURL        string            // public URL for OpenAPI docs server variable
 	AppVersion         string            // application version (from -ldflags), replaces version in OpenAPI spec
@@ -144,6 +145,9 @@ func New(cfg Config, sendFn SendFunc, chatResolver ChatResolver, opts ...Option)
 		route("POST", "/alertmanager", s.handleAlertmanager)
 		chatInfo := s.amCfg.DefaultChatID
 		if chatInfo == "" {
+			chatInfo = cfg.DefaultChatAlias
+		}
+		if chatInfo == "" {
 			chatInfo = s.amCfg.FallbackChatID
 		}
 		if chatInfo == "" {
@@ -155,6 +159,9 @@ func New(cfg Config, sendFn SendFunc, chatResolver ChatResolver, opts ...Option)
 	if s.grCfg != nil {
 		route("POST", "/grafana", s.handleGrafana)
 		chatInfo := s.grCfg.DefaultChatID
+		if chatInfo == "" {
+			chatInfo = cfg.DefaultChatAlias
+		}
 		if chatInfo == "" {
 			chatInfo = s.grCfg.FallbackChatID
 		}

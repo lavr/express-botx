@@ -88,8 +88,11 @@ func (s *Server) handleGrafana(w http.ResponseWriter, r *http.Request) {
 	// Determine status
 	status := s.resolveGrafanaStatus(webhook)
 
-	// Resolve chat: query param > default_chat_id > single chat from config
+	// Resolve chat: query param > default_chat_id > global default chat > single chat from config
 	targetChat := s.grCfg.DefaultChatID
+	if targetChat == "" {
+		targetChat = s.cfg.DefaultChatAlias
+	}
 	if targetChat == "" {
 		targetChat = s.grCfg.FallbackChatID
 	}

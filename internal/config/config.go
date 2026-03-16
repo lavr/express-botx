@@ -76,10 +76,11 @@ type BotConfig struct {
 }
 
 // ChatConfig represents a chat alias with an optional default bot.
-// Supports both short form (just UUID string) and long form ({id, bot}) in YAML.
+// Supports both short form (just UUID string) and long form ({id, bot, default}) in YAML.
 type ChatConfig struct {
-	ID  string `yaml:"id"`
-	Bot string `yaml:"bot,omitempty"`
+	ID      string `yaml:"id"`
+	Bot     string `yaml:"bot,omitempty"`
+	Default bool   `yaml:"default,omitempty"`
 }
 
 // UnmarshalYAML supports both string ("UUID") and object ({id: "UUID", bot: "name"}) forms.
@@ -92,9 +93,9 @@ func (c *ChatConfig) UnmarshalYAML(value *yaml.Node) error {
 	return value.Decode((*plain)(c))
 }
 
-// MarshalYAML preserves short form for chats without a bot binding.
+// MarshalYAML preserves short form for chats without a bot binding or default flag.
 func (c ChatConfig) MarshalYAML() (any, error) {
-	if c.Bot == "" {
+	if c.Bot == "" && !c.Default {
 		return c.ID, nil
 	}
 	type plain ChatConfig
@@ -150,6 +151,11 @@ func Load(flags Flags) (*Config, error) {
 
 	// Validate: no bot has both secret and token in YAML
 	if err := cfg.validateBotConfigs(); err != nil {
+		return nil, err
+	}
+
+	// Validate: at most one chat marked as default
+	if err := cfg.ValidateDefaultChat(); err != nil {
 		return nil, err
 	}
 
@@ -233,6 +239,11 @@ func LoadForServe(flags Flags) (*Config, error) {
 
 	// Validate: no bot has both secret and token in YAML
 	if err := cfg.validateBotConfigs(); err != nil {
+		return nil, err
+	}
+
+	// Validate: at most one chat marked as default
+	if err := cfg.ValidateDefaultChat(); err != nil {
 		return nil, err
 	}
 
@@ -365,9 +376,10 @@ func (c *Config) BotEntries() []BotEntry {
 
 // ChatEntry is a chat alias summary for display.
 type ChatEntry struct {
-	Name string `json:"name"`
-	ID   string `json:"id"`
-	Bot  string `json:"bot,omitempty"`
+	Name    string `json:"name"`
+	ID      string `json:"id"`
+	Bot     string `json:"bot,omitempty"`
+	Default bool   `json:"default,omitempty"`
 }
 
 // ChatEntries returns sorted chat entries for display.
@@ -380,7 +392,7 @@ func (c *Config) ChatEntries() []ChatEntry {
 	entries := make([]ChatEntry, 0, len(names))
 	for _, name := range names {
 		chat := c.Chats[name]
-		entries = append(entries, ChatEntry{Name: name, ID: chat.ID, Bot: chat.Bot})
+		entries = append(entries, ChatEntry{Name: name, ID: chat.ID, Bot: chat.Bot, Default: chat.Default})
 	}
 	return entries
 }
@@ -447,6 +459,10 @@ func (c *Config) RequireChatIDWithBot() (botName string, err error) {
 			return chat.Bot, nil
 		}
 	default:
+		if alias, chat := c.DefaultChat(); alias != "" {
+			c.ChatID = chat.ID
+			return chat.Bot, nil
+		}
 		names := make([]string, 0, len(c.Chats))
 		for k := range c.Chats {
 			names = append(names, k)
@@ -485,9 +501,36 @@ func (c *Config) ValidateChatBots(strict bool) error {
 	return nil
 }
 
+// ValidateDefaultChat checks that at most one chat is marked as default.
+func (c *Config) ValidateDefaultChat() error {
+	var defaults []string
+	for name, chat := range c.Chats {
+		if chat.Default {
+			defaults = append(defaults, name)
+		}
+	}
+	if len(defaults) > 1 {
+		sort.Strings(defaults)
+		return fmt.Errorf("multiple chats marked as default: %s — only one allowed",
+			strings.Join(defaults, ", "))
+	}
+	return nil
+}
+
+// DefaultChat returns the alias and config of the chat marked as default.
+// Returns empty alias if no default is configured.
+func (c *Config) DefaultChat() (alias string, chat ChatConfig) {
+	for name, ch := range c.Chats {
+		if ch.Default {
+			return name, ch
+		}
+	}
+	return "", ChatConfig{}
+}
+
 // resolveChatBotFromFlags looks up the chat-bound bot from a ChatID flag value
-// without mutating config state. If chatID is empty and there is exactly one
-// chat alias with a bot binding, returns that bot (mirrors RequireChatID auto-select).
+// without mutating config state. If chatID is empty, returns a bot from the single
+// chat alias or from the default chat's bot binding (mirrors RequireChatID auto-select).
 func (c *Config) resolveChatBotFromFlags(chatID string) string {
 	if chatID != "" {
 		if chat, ok := c.Chats[chatID]; ok {
@@ -500,6 +543,10 @@ func (c *Config) resolveChatBotFromFlags(chatID string) string {
 		for _, chat := range c.Chats {
 			return chat.Bot
 		}
+	}
+	// Multiple chats — check if the default chat has a bot binding
+	if _, chat := c.DefaultChat(); chat.Bot != "" {
+		return chat.Bot
 	}
 	return ""
 }

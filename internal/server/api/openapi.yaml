@@ -120,6 +120,8 @@ paths:
         Supports JSON and multipart/form-data content types.
         At least one of `message` or `file` is required.
 
+        `chat_id` is optional when a default chat is configured (`default: true` in chats section).
+
         In multi-bot mode, `bot` is required unless the chat alias has a default bot binding in config.
       requestBody:
         required: true
@@ -150,10 +152,10 @@ paths:
           multipart/form-data:
             schema:
               type: object
-              required: [chat_id]
               properties:
                 chat_id:
                   type: string
+                  description: Target chat UUID or alias (optional if default chat configured)
                 message:
                   type: string
                 file:
@@ -227,8 +229,9 @@ paths:
 
         Chat resolution priority:
         1. `?chat_id=` query parameter
-        2. `default_chat_id` from config
-        3. Single chat alias from config
+        2. `default_chat_id` from webhook config
+        3. Global default chat (`default: true` in chats section)
+        4. Single chat alias from config
       parameters:
         - name: chat_id
           in: query
@@ -312,8 +315,9 @@ paths:
 
         Chat resolution priority:
         1. `?chat_id=` query parameter
-        2. `default_chat_id` from config
-        3. Single chat alias from config
+        2. `default_chat_id` from webhook config
+        3. Global default chat (`default: true` in chats section)
+        4. Single chat alias from config
       parameters:
         - name: chat_id
           in: query
@@ -415,11 +419,10 @@ components:
   schemas:
     SendRequest:
       type: object
-      required: [chat_id]
       properties:
         chat_id:
           type: string
-          description: Target chat UUID or alias
+          description: Target chat UUID or alias (optional if default chat configured)
           example: "1a2b3c4d-5e6f-7890-abcd-ef1234567890"
         message:
           type: string
