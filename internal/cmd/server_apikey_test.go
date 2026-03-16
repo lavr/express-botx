@@ -6,42 +6,6 @@ import (
 	"testing"
 )
 
-// --- server dispatcher ---
-
-func TestRunServer_NoArgs(t *testing.T) {
-	deps, _, _ := testDeps()
-	err := runServer(nil, deps)
-	if err == nil || !strings.Contains(err.Error(), "subcommand required") {
-		t.Errorf("expected subcommand required error, got: %v", err)
-	}
-}
-
-func TestRunServer_Unknown(t *testing.T) {
-	deps, _, _ := testDeps()
-	err := runServer([]string{"foobar"}, deps)
-	if err == nil || !strings.Contains(err.Error(), "unknown subcommand") {
-		t.Errorf("expected unknown subcommand error, got: %v", err)
-	}
-}
-
-// --- server apikey dispatcher ---
-
-func TestRunServerAPIKey_NoArgs(t *testing.T) {
-	deps, _, _ := testDeps()
-	err := runServerAPIKey(nil, deps)
-	if err == nil || !strings.Contains(err.Error(), "subcommand required") {
-		t.Errorf("expected subcommand required error, got: %v", err)
-	}
-}
-
-func TestRunServerAPIKey_Unknown(t *testing.T) {
-	deps, _, _ := testDeps()
-	err := runServerAPIKey([]string{"foobar"}, deps)
-	if err == nil || !strings.Contains(err.Error(), "unknown subcommand") {
-		t.Errorf("expected unknown subcommand error, got: %v", err)
-	}
-}
-
 // --- server apikey list ---
 
 func TestServerAPIKeyList_Empty(t *testing.T) {

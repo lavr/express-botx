@@ -15,7 +15,7 @@ import (
 func runChats(args []string, deps Deps) error {
 	if len(args) == 0 {
 		printChatsUsage(deps.Stderr)
-		return fmt.Errorf("subcommand required: list, info, add, alias")
+		return fmt.Errorf("subcommand required: list, info")
 	}
 
 	switch args[0] {
@@ -23,10 +23,6 @@ func runChats(args []string, deps Deps) error {
 		return runChatsList(args[1:], deps)
 	case "info":
 		return runChatsInfo(args[1:], deps)
-	case "add":
-		return runChatsAdd(args[1:], deps)
-	case "alias":
-		return runChatsAlias(args[1:], deps)
 	case "--help", "-h":
 		printChatsUsage(deps.Stderr)
 		return nil
@@ -150,37 +146,15 @@ func runChatsInfo(args []string, deps Deps) error {
 	}, chat)
 }
 
-func runChatsAlias(args []string, deps Deps) error {
-	if len(args) == 0 {
-		printChatsAliasUsage(deps.Stderr)
-		return fmt.Errorf("subcommand required: list, set, rm")
-	}
-
-	switch args[0] {
-	case "list":
-		return runChatsAliasList(args[1:], deps)
-	case "set":
-		return runChatsAliasSet(args[1:], deps)
-	case "rm":
-		return runChatsAliasRm(args[1:], deps)
-	case "--help", "-h":
-		printChatsAliasUsage(deps.Stderr)
-		return nil
-	default:
-		printChatsAliasUsage(deps.Stderr)
-		return fmt.Errorf("unknown subcommand: chats alias %s", args[0])
-	}
-}
-
 func runChatsAliasList(args []string, deps Deps) error {
-	fs := flag.NewFlagSet("chats alias list", flag.ContinueOnError)
+	fs := flag.NewFlagSet("config chat list", flag.ContinueOnError)
 	fs.SetOutput(deps.Stderr)
 	var flags config.Flags
 
 	fs.StringVar(&flags.ConfigPath, "config", "", "path to config file")
 	fs.StringVar(&flags.Format, "format", "", "output format: text or json (default: text)")
 	fs.Usage = func() {
-		fmt.Fprintf(deps.Stderr, "Usage: express-botx chats alias list [options]\n\nList configured chat aliases.\n\nOptions:\n")
+		fmt.Fprintf(deps.Stderr, "Usage: express-botx config chat list [options]\n\nList configured chat aliases.\n\nOptions:\n")
 		fs.PrintDefaults()
 	}
 
@@ -204,7 +178,7 @@ func runChatsAliasList(args []string, deps Deps) error {
 	return printOutput(deps.Stdout, cfg.Format, func() {
 		if len(entries) == 0 {
 			fmt.Fprintln(deps.Stdout, "No chat aliases configured.")
-			fmt.Fprintf(deps.Stdout, "Add one with: express-botx chats alias set <name> <uuid>\n")
+			fmt.Fprintf(deps.Stdout, "Add one with: express-botx config chat set <name> <uuid>\n")
 			return
 		}
 		fmt.Fprintf(deps.Stdout, "Chat aliases (%d):\n", len(entries))
@@ -219,7 +193,7 @@ func runChatsAliasList(args []string, deps Deps) error {
 }
 
 func runChatsAliasSet(args []string, deps Deps) error {
-	fs := flag.NewFlagSet("chats alias set", flag.ContinueOnError)
+	fs := flag.NewFlagSet("config chat set", flag.ContinueOnError)
 	fs.SetOutput(deps.Stderr)
 	var flags config.Flags
 
@@ -227,7 +201,7 @@ func runChatsAliasSet(args []string, deps Deps) error {
 	fs.StringVar(&flags.ConfigPath, "config", "", "path to config file")
 	fs.StringVar(&botFlag, "bot", "", "default bot for this chat")
 	fs.Usage = func() {
-		fmt.Fprintf(deps.Stderr, "Usage: express-botx chats alias set <name> <uuid> [options]\n\nAdd or update a chat alias in the config file.\n\nOptions:\n")
+		fmt.Fprintf(deps.Stderr, "Usage: express-botx config chat set <name> <uuid> [options]\n\nAdd or update a chat alias in the config file.\n\nOptions:\n")
 		fs.PrintDefaults()
 	}
 
@@ -239,7 +213,7 @@ func runChatsAliasSet(args []string, deps Deps) error {
 	}
 
 	if fs.NArg() != 2 {
-		return fmt.Errorf("usage: chats alias set <name> <uuid> [--bot <bot>]")
+		return fmt.Errorf("usage: config chat set <name> <uuid> [--bot <bot>]")
 	}
 	name := fs.Arg(0)
 	uuid := fs.Arg(1)
@@ -279,13 +253,13 @@ func runChatsAliasSet(args []string, deps Deps) error {
 }
 
 func runChatsAliasRm(args []string, deps Deps) error {
-	fs := flag.NewFlagSet("chats alias rm", flag.ContinueOnError)
+	fs := flag.NewFlagSet("config chat rm", flag.ContinueOnError)
 	fs.SetOutput(deps.Stderr)
 	var flags config.Flags
 
 	fs.StringVar(&flags.ConfigPath, "config", "", "path to config file")
 	fs.Usage = func() {
-		fmt.Fprintf(deps.Stderr, "Usage: express-botx chats alias rm <name> [options]\n\nRemove a chat alias from the config file.\n\nOptions:\n")
+		fmt.Fprintf(deps.Stderr, "Usage: express-botx config chat rm <name> [options]\n\nRemove a chat alias from the config file.\n\nOptions:\n")
 		fs.PrintDefaults()
 	}
 
@@ -297,7 +271,7 @@ func runChatsAliasRm(args []string, deps Deps) error {
 	}
 
 	if fs.NArg() != 1 {
-		return fmt.Errorf("usage: chats alias rm <name>")
+		return fmt.Errorf("usage: config chat rm <name>")
 	}
 	name := fs.Arg(0)
 
@@ -324,7 +298,7 @@ func runChatsAliasRm(args []string, deps Deps) error {
 }
 
 func runChatsAdd(args []string, deps Deps) error {
-	fs := flag.NewFlagSet("chats add", flag.ContinueOnError)
+	fs := flag.NewFlagSet("config chat add", flag.ContinueOnError)
 	fs.SetOutput(deps.Stderr)
 	var flags config.Flags
 	var nameFilter, alias string
@@ -334,7 +308,7 @@ func runChatsAdd(args []string, deps Deps) error {
 	fs.StringVar(&nameFilter, "name", "", "chat name to search for (substring match)")
 	fs.StringVar(&alias, "alias", "", "alias name (auto-generated from chat name if omitted)")
 	fs.Usage = func() {
-		fmt.Fprintf(deps.Stderr, "Usage: express-botx chats add [options]\n\nFind a chat by name via API and add it as an alias to the config.\n\nOptions:\n")
+		fmt.Fprintf(deps.Stderr, "Usage: express-botx config chat add [options]\n\nFind a chat by name via API and add it as an alias to the config.\n\nOptions:\n")
 		fs.PrintDefaults()
 	}
 
@@ -467,27 +441,13 @@ func slugify(name string) string {
 	return strings.TrimRight(b.String(), "-")
 }
 
-func printChatsAliasUsage(w io.Writer) {
-	fmt.Fprintf(w, `Usage: express-botx chats alias <command> [options]
-
-Commands:
-  list    List configured chat aliases
-  set     Add or update a chat alias
-  rm      Remove a chat alias
-
-Run "express-botx chats alias <command> --help" for details on a specific command.
-`)
-}
-
 func printChatsUsage(w io.Writer) {
 	fmt.Fprintf(w, `Usage: express-botx chats <command> [options]
 
 Commands:
   list    List chats the bot is a member of
   info    Show detailed information about a chat
-  add     Find a chat and add it to config
-  alias   Manage chat aliases (set, list, rm)
 
-Run "express-botx chats <command> --help" for details on a specific command.
+Config management: use "express-botx config chat" (add, set, rm, list).
 `)
 }

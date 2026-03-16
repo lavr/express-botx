@@ -4,61 +4,20 @@ import (
 	"errors"
 	"flag"
 	"fmt"
-	"io"
 	"strings"
 
 	"github.com/lavr/express-botx/internal/config"
 )
 
-func runServer(args []string, deps Deps) error {
-	if len(args) == 0 {
-		printServerUsage(deps.Stderr)
-		return fmt.Errorf("subcommand required: apikey")
-	}
-
-	switch args[0] {
-	case "apikey":
-		return runServerAPIKey(args[1:], deps)
-	case "--help", "-h":
-		printServerUsage(deps.Stderr)
-		return nil
-	default:
-		printServerUsage(deps.Stderr)
-		return fmt.Errorf("unknown subcommand: server %s", args[0])
-	}
-}
-
-func runServerAPIKey(args []string, deps Deps) error {
-	if len(args) == 0 {
-		printServerAPIKeyUsage(deps.Stderr)
-		return fmt.Errorf("subcommand required: list, add, rm")
-	}
-
-	switch args[0] {
-	case "list":
-		return runServerAPIKeyList(args[1:], deps)
-	case "add":
-		return runServerAPIKeyAdd(args[1:], deps)
-	case "rm":
-		return runServerAPIKeyRm(args[1:], deps)
-	case "--help", "-h":
-		printServerAPIKeyUsage(deps.Stderr)
-		return nil
-	default:
-		printServerAPIKeyUsage(deps.Stderr)
-		return fmt.Errorf("unknown subcommand: server apikey %s", args[0])
-	}
-}
-
 func runServerAPIKeyList(args []string, deps Deps) error {
-	fs := flag.NewFlagSet("server apikey list", flag.ContinueOnError)
+	fs := flag.NewFlagSet("config apikey list", flag.ContinueOnError)
 	fs.SetOutput(deps.Stderr)
 	var flags config.Flags
 
 	fs.StringVar(&flags.ConfigPath, "config", "", "path to config file")
 	fs.StringVar(&flags.Format, "format", "", "output format: text or json (default: text)")
 	fs.Usage = func() {
-		fmt.Fprintf(deps.Stderr, "Usage: express-botx server apikey list [options]\n\nList configured server API keys.\n\nOptions:\n")
+		fmt.Fprintf(deps.Stderr, "Usage: express-botx config apikey list [options]\n\nList configured server API keys.\n\nOptions:\n")
 		fs.PrintDefaults()
 	}
 
@@ -89,7 +48,7 @@ func runServerAPIKeyList(args []string, deps Deps) error {
 	return printOutput(deps.Stdout, cfg.Format, func() {
 		if len(info) == 0 {
 			fmt.Fprintln(deps.Stdout, "No API keys configured.")
-			fmt.Fprintln(deps.Stdout, "Add one with: express-botx server apikey add --name NAME")
+			fmt.Fprintln(deps.Stdout, "Add one with: express-botx config apikey add --name NAME")
 			return
 		}
 		fmt.Fprintf(deps.Stdout, "API keys (%d):\n", len(info))
@@ -100,7 +59,7 @@ func runServerAPIKeyList(args []string, deps Deps) error {
 }
 
 func runServerAPIKeyAdd(args []string, deps Deps) error {
-	fs := flag.NewFlagSet("server apikey add", flag.ContinueOnError)
+	fs := flag.NewFlagSet("config apikey add", flag.ContinueOnError)
 	fs.SetOutput(deps.Stderr)
 	var flags config.Flags
 	var name, key string
@@ -109,7 +68,7 @@ func runServerAPIKeyAdd(args []string, deps Deps) error {
 	fs.StringVar(&name, "name", "", "key name (required)")
 	fs.StringVar(&key, "key", "", "key value (generated if omitted)")
 	fs.Usage = func() {
-		fmt.Fprintf(deps.Stderr, "Usage: express-botx server apikey add --name NAME [--key VALUE] [options]\n\nAdd an API key to the server config.\nIf --key is omitted, a random key is generated.\n\nOptions:\n")
+		fmt.Fprintf(deps.Stderr, "Usage: express-botx config apikey add --name NAME [--key VALUE] [options]\n\nAdd an API key to the server config.\nIf --key is omitted, a random key is generated.\n\nOptions:\n")
 		fs.PrintDefaults()
 	}
 
@@ -131,7 +90,7 @@ func runServerAPIKeyAdd(args []string, deps Deps) error {
 
 	for _, k := range cfg.Server.APIKeys {
 		if k.Name == name {
-			return fmt.Errorf("API key %q already exists, remove it first with: server apikey rm %s", name, name)
+			return fmt.Errorf("API key %q already exists, remove it first with: config apikey rm %s", name, name)
 		}
 	}
 
@@ -157,13 +116,13 @@ func runServerAPIKeyAdd(args []string, deps Deps) error {
 }
 
 func runServerAPIKeyRm(args []string, deps Deps) error {
-	fs := flag.NewFlagSet("server apikey rm", flag.ContinueOnError)
+	fs := flag.NewFlagSet("config apikey rm", flag.ContinueOnError)
 	fs.SetOutput(deps.Stderr)
 	var flags config.Flags
 
 	fs.StringVar(&flags.ConfigPath, "config", "", "path to config file")
 	fs.Usage = func() {
-		fmt.Fprintf(deps.Stderr, "Usage: express-botx server apikey rm <name> [options]\n\nRemove an API key from the server config.\n\nOptions:\n")
+		fmt.Fprintf(deps.Stderr, "Usage: express-botx config apikey rm <name> [options]\n\nRemove an API key from the server config.\n\nOptions:\n")
 		fs.PrintDefaults()
 	}
 
@@ -175,7 +134,7 @@ func runServerAPIKeyRm(args []string, deps Deps) error {
 	}
 
 	if fs.NArg() != 1 {
-		return fmt.Errorf("usage: server apikey rm <name>")
+		return fmt.Errorf("usage: config apikey rm <name>")
 	}
 	name := fs.Arg(0)
 
@@ -218,26 +177,4 @@ func describeKeySource(key string) string {
 		return key
 	}
 	return fmt.Sprintf("literal (%d chars)", len(key))
-}
-
-func printServerUsage(w io.Writer) {
-	fmt.Fprintf(w, `Usage: express-botx server <command> [options]
-
-Commands:
-  apikey  Manage server API keys (add, list, rm)
-
-Run "express-botx server <command> --help" for details on a specific command.
-`)
-}
-
-func printServerAPIKeyUsage(w io.Writer) {
-	fmt.Fprintf(w, `Usage: express-botx server apikey <command> [options]
-
-Commands:
-  list    List configured API keys
-  add     Add an API key
-  rm      Remove an API key
-
-Run "express-botx server apikey <command> --help" for details on a specific command.
-`)
 }

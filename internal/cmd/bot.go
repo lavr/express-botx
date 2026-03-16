@@ -18,7 +18,7 @@ import (
 func runBot(args []string, deps Deps) error {
 	if len(args) == 0 {
 		printBotUsage(deps.Stderr)
-		return fmt.Errorf("subcommand required: ping, info, token, list, add, rm")
+		return fmt.Errorf("subcommand required: ping, info, token")
 	}
 
 	switch args[0] {
@@ -28,12 +28,6 @@ func runBot(args []string, deps Deps) error {
 		return runBotInfo(args[1:], deps)
 	case "token":
 		return runBotToken(args[1:], deps)
-	case "list":
-		return runBotList(args[1:], deps)
-	case "add":
-		return runBotAdd(args[1:], deps)
-	case "rm":
-		return runBotRm(args[1:], deps)
 	case "--help", "-h":
 		printBotUsage(deps.Stderr)
 		return nil
@@ -183,14 +177,14 @@ func runBotInfo(args []string, deps Deps) error {
 }
 
 func runBotList(args []string, deps Deps) error {
-	fs := flag.NewFlagSet("bot list", flag.ContinueOnError)
+	fs := flag.NewFlagSet("config bot list", flag.ContinueOnError)
 	fs.SetOutput(deps.Stderr)
 	var flags config.Flags
 
 	fs.StringVar(&flags.ConfigPath, "config", "", "path to config file")
 	fs.StringVar(&flags.Format, "format", "", "output format: text or json (default: text)")
 	fs.Usage = func() {
-		fmt.Fprintf(deps.Stderr, "Usage: express-botx bot list [options]\n\nList bots configured in the config file.\n\nOptions:\n")
+		fmt.Fprintf(deps.Stderr, "Usage: express-botx config bot list [options]\n\nList bots configured in the config file.\n\nOptions:\n")
 		fs.PrintDefaults()
 	}
 
@@ -214,7 +208,7 @@ func runBotList(args []string, deps Deps) error {
 	return printOutput(deps.Stdout, cfg.Format, func() {
 		if len(entries) == 0 {
 			fmt.Fprintln(deps.Stdout, "No bots configured.")
-			fmt.Fprintln(deps.Stdout, "Add one with: express-botx bot add --host HOST --bot-id UUID --secret SECRET")
+			fmt.Fprintln(deps.Stdout, "Add one with: express-botx config bot add --host HOST --bot-id UUID --secret SECRET")
 			return
 		}
 		fmt.Fprintf(deps.Stdout, "Bots (%d):\n", len(entries))
@@ -225,7 +219,7 @@ func runBotList(args []string, deps Deps) error {
 }
 
 func runBotAdd(args []string, deps Deps) error {
-	fs := flag.NewFlagSet("bot add", flag.ContinueOnError)
+	fs := flag.NewFlagSet("config bot add", flag.ContinueOnError)
 	fs.SetOutput(deps.Stderr)
 	var flags config.Flags
 	var name, host, botID, secretVal, tokenVal string
@@ -239,7 +233,7 @@ func runBotAdd(args []string, deps Deps) error {
 	fs.StringVar(&tokenVal, "token", "", "bot token (alternative to --secret)")
 	fs.BoolVar(&saveSecret, "save-secret", false, "save secret instead of exchanging for token")
 	fs.Usage = func() {
-		fmt.Fprintf(deps.Stderr, "Usage: express-botx bot add --host HOST --bot-id ID (--secret SECRET | --token TOKEN) [options]\n\nAdd or update a bot in the config file.\nWith --secret: exchanges for token via API (use --save-secret to keep secret).\nWith --token: saves token as-is.\n\nOptions:\n")
+		fmt.Fprintf(deps.Stderr, "Usage: express-botx config bot add --host HOST --bot-id ID (--secret SECRET | --token TOKEN) [options]\n\nAdd or update a bot in the config file.\nWith --secret: exchanges for token via API (use --save-secret to keep secret).\nWith --token: saves token as-is.\n\nOptions:\n")
 		fs.PrintDefaults()
 	}
 
@@ -341,13 +335,13 @@ func runBotAdd(args []string, deps Deps) error {
 }
 
 func runBotRm(args []string, deps Deps) error {
-	fs := flag.NewFlagSet("bot rm", flag.ContinueOnError)
+	fs := flag.NewFlagSet("config bot rm", flag.ContinueOnError)
 	fs.SetOutput(deps.Stderr)
 	var flags config.Flags
 
 	fs.StringVar(&flags.ConfigPath, "config", "", "path to config file")
 	fs.Usage = func() {
-		fmt.Fprintf(deps.Stderr, "Usage: express-botx bot rm <name> [options]\n\nRemove a bot from the config file.\n\nOptions:\n")
+		fmt.Fprintf(deps.Stderr, "Usage: express-botx config bot rm <name> [options]\n\nRemove a bot from the config file.\n\nOptions:\n")
 		fs.PrintDefaults()
 	}
 
@@ -359,7 +353,7 @@ func runBotRm(args []string, deps Deps) error {
 	}
 
 	if fs.NArg() != 1 {
-		return fmt.Errorf("usage: bot rm <name>")
+		return fmt.Errorf("usage: config bot rm <name>")
 	}
 	name := fs.Arg(0)
 
@@ -438,10 +432,7 @@ Commands:
   ping    Check bot authentication and API connectivity
   info    Show bot configuration and auth status
   token   Get bot token (exchange secret via API or print static token)
-  list    List bots configured in the config file
-  add     Add or update a bot in the config file
-  rm      Remove a bot from the config file
 
-Run "express-botx bot <command> --help" for details on a specific command.
+Config management: use "express-botx config bot" (add, rm, list).
 `)
 }

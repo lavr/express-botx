@@ -53,7 +53,7 @@ func Run(args []string, deps Deps) error {
 
 	if len(args) == 0 {
 		printUsage(deps.Stderr)
-		return fmt.Errorf("subcommand required: send, serve, chats, bot, server, user")
+		return fmt.Errorf("subcommand required: send, serve, chats, bot, config, user")
 	}
 
 	switch args[0] {
@@ -67,8 +67,8 @@ func Run(args []string, deps Deps) error {
 		return runBot(args[1:], deps)
 	case "user":
 		return runUser(args[1:], deps)
-	case "server":
-		return runServer(args[1:], deps)
+	case "config":
+		return runConfig(args[1:], deps)
 	case "--version", "version":
 		fmt.Fprintln(deps.Stdout, Version)
 		return nil
@@ -194,9 +194,9 @@ func printUsage(w io.Writer) {
 Commands:
   send    Send a message and/or file to an eXpress chat
   serve   Start HTTP server for sending messages via API
-  chats   Manage chats (list, info, add, alias)
-  bot     Bot management (ping, info, list, add, rm)
-  server  Manage server config (apikey)
+  chats   Chat operations (list, info)
+  bot     Bot operations (ping, info, token)
+  config  Manage configuration (bot, chat, apikey, show)
   user    User operations (search)
 
 Run "express-botx <command> --help" for details on a specific command.

@@ -433,7 +433,7 @@ func TestChatsAliasSet_WrongArgs(t *testing.T) {
 	deps, _, _ := testDeps()
 
 	err := runChatsAliasSet([]string{"--config", cfgPath, "onlyone"}, deps)
-	if err == nil || !strings.Contains(err.Error(), "usage") {
+	if err == nil || !strings.Contains(err.Error(), "config chat set") {
 		t.Errorf("expected usage error, got: %v", err)
 	}
 }
@@ -466,21 +466,76 @@ func TestChatsAliasRm_NotFound(t *testing.T) {
 	}
 }
 
-// --- chats alias dispatcher ---
+// --- config dispatcher ---
 
-func TestChatsAlias_NoArgs(t *testing.T) {
+func TestRunConfig_NoArgs(t *testing.T) {
 	deps, _, _ := testDeps()
-	err := runChatsAlias(nil, deps)
+	err := runConfig(nil, deps)
 	if err == nil || !strings.Contains(err.Error(), "subcommand required") {
-		t.Errorf("expected subcommand required, got: %v", err)
+		t.Errorf("expected subcommand required error, got: %v", err)
 	}
 }
 
-func TestChatsAlias_Unknown(t *testing.T) {
+func TestRunConfig_Unknown(t *testing.T) {
 	deps, _, _ := testDeps()
-	err := runChatsAlias([]string{"foobar"}, deps)
+	err := runConfig([]string{"foobar"}, deps)
 	if err == nil || !strings.Contains(err.Error(), "unknown subcommand") {
-		t.Errorf("expected unknown subcommand, got: %v", err)
+		t.Errorf("expected unknown subcommand error, got: %v", err)
+	}
+}
+
+func TestRunConfigBot_NoArgs(t *testing.T) {
+	deps, _, _ := testDeps()
+	err := runConfigBot(nil, deps)
+	if err == nil || !strings.Contains(err.Error(), "subcommand required") {
+		t.Errorf("expected subcommand required error, got: %v", err)
+	}
+}
+
+func TestRunConfigChat_NoArgs(t *testing.T) {
+	deps, _, _ := testDeps()
+	err := runConfigChat(nil, deps)
+	if err == nil || !strings.Contains(err.Error(), "subcommand required") {
+		t.Errorf("expected subcommand required error, got: %v", err)
+	}
+}
+
+func TestRunConfigAPIKey_NoArgs(t *testing.T) {
+	deps, _, _ := testDeps()
+	err := runConfigAPIKey(nil, deps)
+	if err == nil || !strings.Contains(err.Error(), "subcommand required") {
+		t.Errorf("expected subcommand required error, got: %v", err)
+	}
+}
+
+func TestConfigShow(t *testing.T) {
+	cfgPath := writeTestConfig(t, `
+bots:
+  alpha:
+    host: h.com
+    id: id-a
+    secret: s-a
+chats:
+  deploy: uuid-1
+server:
+  api_keys:
+    - name: k1
+      key: val
+`)
+	deps, stdout, _ := testDeps()
+	err := runConfigShow([]string{"--config", cfgPath}, deps)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	out := stdout.String()
+	if !strings.Contains(out, "Bots:     1") {
+		t.Errorf("expected 1 bot, got: %s", out)
+	}
+	if !strings.Contains(out, "Chats:    1") {
+		t.Errorf("expected 1 chat, got: %s", out)
+	}
+	if !strings.Contains(out, "API keys: 1") {
+		t.Errorf("expected 1 api key, got: %s", out)
 	}
 }
 
