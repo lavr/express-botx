@@ -6,6 +6,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"strings"
 
 	"github.com/lavr/express-botx/internal/botapi"
 	"github.com/lavr/express-botx/internal/config"
@@ -14,7 +15,7 @@ import (
 func runChats(args []string, deps Deps) error {
 	if len(args) == 0 {
 		printChatsUsage(deps.Stderr)
-		return fmt.Errorf("subcommand required: list, info, alias")
+		return fmt.Errorf("subcommand required: list, info, add, alias")
 	}
 
 	switch args[0] {
@@ -22,6 +23,8 @@ func runChats(args []string, deps Deps) error {
 		return runChatsList(args[1:], deps)
 	case "info":
 		return runChatsInfo(args[1:], deps)
+	case "add":
+		return runChatsAdd(args[1:], deps)
 	case "alias":
 		return runChatsAlias(args[1:], deps)
 	case "--help", "-h":
@@ -320,6 +323,149 @@ func runChatsAliasRm(args []string, deps Deps) error {
 	return nil
 }
 
+func runChatsAdd(args []string, deps Deps) error {
+	fs := flag.NewFlagSet("chats add", flag.ContinueOnError)
+	fs.SetOutput(deps.Stderr)
+	var flags config.Flags
+	var nameFilter, alias string
+
+	globalFlags(fs, &flags)
+	fs.StringVar(&flags.ChatID, "chat-id", "", "chat UUID (skip API lookup)")
+	fs.StringVar(&nameFilter, "name", "", "chat name to search for (substring match)")
+	fs.StringVar(&alias, "alias", "", "alias name (auto-generated from chat name if omitted)")
+	fs.Usage = func() {
+		fmt.Fprintf(deps.Stderr, "Usage: express-botx chats add [options]\n\nFind a chat by name via API and add it as an alias to the config.\n\nOptions:\n")
+		fs.PrintDefaults()
+	}
+
+	if err := fs.Parse(args); err != nil {
+		if errors.Is(err, flag.ErrHelp) {
+			return nil
+		}
+		return err
+	}
+
+	if nameFilter == "" && flags.ChatID == "" {
+		return fmt.Errorf("--name or --chat-id is required")
+	}
+
+	// Direct UUID mode — no API call needed
+	if flags.ChatID != "" {
+		if alias == "" {
+			return fmt.Errorf("--alias is required with --chat-id")
+		}
+		cfg, err := config.LoadMinimal(flags)
+		if err != nil {
+			return err
+		}
+		if cfg.Chats == nil {
+			cfg.Chats = make(map[string]config.ChatConfig)
+		}
+
+		action := "added"
+		if _, exists := cfg.Chats[alias]; exists {
+			action = "updated"
+		}
+
+		cfg.Chats[alias] = config.ChatConfig{ID: flags.ChatID, Bot: flags.Bot}
+		if err := cfg.SaveConfig(); err != nil {
+			return err
+		}
+
+		out := fmt.Sprintf("Chat %s: %s -> %s", action, alias, flags.ChatID)
+		if flags.Bot != "" {
+			out += fmt.Sprintf(" (bot: %s)", flags.Bot)
+		}
+		fmt.Fprintln(deps.Stdout, out)
+		return nil
+	}
+
+	// Search mode — find chat via API
+	cfg, err := config.Load(flags)
+	if err != nil {
+		return err
+	}
+
+	tok, _, err := authenticate(cfg)
+	if err != nil {
+		return err
+	}
+
+	client := botapi.NewClient(cfg.Host, tok, cfg.HTTPTimeout())
+	chats, err := client.ListChats(context.Background())
+	if err != nil {
+		return fmt.Errorf("listing chats: %w", err)
+	}
+
+	var matched []botapi.ChatInfo
+	lowerFilter := strings.ToLower(nameFilter)
+	for _, c := range chats {
+		if strings.Contains(strings.ToLower(c.Name), lowerFilter) {
+			matched = append(matched, c)
+		}
+	}
+
+	switch len(matched) {
+	case 0:
+		return fmt.Errorf("no chats matching %q", nameFilter)
+	case 1:
+		chat := matched[0]
+		if alias == "" {
+			alias = slugify(chat.Name)
+		}
+
+		// Reload minimal config for saving (Load resolved runtime fields we don't want to persist)
+		saveCfg, err := config.LoadMinimal(flags)
+		if err != nil {
+			return err
+		}
+		if saveCfg.Chats == nil {
+			saveCfg.Chats = make(map[string]config.ChatConfig)
+		}
+
+		action := "added"
+		if _, exists := saveCfg.Chats[alias]; exists {
+			action = "updated"
+		}
+
+		saveCfg.Chats[alias] = config.ChatConfig{ID: chat.GroupChatID, Bot: flags.Bot}
+		if err := saveCfg.SaveConfig(); err != nil {
+			return err
+		}
+
+		out := fmt.Sprintf("Chat %s: %s -> %s (%s)", action, alias, chat.GroupChatID, chat.Name)
+		if flags.Bot != "" {
+			out += fmt.Sprintf(" (bot: %s)", flags.Bot)
+		}
+		fmt.Fprintln(deps.Stdout, out)
+		return nil
+	default:
+		fmt.Fprintf(deps.Stderr, "Multiple chats match %q:\n", nameFilter)
+		for _, c := range matched {
+			fmt.Fprintf(deps.Stderr, "  %s  %s (%s)\n", c.GroupChatID, c.Name, c.ChatType)
+		}
+		return fmt.Errorf("multiple matches, use --chat-id to specify")
+	}
+}
+
+// slugify converts a chat name to a URL-friendly alias.
+// "Deploy Alerts" → "deploy-alerts"
+// "CI/CD notifications" → "ci-cd-notifications"
+func slugify(name string) string {
+	name = strings.ToLower(name)
+	var b strings.Builder
+	lastHyphen := true // treat start as hyphen to avoid leading hyphen
+	for _, r := range name {
+		if r >= 'a' && r <= 'z' || r >= '0' && r <= '9' {
+			b.WriteRune(r)
+			lastHyphen = false
+		} else if !lastHyphen {
+			b.WriteByte('-')
+			lastHyphen = true
+		}
+	}
+	return strings.TrimRight(b.String(), "-")
+}
 
 func printChatsAliasUsage(w io.Writer) {
 	fmt.Fprintf(w, `Usage: express-botx chats alias <command> [options]
@@ -339,6 +485,7 @@ func printChatsUsage(w io.Writer) {
 Commands:
   list    List chats the bot is a member of
   info    Show detailed information about a chat
+  add     Find a chat and add it to config
   alias   Manage chat aliases (set, list, rm)
 
 Run "express-botx chats <command> --help" for details on a specific command.

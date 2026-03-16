@@ -106,6 +106,7 @@ ingress:
 | `serve` | Запустить HTTP-сервер (API + вебхуки) |
 | `chats list` | Показать список чатов бота |
 | `chats info` | Показать детальную информацию о чате |
+| `chats add` | Найти чат и добавить в конфиг |
 | `chats alias` | Управление алиасами чатов (set, list, rm) |
 | `bot ping` | Проверить авторизацию и доступность API |
 | `bot info` | Показать информацию о боте |
@@ -113,6 +114,9 @@ ingress:
 | `bot list` | Показать боты из конфига |
 | `bot add` | Добавить бота в конфиг |
 | `bot rm` | Удалить бота из конфига |
+| `server apikey list` | Показать API-ключи сервера |
+| `server apikey add` | Добавить API-ключ сервера |
+| `server apikey rm` | Удалить API-ключ сервера |
 | `user search` | Найти пользователя по email, HUID или AD-логину |
 
 ## send — отправка сообщений
@@ -384,6 +388,50 @@ TOKEN=$(express-botx bot token --bot prod)
 # Если бот уже с token — просто выводит его
 express-botx bot token --bot token-bot
 ```
+
+### `chats add` — добавление чата в конфиг
+
+Находит чат по имени через API и добавляет как алиас в конфиг:
+
+```bash
+# Поиск чата по имени
+express-botx chats add --name "Deploy Alerts"
+
+# С указанием алиаса
+express-botx chats add --name "Deploy Alerts" --alias deploy
+
+# По UUID (без обращения к API)
+express-botx chats add --chat-id UUID --alias deploy
+
+# С привязкой к боту
+express-botx chats add --name "Deploy Alerts" --alias deploy --bot deploy-bot
+```
+
+При `--name` выполняется поиск по подстроке (case-insensitive). Если найдено несколько чатов — выводится список и предлагается уточнить через `--chat-id`. Если `--alias` не указан — генерируется из имени чата (`"Deploy Alerts"` → `deploy-alerts`).
+
+### `server apikey` — управление API-ключами сервера
+
+```bash
+# Сгенерировать случайный ключ
+express-botx server apikey add --name monitoring
+
+# Добавить конкретное значение
+express-botx server apikey add --name monitoring --key "my-secret-key"
+
+# Ссылка на переменную окружения
+express-botx server apikey add --name grafana --key "env:GRAFANA_API_KEY"
+
+# Ссылка на Vault
+express-botx server apikey add --name ci --key "vault:secret/data/express#ci_api_key"
+
+# Посмотреть ключи (значения скрыты)
+express-botx server apikey list
+
+# Удалить ключ
+express-botx server apikey rm monitoring
+```
+
+При `--key` без значения генерируется случайный ключ (64 hex-символа) и выводится в stdout.
 
 ### Форматы значений
 

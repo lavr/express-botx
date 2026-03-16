@@ -63,8 +63,8 @@ type GrafanaYAMLConfig struct {
 
 // APIKeyConfig defines a single API key for server authentication.
 type APIKeyConfig struct {
-	Name string `yaml:"name"`
-	Key  string `yaml:"key"` // literal, env:VAR, or vault:path#key
+	Name string `yaml:"name" json:"name"`
+	Key  string `yaml:"key" json:"key"` // literal, env:VAR, or vault:path#key
 }
 
 type BotConfig struct {
