@@ -68,8 +68,11 @@ config:
       id: "bot-uuid"
       secret: "bot-secret"
   chats:
-    ops-alerts:
-      id: "chat-uuid"
+    project1-alerts:
+      id: "chat-uuid1"
+      bot: prod
+    project2-alerts:
+      id: "chat-uuid2"
       bot: prod
   server:
     listen: ":8080"
@@ -215,8 +218,9 @@ bots:
 
 chats:
   # Короткая форма: только UUID
-  general: 1a2b3c4d-5e6f-7890-abcd-ef1234567890
-
+  chat1: 1a2b3c4d-5e6f-7890-abcd-ef1234567890
+  chat2: 2a2b3c4d-6e6f-8890-bbcd-ff1234567890
+  
   # С привязкой к боту: бот подставляется автоматически
   deploy:
     id: 2b3c4d5e-6f7a-8901-bcde-f12345678901
@@ -266,16 +270,16 @@ curl /api/v1/send -d '{"bot":"alert-bot","chat_id":"deploy","message":"!"}'
 curl /api/v1/alertmanager?bot=deploy-bot
 ```
 
-`host` поддерживает полный URL для dev/staging:
+Формат `host`:
 
 ```yaml
 bots:
+  prod:
+    host: express.company.ru       # → https://express.company.ru
   local:
     host: http://localhost:8080    # HTTP + порт
   staging:
     host: https://staging.company.ru:8443
-  prod:
-    host: express.company.ru       # → https://express.company.ru
 ```
 
 По умолчанию кэш пишется в файл `.express-botx-token-cache.json` в текущей директории.
