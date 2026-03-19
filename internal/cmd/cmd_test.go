@@ -40,6 +40,12 @@ func TestRun_NoArgs(t *testing.T) {
 	if !strings.Contains(err.Error(), "subcommand required") {
 		t.Errorf("unexpected error: %v", err)
 	}
+	if !strings.Contains(err.Error(), "enqueue") {
+		t.Errorf("error should list enqueue command: %v", err)
+	}
+	if !strings.Contains(err.Error(), "worker") {
+		t.Errorf("error should list worker command: %v", err)
+	}
 }
 
 func TestRun_UnknownCommand(t *testing.T) {
@@ -59,8 +65,15 @@ func TestRun_Help(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if !strings.Contains(stderr.String(), "Commands:") {
-		t.Errorf("expected usage output, got: %s", stderr.String())
+	out := stderr.String()
+	if !strings.Contains(out, "Commands:") {
+		t.Errorf("expected usage output, got: %s", out)
+	}
+	if !strings.Contains(out, "enqueue") {
+		t.Errorf("help should list enqueue command, got: %s", out)
+	}
+	if !strings.Contains(out, "worker") {
+		t.Errorf("help should list worker command, got: %s", out)
 	}
 }
 
@@ -622,5 +635,163 @@ server:
 		}
 	case <-time.After(2 * time.Second):
 		// Server started successfully — auto-generated key worked
+	}
+}
+
+// --- enqueue ---
+
+func TestEnqueue_Help(t *testing.T) {
+	deps, _, stderr := testDeps()
+	err := runEnqueue([]string{"--help"}, deps)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	out := stderr.String()
+	if !strings.Contains(out, "routing-mode") {
+		t.Errorf("help should mention --routing-mode, got: %s", out)
+	}
+	if !strings.Contains(out, "chat-id") {
+		t.Errorf("help should mention --chat-id, got: %s", out)
+	}
+}
+
+func TestEnqueue_NoConfig_Error(t *testing.T) {
+	deps, _, _ := testDeps()
+	// No config, no queue driver — should fail
+	err := runEnqueue([]string{"hello"}, deps)
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if !strings.Contains(err.Error(), "queue driver is required") {
+		t.Errorf("expected queue driver error, got: %v", err)
+	}
+}
+
+func TestEnqueue_InvalidRoutingMode(t *testing.T) {
+	cfgPath := writeTestConfig(t, `
+queue:
+  driver: rabbitmq
+  url: amqp://localhost
+  name: test
+`)
+	deps, _, _ := testDeps()
+	err := runEnqueue([]string{"--config", cfgPath, "--routing-mode", "bad", "hello"}, deps)
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	if !strings.Contains(err.Error(), "invalid routing mode") {
+		t.Errorf("expected routing mode error, got: %v", err)
+	}
+}
+
+func TestEnqueue_ValidConfig_MissingDriver(t *testing.T) {
+	cfgPath := writeTestConfig(t, `
+queue:
+  driver: rabbitmq
+  url: amqp://localhost
+  name: test
+`)
+	deps, _, _ := testDeps()
+	deps.IsTerminal = true
+	err := runEnqueue([]string{"--config", cfgPath, "--bot-id", "00000000-0000-0000-0000-000000000001", "--chat-id", "00000000-0000-0000-0000-000000000002", "--routing-mode", "direct", "hello"}, deps)
+	if err == nil {
+		t.Fatal("expected error (rabbitmq driver not compiled)")
+	}
+	if !strings.Contains(err.Error(), "not compiled in") {
+		t.Errorf("expected 'not compiled in' error, got: %v", err)
+	}
+}
+
+// --- worker ---
+
+func TestWorker_Help(t *testing.T) {
+	deps, _, stderr := testDeps()
+	err := runWorker([]string{"--help"}, deps)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	out := stderr.String()
+	if !strings.Contains(out, "no-catalog-publish") {
+		t.Errorf("help should mention --no-catalog-publish, got: %s", out)
+	}
+	if !strings.Contains(out, "health-listen") {
+		t.Errorf("help should mention --health-listen, got: %s", out)
+	}
+}
+
+func TestWorker_NoConfig_Error(t *testing.T) {
+	deps, _, _ := testDeps()
+	err := runWorker(nil, deps)
+	if err == nil {
+		t.Fatal("expected error")
+	}
+	// Should fail because no queue driver
+	if !strings.Contains(err.Error(), "queue driver is required") {
+		t.Errorf("expected queue driver error, got: %v", err)
+	}
+}
+
+func TestWorker_NoBots_Error(t *testing.T) {
+	cfgPath := writeTestConfig(t, `
+queue:
+  driver: kafka
+  url: broker:9092
+  name: test
+`)
+	deps, _, _ := testDeps()
+	err := runWorker([]string{"--config", cfgPath}, deps)
+	if err == nil {
+		t.Fatal("expected error for no bots")
+	}
+	if !strings.Contains(err.Error(), "at least one bot is required") {
+		t.Errorf("expected bot error, got: %v", err)
+	}
+}
+
+func TestWorker_ValidConfig_MissingDriver(t *testing.T) {
+	cfgPath := writeTestConfig(t, `
+queue:
+  driver: kafka
+  url: broker:9092
+  name: test
+bots:
+  alerts:
+    host: h
+    id: b
+    secret: s
+`)
+	deps, _, _ := testDeps()
+	err := runWorker([]string{"--config", cfgPath}, deps)
+	if err == nil {
+		t.Fatal("expected error (kafka driver not compiled)")
+	}
+	if !strings.Contains(err.Error(), "not compiled in") {
+		t.Errorf("expected 'not compiled in' error, got: %v", err)
+	}
+}
+
+func TestWorker_DuplicateBotID_DifferentSecret_Error(t *testing.T) {
+	cfgPath := writeTestConfig(t, `
+queue:
+  driver: kafka
+  url: broker:9092
+  name: test
+bots:
+  a:
+    host: h
+    id: shared-id
+    secret: s1
+  b:
+    host: h
+    id: shared-id
+    secret: s2
+`)
+	deps, _, _ := testDeps()
+	err := runWorker([]string{"--config", cfgPath}, deps)
+	if err == nil {
+		t.Fatal("expected error for duplicate bot_id with different secret")
+	}
+	if !strings.Contains(err.Error(), "different secret") {
+		t.Errorf("expected different secret error, got: %v", err)
 	}
 }

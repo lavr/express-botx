@@ -1,3 +1,9 @@
+# Application mode: "serve", "serve-enqueue", or "worker".
+# - serve:          HTTP server → BotX API (synchronous, default)
+# - serve-enqueue:  HTTP server → queue (asynchronous)
+# - worker:         queue → BotX API
+mode: serve
+
 replicaCount: 1
 
 image:
@@ -33,6 +39,32 @@ config:
     #   default_chat_id: alerts
     # grafana:
     #   default_chat_id: monitoring
+
+# Queue configuration (required for serve-enqueue and worker modes).
+# Queue driver must be compiled in via BUILD_TAGS (rabbitmq or kafka).
+  # queue:
+  #   driver: kafka          # rabbitmq | kafka
+  #   url: broker:9092
+  #   name: express-botx
+  #   group: express-botx    # consumer group (worker only)
+  #   reply_queue: ""        # optional reply queue/topic
+  #   max_file_size: 1MB     # max file attachment size for async mode
+
+  # producer:                # serve-enqueue mode
+  #   routing_mode: mixed    # direct | catalog | mixed
+
+  # worker:                  # worker mode
+  #   retry_count: 3
+  #   retry_backoff: 1s
+  #   shutdown_timeout: 30s
+  #   health_listen: ":8081"
+
+  # catalog:                 # catalog for alias resolution
+  #   queue_name: express-botx-catalog
+  #   cache_file: /tmp/express-botx/catalog.json
+  #   max_age: 10m
+  #   publish: true          # worker publishes catalog snapshots
+  #   publish_interval: 30s
 
 # Use an existing Secret instead of generating one from config.*.
 # The Secret must contain a "config.yaml" key with the full YAML config.

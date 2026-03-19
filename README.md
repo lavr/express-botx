@@ -2,7 +2,7 @@
 
 CLI и HTTP-сервер для отправки сообщений в корпоративный мессенджер eXpress через BotX API.
 
-Поддерживает вебхуки от Alertmanager и Grafana.
+Поддерживает вебхуки от Alertmanager и Grafana, а также асинхронную отправку через очередь (RabbitMQ / Kafka).
 
 ## Установка
 
@@ -44,6 +44,15 @@ go install github.com/lavr/express-botx@latest
 git clone https://github.com/lavr/express-botx.git
 cd express-botx
 go build -o express-botx .
+
+# С поддержкой RabbitMQ
+go build -tags rabbitmq -o express-botx .
+
+# С поддержкой Kafka
+go build -tags kafka -o express-botx .
+
+# С обоими драйверами
+go build -tags "rabbitmq kafka" -o express-botx .
 ```
 
 ### Helm
@@ -101,12 +110,26 @@ ingress:
 
 Конфиг монтируется из Kubernetes Secret (не ConfigMap), т.к. содержит bot secret и API-ключи. Для использования существующего секрета: `existingSecret: my-secret`.
 
+Для async-режима с очередью используйте два отдельных Deployment:
+
+```bash
+# API-сервер (HTTP → очередь)
+helm install api oci://ghcr.io/lavr/charts/express-botx -f values-api.yaml
+# Worker (очередь → BotX API)
+helm install worker oci://ghcr.io/lavr/charts/express-botx -f values-worker.yaml
+```
+
+Подробнее о `mode: serve-enqueue` и `mode: worker` — в [README чарта](charts/express-botx/README.md).
+
 ## Команды
 
 | Команда | Описание |
 |---|---|
 | `send` | Отправить сообщение и/или файл в чат |
+| `enqueue` | Положить сообщение в очередь для асинхронной отправки |
 | `serve` | Запустить HTTP-сервер (API + вебхуки) |
+| `serve --enqueue` | HTTP-сервер в асинхронном режиме (HTTP → очередь) |
+| `worker` | Читать сообщения из очереди и отправлять в BotX API |
 | `bot ping` | Проверить авторизацию и доступность API |
 | `bot info` | Показать информацию о боте |
 | `bot token` | Получить токен бота (для скриптов) |
@@ -157,6 +180,89 @@ express-botx send --host express.company.ru --bot-id UUID --secret KEY --chat-id
 --metadata      произвольный JSON для notification.metadata
 ```
 
+## enqueue — асинхронная отправка через очередь
+
+Кладёт сообщение в очередь (RabbitMQ / Kafka) вместо прямой отправки в BotX API. Требует сборки с соответствующим build tag.
+
+```bash
+# Direct mode — по UUID бота и чата
+express-botx enqueue --bot-id BOT-UUID --chat-id CHAT-UUID "Hello"
+
+# Catalog mode — по алиасам из local catalog cache
+express-botx enqueue --routing-mode catalog --bot alerts --chat-id deploy "Deploy OK"
+
+# Mixed mode (default) — UUID если указаны, иначе алиасы
+express-botx enqueue --chat-id deploy "Hello"
+
+# Из файла / stdin (аналогично send)
+express-botx enqueue --body-from report.txt
+echo "OK" | express-botx enqueue --bot-id UUID --chat-id UUID
+
+# С файлом-вложением
+express-botx enqueue --file report.pdf --bot-id UUID --chat-id UUID "Отчёт"
+```
+
+При успехе выводит `request_id` (text) или `{"ok":true,"queued":true,"request_id":"..."}` (json).
+
+### Флаги enqueue
+
+```
+--routing-mode   direct | catalog | mixed (по умолчанию: mixed)
+--bot-id         UUID бота (direct routing)
+--bot            алиас бота из catalog (catalog/mixed)
+--chat-id        UUID или алиас чата
+--body-from      прочитать сообщение из файла
+--file           путь к файлу-вложению (или - для stdin)
+--file-name      имя файла (обязательно при --file -)
+--status         статус уведомления: ok или error (по умолчанию: ok)
+--silent         без push-уведомления
+--stealth        стелс-режим
+--force-dnd      доставить при DND
+--no-notify      без уведомления
+--metadata       JSON для notification.metadata
+```
+
+### Режимы маршрутизации (routing modes)
+
+| Режим | Описание |
+|---|---|
+| `direct` | Producer получает конкретные `--bot-id` и `--chat-id` (UUID) и публикует без проверки. Не нужен catalog. |
+| `catalog` | Алиасы (`--bot`, `--chat-id` по имени) резолвятся через локальный snapshot каталога. |
+| `mixed` | Если указаны UUID — работает как `direct`. Если алиасы — через catalog. Рекомендуемый default. |
+
+## worker — обработка очереди
+
+Читает сообщения из очереди, отправляет в BotX API, публикует результаты в reply queue.
+
+```bash
+# Запуск worker'а
+express-botx worker --config config.yaml
+
+# С health check HTTP-сервером
+express-botx worker --config config.yaml --health-listen :8081
+
+# Без публикации каталога
+express-botx worker --config config.yaml --no-catalog-publish
+```
+
+По умолчанию worker публикует routing catalog в отдельную queue/topic, чтобы producer'ы могли резолвить алиасы.
+
+### Флаги worker
+
+```
+--health-listen       адрес для health check сервера (например, :8081)
+--no-catalog-publish  отключить публикацию каталога
+```
+
+### Health check
+
+При `--health-listen` worker поднимает HTTP-сервер:
+
+| Метод | Путь | Описание |
+|---|---|---|
+| `GET` | `/healthz` | 200 если consumer подключён к брокеру, 503 иначе |
+| `GET` | `/readyz` | 200 когда worker готов принимать сообщения, 503 при startup/shutdown |
+
 ## serve — HTTP-сервер
 
 Запускает HTTP-сервер с эндпоинтами для отправки сообщений и приёма вебхуков.
@@ -178,6 +284,26 @@ express-botx serve --config config.yaml --api-key env:MY_API_KEY
 
 Все `POST`-эндпоинты требуют авторизации: `Authorization: Bearer <key>` или `X-API-Key: <key>`.
 
+### serve --enqueue (асинхронный режим)
+
+Переводит HTTP `/send` в асинхронный режим: вместо прямой отправки публикует задание в очередь и возвращает `202 Accepted`.
+
+```bash
+express-botx serve --enqueue --config config.yaml
+```
+
+Ответ в async-режиме:
+
+```json
+{"ok": true, "queued": true, "request_id": "0d6d7f87-0a2f-4c5b-b0d4-4d0b705a77e2"}
+```
+
+HTTP payload расширяется полями `routing_mode` и `bot_id` для direct routing:
+
+```json
+{"routing_mode": "direct", "bot_id": "bot-uuid", "chat_id": "chat-uuid", "message": "deploy ok"}
+```
+
 ### Docker
 
 ```bash
@@ -193,6 +319,23 @@ docker run --rm -v ./config.yaml:/config.yaml lavr/express-botx \
 # HTTP-сервер
 docker run --rm -p 8080:8080 -v ./config.yaml:/config.yaml lavr/express-botx \
   serve --config /config.yaml
+
+# Worker
+docker run --rm -v ./config.yaml:/config.yaml lavr/express-botx \
+  worker --config /config.yaml --health-listen :8081
+```
+
+Сборка Docker-образа с поддержкой очередей:
+
+```bash
+# С RabbitMQ
+docker build --build-arg BUILD_TAGS="sentry rabbitmq" -t express-botx:rabbitmq .
+
+# С Kafka
+docker build --build-arg BUILD_TAGS="sentry kafka" -t express-botx:kafka .
+
+# С обоими драйверами
+docker build --build-arg BUILD_TAGS="sentry rabbitmq kafka" -t express-botx:full .
 ```
 
 ## Конфигурация
@@ -252,6 +395,55 @@ server:
     default_chat_id: alerts
     error_states: [alerting]              # по умолчанию
 ```
+
+### Конфигурация очереди (async-режим)
+
+Для `enqueue`, `serve --enqueue` и `worker` нужна секция `queue` и, в зависимости от роли, `producer`, `worker` и `catalog`:
+
+```yaml
+# Минимальный конфиг для producer (enqueue / serve --enqueue)
+queue:
+  driver: kafka           # или rabbitmq
+  url: broker:9092
+  name: express-botx
+  reply_queue: express-botx-replies
+
+producer:
+  routing_mode: mixed      # direct | catalog | mixed
+
+catalog:
+  queue_name: express-botx-catalog
+  cache_file: /var/lib/express-botx/catalog.json
+  max_age: 10m
+```
+
+```yaml
+# Минимальный конфиг для worker
+queue:
+  driver: kafka
+  url: broker:9092
+  name: express-botx
+  group: express-botx
+
+worker:
+  retry_count: 3
+  retry_backoff: 1s
+  shutdown_timeout: 30s
+  health_listen: ":8081"
+
+catalog:
+  queue_name: express-botx-catalog
+  publish: true
+  publish_interval: 30s
+
+bots:
+  alerts:
+    host: express.company.ru
+    id: bot-uuid
+    secret: env:ALERTS_SECRET
+```
+
+Producer не нужны `secret`, `token` и полный список ботов — он не аутентифицируется в BotX API.
 
 ### Мульти-бот конфигурация
 

@@ -33,16 +33,50 @@ spec:
         runAsNonRoot: true
         runAsUser: 65534
         fsGroup: 65534
+      {{- if eq .Values.mode "worker" }}
+      terminationGracePeriodSeconds: 35
+      {{- end }}
       containers:
         - name: {{ .Chart.Name }}
           image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
           imagePullPolicy: {{ .Values.image.pullPolicy }}
           command: ["express-botx"]
+          {{- if eq .Values.mode "serve-enqueue" }}
+          args: ["serve", "--enqueue"]
+          {{- else if eq .Values.mode "worker" }}
+          args: ["worker"]
+          {{- else }}
           args: ["serve"]
+          {{- end }}
           ports:
+            {{- if ne .Values.mode "worker" }}
             - name: http
               containerPort: 8080
               protocol: TCP
+            {{- end }}
+            {{- if and (eq .Values.mode "worker") .Values.config.worker }}
+            {{- if .Values.config.worker.health_listen }}
+            - name: health
+              containerPort: {{ trimPrefix ":" .Values.config.worker.health_listen }}
+              protocol: TCP
+            {{- end }}
+            {{- end }}
+          {{- if eq .Values.mode "worker" }}
+          {{- if and .Values.config.worker .Values.config.worker.health_listen }}
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: health
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: health
+            initialDelaySeconds: 2
+            periodSeconds: 5
+          {{- end }}
+          {{- else }}
           livenessProbe:
             httpGet:
               path: /healthz
@@ -55,6 +89,7 @@ spec:
               port: http
             initialDelaySeconds: 2
             periodSeconds: 5
+          {{- end }}
           resources:
             {{- toYaml .Values.resources | nindent 12 }}
           securityContext:

@@ -32,6 +32,9 @@ type Config struct {
 	EnableDocs         bool              // serve /docs (Swagger UI) and /docs/openapi.yaml
 	ExternalURL        string            // public URL for OpenAPI docs server variable
 	AppVersion         string            // application version (from -ldflags), replaces version in OpenAPI spec
+	AsyncMode          bool              // when true, /send enqueues instead of sending directly
+	DefaultRoutingMode string            // default routing mode for async: direct, catalog, mixed
+	MaxFileSize        int64             // max file size in bytes for async mode (0 = default 1MB)
 }
 
 // Server is the HTTP server for express-botx.

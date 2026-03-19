@@ -33,6 +33,17 @@ func (p *nrProvider) WrapHandler(pattern string, h http.Handler) http.Handler {
 	return wrapped
 }
 
+func (p *nrProvider) StartTransaction(name string) Transaction {
+	tx := p.app.StartTransaction(name)
+	return &nrTxn{tx: tx}
+}
+
+type nrTxn struct {
+	tx *newrelic.Transaction
+}
+
+func (t *nrTxn) End() { t.tx.End() }
+
 func (p *nrProvider) Shutdown() {
 	p.app.Shutdown(5 * time.Second)
 }
@@ -40,4 +51,9 @@ func (p *nrProvider) Shutdown() {
 type noopFallback struct{}
 
 func (noopFallback) WrapHandler(_ string, h http.Handler) http.Handler { return h }
+func (noopFallback) StartTransaction(string) Transaction               { return noopTxn{} }
 func (noopFallback) Shutdown()                                          {}
+
+type noopTxn struct{}
+
+func (noopTxn) End() {}

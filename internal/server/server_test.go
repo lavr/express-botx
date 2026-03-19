@@ -1870,3 +1870,301 @@ func TestDocs_Disabled(t *testing.T) {
 		t.Fatalf("expected non-200 when docs disabled, got 200")
 	}
 }
+
+// --- async mode ---
+
+func TestSend_AsyncMode_DirectPublish(t *testing.T) {
+	var capturedPayload *SendPayload
+	cfg := Config{
+		Listen:    ":0",
+		BasePath:  "/api/v1",
+		Keys:      []ResolvedKey{{Name: "t", Key: "k"}},
+		AsyncMode: true,
+	}
+	sendFn := func(ctx context.Context, p *SendPayload) (string, error) {
+		capturedPayload = p
+		return "test-request-id", nil
+	}
+	chatResolver := func(chatID string) (ChatResolveResult, error) {
+		return ChatResolveResult{ChatID: chatID}, nil
+	}
+	srv := New(cfg, sendFn, chatResolver)
+
+	body := `{"bot_id":"00000000-0000-0000-0000-000000000001","chat_id":"00000000-0000-0000-0000-000000000002","message":"async hello","routing_mode":"direct"}`
+	w := doRequest(srv, "POST", "/api/v1/send", strings.NewReader(body), map[string]string{
+		"X-API-Key":    "k",
+		"Content-Type": "application/json",
+	})
+
+	if w.Code != 202 {
+		t.Fatalf("expected 202, got %d: %s", w.Code, w.Body.String())
+	}
+
+	resp := parseResponse(t, w)
+	if !resp.OK {
+		t.Error("expected ok=true")
+	}
+	if !resp.Queued {
+		t.Error("expected queued=true")
+	}
+	if resp.RequestID != "test-request-id" {
+		t.Errorf("request_id = %q, want %q", resp.RequestID, "test-request-id")
+	}
+
+	if capturedPayload == nil {
+		t.Fatal("sendFn was not called")
+	}
+	if capturedPayload.BotID != "00000000-0000-0000-0000-000000000001" {
+		t.Errorf("BotID = %q, want %q", capturedPayload.BotID, "00000000-0000-0000-0000-000000000001")
+	}
+	if capturedPayload.ChatID != "00000000-0000-0000-0000-000000000002" {
+		t.Errorf("ChatID = %q, want %q", capturedPayload.ChatID, "00000000-0000-0000-0000-000000000002")
+	}
+	if capturedPayload.Message != "async hello" {
+		t.Errorf("Message = %q, want %q", capturedPayload.Message, "async hello")
+	}
+}
+
+func TestSend_AsyncMode_MissingBotID(t *testing.T) {
+	cfg := Config{
+		Listen:             ":0",
+		BasePath:           "/api/v1",
+		Keys:               []ResolvedKey{{Name: "t", Key: "k"}},
+		AsyncMode:          true,
+		DefaultRoutingMode: "direct",
+	}
+	sendFn := func(ctx context.Context, p *SendPayload) (string, error) {
+		return "", nil
+	}
+	chatResolver := func(chatID string) (ChatResolveResult, error) {
+		return ChatResolveResult{ChatID: chatID}, nil
+	}
+	srv := New(cfg, sendFn, chatResolver)
+
+	// Missing bot_id in async direct mode → 400
+	body := `{"chat_id":"chat-001","message":"no bot_id"}`
+	w := doRequest(srv, "POST", "/api/v1/send", strings.NewReader(body), map[string]string{
+		"X-API-Key":    "k",
+		"Content-Type": "application/json",
+	})
+
+	if w.Code != 400 {
+		t.Fatalf("expected 400, got %d: %s", w.Code, w.Body.String())
+	}
+	resp := parseResponse(t, w)
+	if !strings.Contains(resp.Error, "bot_id is required") {
+		t.Errorf("expected 'bot_id is required' error, got: %s", resp.Error)
+	}
+}
+
+func TestSend_AsyncMode_Multipart(t *testing.T) {
+	var capturedPayload *SendPayload
+	cfg := Config{
+		Listen:    ":0",
+		BasePath:  "/api/v1",
+		Keys:      []ResolvedKey{{Name: "t", Key: "k"}},
+		AsyncMode: true,
+	}
+	sendFn := func(ctx context.Context, p *SendPayload) (string, error) {
+		capturedPayload = p
+		return "test-req-multipart", nil
+	}
+	chatResolver := func(chatID string) (ChatResolveResult, error) {
+		return ChatResolveResult{ChatID: chatID}, nil
+	}
+	srv := New(cfg, sendFn, chatResolver)
+
+	// Build multipart form
+	var buf bytes.Buffer
+	mw := multipart.NewWriter(&buf)
+	mw.WriteField("bot_id", "00000000-0000-0000-0000-000000000003")
+	mw.WriteField("chat_id", "00000000-0000-0000-0000-000000000004")
+	mw.WriteField("message", "multipart async")
+	mw.WriteField("routing_mode", "direct")
+	mw.Close()
+
+	w := doRequest(srv, "POST", "/api/v1/send", &buf, map[string]string{
+		"X-API-Key":    "k",
+		"Content-Type": mw.FormDataContentType(),
+	})
+
+	if w.Code != 202 {
+		t.Fatalf("expected 202, got %d: %s", w.Code, w.Body.String())
+	}
+
+	if capturedPayload == nil {
+		t.Fatal("sendFn was not called")
+	}
+	if capturedPayload.BotID != "00000000-0000-0000-0000-000000000003" {
+		t.Errorf("BotID = %q, want %q", capturedPayload.BotID, "00000000-0000-0000-0000-000000000003")
+	}
+	if capturedPayload.RoutingMode != "direct" {
+		t.Errorf("RoutingMode = %q, want %q", capturedPayload.RoutingMode, "direct")
+	}
+}
+
+func TestSend_AsyncMode_EnqueueError(t *testing.T) {
+	cfg := Config{
+		Listen:    ":0",
+		BasePath:  "/api/v1",
+		Keys:      []ResolvedKey{{Name: "t", Key: "k"}},
+		AsyncMode: true,
+	}
+	sendFn := func(ctx context.Context, p *SendPayload) (string, error) {
+		return "", fmt.Errorf("broker connection refused")
+	}
+	chatResolver := func(chatID string) (ChatResolveResult, error) {
+		return ChatResolveResult{ChatID: chatID}, nil
+	}
+	srv := New(cfg, sendFn, chatResolver)
+
+	body := `{"bot_id":"00000000-0000-0000-0000-000000000005","chat_id":"00000000-0000-0000-0000-000000000006","message":"will fail"}`
+	w := doRequest(srv, "POST", "/api/v1/send", strings.NewReader(body), map[string]string{
+		"X-API-Key":    "k",
+		"Content-Type": "application/json",
+	})
+
+	if w.Code != 502 {
+		t.Fatalf("expected 502, got %d: %s", w.Code, w.Body.String())
+	}
+	resp := parseResponse(t, w)
+	if !strings.Contains(resp.Error, "enqueue error") {
+		t.Errorf("expected 'enqueue error', got: %s", resp.Error)
+	}
+}
+
+func TestSend_AsyncMode_MixedMode_BotAlias(t *testing.T) {
+	// Mixed mode: bot alias provided instead of bot_id → should be accepted
+	var capturedPayload *SendPayload
+	cfg := Config{
+		Listen:             ":0",
+		BasePath:           "/api/v1",
+		Keys:               []ResolvedKey{{Name: "t", Key: "k"}},
+		AsyncMode:          true,
+		DefaultRoutingMode: "mixed",
+	}
+	sendFn := func(ctx context.Context, p *SendPayload) (string, error) {
+		capturedPayload = p
+		return "test-mixed-id", nil
+	}
+	chatResolver := func(chatID string) (ChatResolveResult, error) {
+		return ChatResolveResult{ChatID: chatID}, nil
+	}
+	srv := New(cfg, sendFn, chatResolver)
+
+	body := `{"bot":"alerts","chat_id":"deploy","message":"mixed with alias","routing_mode":"mixed"}`
+	w := doRequest(srv, "POST", "/api/v1/send", strings.NewReader(body), map[string]string{
+		"X-API-Key":    "k",
+		"Content-Type": "application/json",
+	})
+
+	if w.Code != 202 {
+		t.Fatalf("expected 202, got %d: %s", w.Code, w.Body.String())
+	}
+
+	if capturedPayload == nil {
+		t.Fatal("sendFn was not called")
+	}
+	if capturedPayload.Bot != "alerts" {
+		t.Errorf("Bot = %q, want %q", capturedPayload.Bot, "alerts")
+	}
+}
+
+func TestSend_AsyncMode_CatalogMode_BotAlias(t *testing.T) {
+	// Catalog mode: bot alias is sufficient (no bot_id needed)
+	var capturedPayload *SendPayload
+	cfg := Config{
+		Listen:             ":0",
+		BasePath:           "/api/v1",
+		Keys:               []ResolvedKey{{Name: "t", Key: "k"}},
+		AsyncMode:          true,
+		DefaultRoutingMode: "catalog",
+	}
+	sendFn := func(ctx context.Context, p *SendPayload) (string, error) {
+		capturedPayload = p
+		return "test-catalog-id", nil
+	}
+	chatResolver := func(chatID string) (ChatResolveResult, error) {
+		return ChatResolveResult{ChatID: chatID}, nil
+	}
+	srv := New(cfg, sendFn, chatResolver)
+
+	body := `{"bot":"alerts","chat_id":"deploy","message":"catalog with alias"}`
+	w := doRequest(srv, "POST", "/api/v1/send", strings.NewReader(body), map[string]string{
+		"X-API-Key":    "k",
+		"Content-Type": "application/json",
+	})
+
+	if w.Code != 202 {
+		t.Fatalf("expected 202, got %d: %s", w.Code, w.Body.String())
+	}
+
+	if capturedPayload == nil {
+		t.Fatal("sendFn was not called")
+	}
+	if capturedPayload.Bot != "alerts" {
+		t.Errorf("Bot = %q, want %q", capturedPayload.Bot, "alerts")
+	}
+}
+
+func TestSend_AsyncMode_CatalogMode_NoBotOrBotIDOrChatID(t *testing.T) {
+	// Catalog mode: no bot_id, bot, or chat_id → error
+	cfg := Config{
+		Listen:             ":0",
+		BasePath:           "/api/v1",
+		Keys:               []ResolvedKey{{Name: "t", Key: "k"}},
+		AsyncMode:          true,
+		DefaultRoutingMode: "catalog",
+	}
+	sendFn := func(ctx context.Context, p *SendPayload) (string, error) {
+		return "", nil
+	}
+	chatResolver := func(chatID string) (ChatResolveResult, error) {
+		return ChatResolveResult{ChatID: chatID}, nil
+	}
+	srv := New(cfg, sendFn, chatResolver)
+
+	body := `{"message":"no bot or chat"}`
+	w := doRequest(srv, "POST", "/api/v1/send", strings.NewReader(body), map[string]string{
+		"X-API-Key":    "k",
+		"Content-Type": "application/json",
+	})
+
+	if w.Code != 400 {
+		t.Fatalf("expected 400, got %d: %s", w.Code, w.Body.String())
+	}
+	resp := parseResponse(t, w)
+	if !strings.Contains(resp.Error, "chat_id is required") && !strings.Contains(resp.Error, "bot_id, bot, or chat_id") {
+		t.Errorf("expected chat_id or bot identification error, got: %s", resp.Error)
+	}
+}
+
+func TestSend_AsyncMode_CatalogMode_ChatIDOnly(t *testing.T) {
+	// Catalog mode: chat_id without bot info should pass validation
+	// (bot can be derived from chat binding during resolution)
+	cfg := Config{
+		Listen:             ":0",
+		BasePath:           "/api/v1",
+		Keys:               []ResolvedKey{{Name: "t", Key: "k"}},
+		AsyncMode:          true,
+		DefaultRoutingMode: "catalog",
+	}
+	sendFn := func(ctx context.Context, p *SendPayload) (string, error) {
+		return "req-123", nil
+	}
+	chatResolver := func(chatID string) (ChatResolveResult, error) {
+		return ChatResolveResult{ChatID: chatID}, nil
+	}
+	srv := New(cfg, sendFn, chatResolver)
+
+	body := `{"chat_id":"deploy","message":"hello"}`
+	w := doRequest(srv, "POST", "/api/v1/send", strings.NewReader(body), map[string]string{
+		"X-API-Key":    "k",
+		"Content-Type": "application/json",
+	})
+
+	// Should not be rejected at validation - the send function handles resolution
+	if w.Code == 400 {
+		t.Fatalf("expected request to pass validation, got 400: %s", w.Body.String())
+	}
+}

@@ -1,6 +1,7 @@
 dist/
 /express-botx
 config-local.yaml
+examples/**/.env
 .*.json
 .claude/
 

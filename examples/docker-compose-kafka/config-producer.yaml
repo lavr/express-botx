@@ -1,0 +1,31 @@
+# Producer config — no bot credentials needed, only queue and routing.
+#
+# Fields with "env:X" are resolved from environment variables at startup.
+# See .env.example for the list of required variables.
+
+bots:
+  mybot:
+    host: "env:BOT_HOST"
+    id: "env:BOT_ID"
+
+chats:
+  default:
+    id: "env:CHAT_ID"
+    bot: mybot
+    default: true
+
+queue:
+  driver: kafka
+  url: kafka:9094
+  name: express-botx-work
+  group: express-botx-workers
+
+producer:
+  routing_mode: mixed
+
+catalog:
+  queue_name: express-botx-catalog
+  cache_file: /cache/catalog.json
+
+server:
+  listen: ":8080"

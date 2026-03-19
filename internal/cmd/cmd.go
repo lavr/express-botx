@@ -53,14 +53,18 @@ func Run(args []string, deps Deps) error {
 
 	if len(args) == 0 {
 		printUsage(deps.Stderr)
-		return fmt.Errorf("subcommand required: send, serve, chats, bot, config, user")
+		return fmt.Errorf("subcommand required: send, enqueue, serve, worker, chats, bot, config, user")
 	}
 
 	switch args[0] {
 	case "send":
 		return runSend(args[1:], deps)
+	case "enqueue":
+		return runEnqueue(args[1:], deps)
 	case "serve":
 		return runServe(args[1:], deps)
+	case "worker":
+		return runWorker(args[1:], deps)
 	case "chats":
 		return runChats(args[1:], deps)
 	case "bot":
@@ -192,12 +196,14 @@ func printUsage(w io.Writer) {
 	fmt.Fprintf(w, `Usage: express-botx <command> [options]
 
 Commands:
-  send    Send a message and/or file to an eXpress chat
-  serve   Start HTTP server for sending messages via API
-  chats   Chat operations (list, info)
-  bot     Bot operations (ping, info, token)
-  config  Manage configuration (bot, chat, apikey, show)
-  user    User operations (search)
+  send      Send a message and/or file to an eXpress chat
+  enqueue   Enqueue a message for async delivery via broker
+  serve     Start HTTP server for sending messages via API
+  worker    Consume messages from broker and send via BotX API
+  chats     Chat operations (list, info)
+  bot       Bot operations (ping, info, token)
+  config    Manage configuration (bot, chat, apikey, show)
+  user      User operations (search)
 
 Run "express-botx <command> --help" for details on a specific command.
 `)

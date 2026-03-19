@@ -11,14 +11,38 @@ import (
 	"time"
 
 	vlog "github.com/lavr/express-botx/internal/log"
+	"github.com/lavr/express-botx/internal/secret"
 	"gopkg.in/yaml.v3"
 )
 
+// RoutingMode determines how the producer resolves message targets.
+type RoutingMode string
+
+const (
+	RoutingDirect  RoutingMode = "direct"
+	RoutingCatalog RoutingMode = "catalog"
+	RoutingMixed   RoutingMode = "mixed"
+)
+
+// ValidateRoutingMode returns an error if mode is not a known routing mode.
+func ValidateRoutingMode(mode string) error {
+	switch RoutingMode(mode) {
+	case RoutingDirect, RoutingCatalog, RoutingMixed:
+		return nil
+	default:
+		return fmt.Errorf("invalid routing mode %q: must be direct, catalog, or mixed", mode)
+	}
+}
+
 type Config struct {
-	Bots   map[string]BotConfig `yaml:"bots,omitempty"`
-	Chats  map[string]ChatConfig `yaml:"chats,omitempty"`
-	Cache  CacheConfig          `yaml:"cache"`
-	Server ServerConfig         `yaml:"server,omitempty"`
+	Bots    map[string]BotConfig  `yaml:"bots,omitempty"`
+	Chats   map[string]ChatConfig `yaml:"chats,omitempty"`
+	Cache   CacheConfig           `yaml:"cache"`
+	Server  ServerConfig          `yaml:"server,omitempty"`
+	Queue   QueueConfig           `yaml:"queue,omitempty"`
+	Producer ProducerConfig       `yaml:"producer,omitempty"`
+	Worker  WorkerConfig          `yaml:"worker,omitempty"`
+	Catalog CatalogConfig         `yaml:"catalog,omitempty"`
 
 	// Resolved at runtime (not persisted).
 	Host       string `yaml:"-"`
@@ -31,6 +55,38 @@ type Config struct {
 	Format     string `yaml:"-"`
 	multiBot   bool   // true when serve starts with multiple bots, no --bot
 	configPath string
+}
+
+// QueueConfig holds broker connection settings shared between producer and worker.
+type QueueConfig struct {
+	Driver      string `yaml:"driver,omitempty"`      // "rabbitmq" or "kafka"
+	URL         string `yaml:"url,omitempty"`          // broker connection URL
+	Name        string `yaml:"name,omitempty"`         // work queue/topic name
+	ReplyQueue  string `yaml:"reply_queue,omitempty"`  // reply queue/topic name
+	Group       string `yaml:"group,omitempty"`        // consumer group (Kafka)
+	MaxFileSize string `yaml:"max_file_size,omitempty"` // max file size for async mode (default: 1MB)
+}
+
+// ProducerConfig holds settings specific to the producer role.
+type ProducerConfig struct {
+	RoutingMode string `yaml:"routing_mode,omitempty"` // direct, catalog, mixed (default: mixed)
+}
+
+// WorkerConfig holds settings specific to the worker role.
+type WorkerConfig struct {
+	RetryCount      int    `yaml:"retry_count,omitempty"`      // max retry attempts (default: 3)
+	RetryBackoff    string `yaml:"retry_backoff,omitempty"`    // base backoff duration (default: 1s)
+	ShutdownTimeout string `yaml:"shutdown_timeout,omitempty"` // graceful shutdown timeout (default: 30s)
+	HealthListen    string `yaml:"health_listen,omitempty"`    // health check listen address
+}
+
+// CatalogConfig holds settings for the embedded routing catalog.
+type CatalogConfig struct {
+	QueueName       string `yaml:"queue_name,omitempty"`       // catalog queue/topic name
+	CacheFile       string `yaml:"cache_file,omitempty"`       // local cache file path
+	MaxAge          string `yaml:"max_age,omitempty"`           // max age of cached catalog
+	PublishInterval string `yaml:"publish_interval,omitempty"` // how often worker publishes catalog
+	Publish         *bool  `yaml:"publish,omitempty"`          // whether worker publishes catalog (default: true)
 }
 
 // ServerConfig holds HTTP server settings for the "serve" subcommand.
@@ -149,6 +205,11 @@ func Load(flags Flags) (*Config, error) {
 		}
 	}
 
+	// Resolve env:/vault: references in bot and chat configs
+	if err := cfg.resolveSecrets(); err != nil {
+		return nil, err
+	}
+
 	// Validate: no bot has both secret and token in YAML
 	if err := cfg.validateBotConfigs(); err != nil {
 		return nil, err
@@ -235,6 +296,11 @@ func LoadForServe(flags Flags) (*Config, error) {
 		} else {
 			vlog.V2("config: %s not found, skipping", configPath)
 		}
+	}
+
+	// Resolve env:/vault: references in bot and chat configs
+	if err := cfg.resolveSecrets(); err != nil {
+		return nil, err
 	}
 
 	// Validate: no bot has both secret and token in YAML
@@ -405,7 +471,55 @@ func (c *Config) ValidateFormat() error {
 	return nil
 }
 
+// ParseFileSize parses a human-readable file size string (e.g. "1MB", "512KB", "2MiB").
+// Returns size in bytes. Returns 0 if the input is empty. Returns an error for invalid input.
+func ParseFileSize(s string) (int64, error) {
+	if s == "" {
+		return 0, nil
+	}
+	s = strings.TrimSpace(s)
+	s = strings.ToUpper(s)
+
+	// Ordered longest-suffix-first to avoid ambiguous matching
+	// (e.g. "MB" must match before "B").
+	suffixes := []struct {
+		suffix string
+		mult   int64
+	}{
+		{"GIB", 1024 * 1024 * 1024},
+		{"MIB", 1024 * 1024},
+		{"KIB", 1024},
+		{"GB", 1000 * 1000 * 1000},
+		{"MB", 1000 * 1000},
+		{"KB", 1000},
+		{"B", 1},
+	}
+
+	for _, s2 := range suffixes {
+		if strings.HasSuffix(s, s2.suffix) {
+			numStr := strings.TrimSpace(s[:len(s)-len(s2.suffix)])
+			n, err := strconv.ParseFloat(numStr, 64)
+			if err != nil {
+				return 0, fmt.Errorf("invalid file size %q: %w", s, err)
+			}
+			return int64(n * float64(s2.mult)), nil
+		}
+	}
+
+	// Try plain number (bytes)
+	n, err := strconv.ParseInt(s, 10, 64)
+	if err != nil {
+		return 0, fmt.Errorf("invalid file size %q: expected number with optional unit (KB, MB, GB)", s)
+	}
+	return n, nil
+}
+
 var uuidRe = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`)
+
+// IsUUID returns true if the string matches UUID v4 format.
+func IsUUID(s string) bool {
+	return uuidRe.MatchString(s)
+}
 
 // ResolveChatID resolves ChatID: if it looks like a UUID, use as-is;
 // otherwise look it up in the Chats alias map.
@@ -790,4 +904,219 @@ func applyFlags(cfg *Config, flags Flags) {
 	if cfg.Format == "" {
 		cfg.Format = "text"
 	}
+}
+
+// LoadForEnqueue reads configuration for the enqueue command.
+// Unlike Load, it does not require bot secret/token (producer doesn't authenticate).
+// It validates queue config and routing mode.
+func LoadForEnqueue(flags Flags) (*Config, error) {
+	cfg, err := loadBase(flags)
+	if err != nil {
+		return nil, err
+	}
+
+	// Default routing mode
+	if cfg.Producer.RoutingMode == "" {
+		cfg.Producer.RoutingMode = string(RoutingMixed)
+	}
+	if err := ValidateRoutingMode(cfg.Producer.RoutingMode); err != nil {
+		return nil, err
+	}
+
+	// Queue driver is required
+	if cfg.Queue.Driver == "" {
+		return nil, fmt.Errorf("queue driver is required (set queue.driver in config)")
+	}
+
+	return cfg, nil
+}
+
+// LoadForWorker reads configuration for the worker command.
+// Requires at least one bot with credentials. Validates bot_id uniqueness.
+func LoadForWorker(flags Flags) (*Config, error) {
+	cfg, err := loadBase(flags)
+	if err != nil {
+		return nil, err
+	}
+
+	// Queue driver is required
+	if cfg.Queue.Driver == "" {
+		return nil, fmt.Errorf("queue driver is required (set queue.driver in config)")
+	}
+
+	// At least one bot must be configured
+	if len(cfg.Bots) == 0 {
+		return nil, fmt.Errorf("at least one bot is required for worker (configure bots in config file)")
+	}
+
+	// Validate bot_id uniqueness
+	if err := cfg.ValidateBotIDs(); err != nil {
+		return nil, err
+	}
+
+	return cfg, nil
+}
+
+// resolveSecrets resolves env:/vault: references in bot and chat config values.
+// This allows using "env:VAR" syntax for host, id, secret, and token fields.
+func (c *Config) resolveSecrets() error {
+	for name, bot := range c.Bots {
+		var err error
+		if bot.Host, err = secret.Resolve(bot.Host); err != nil {
+			return fmt.Errorf("bot %q host: %w", name, err)
+		}
+		if bot.ID, err = secret.Resolve(bot.ID); err != nil {
+			return fmt.Errorf("bot %q id: %w", name, err)
+		}
+		if bot.Secret != "" {
+			if bot.Secret, err = secret.Resolve(bot.Secret); err != nil {
+				return fmt.Errorf("bot %q secret: %w", name, err)
+			}
+		}
+		if bot.Token != "" {
+			if bot.Token, err = secret.Resolve(bot.Token); err != nil {
+				return fmt.Errorf("bot %q token: %w", name, err)
+			}
+		}
+		c.Bots[name] = bot
+	}
+	for name, chat := range c.Chats {
+		if chat.ID != "" {
+			var err error
+			if chat.ID, err = secret.Resolve(chat.ID); err != nil {
+				return fmt.Errorf("chat %q id: %w", name, err)
+			}
+			c.Chats[name] = chat
+		}
+	}
+	return nil
+}
+
+// loadBase performs the common config loading steps (YAML, validation, env, flags)
+// without bot resolution or credential requirements.
+func loadBase(flags Flags) (*Config, error) {
+	cfg := &Config{
+		Cache: CacheConfig{
+			Type: "file",
+			TTL:  31536000,
+		},
+	}
+
+	configPath, explicit := resolveConfigPath(flags.ConfigPath)
+	cfg.configPath = configPath
+	if configPath != "" {
+		if data, err := os.ReadFile(configPath); err == nil {
+			vlog.V1("config: loaded from %s", configPath)
+			if err := yaml.Unmarshal(data, cfg); err != nil {
+				return nil, fmt.Errorf("parsing config %s: %w", configPath, err)
+			}
+		} else if explicit {
+			return nil, fmt.Errorf("reading config %s: %w", configPath, err)
+		} else {
+			vlog.V2("config: %s not found, skipping", configPath)
+		}
+	}
+
+	if err := cfg.resolveSecrets(); err != nil {
+		return nil, err
+	}
+	if err := cfg.validateBotConfigs(); err != nil {
+		return nil, err
+	}
+	if err := cfg.ValidateDefaultChat(); err != nil {
+		return nil, err
+	}
+
+	if err := applyEnv(cfg); err != nil {
+		return nil, err
+	}
+	applyFlags(cfg, flags)
+
+	return cfg, nil
+}
+
+// ValidateBotIDs checks that bots with the same bot_id have identical runtime config
+// (host, secret, token, timeout). Different aliases may point to the same bot_id
+// as long as the runtime config is identical.
+func (c *Config) ValidateBotIDs() error {
+	type botRuntime struct {
+		Host    string
+		Secret  string
+		Token   string
+		Timeout int
+		Alias   string // first alias seen
+	}
+
+	seen := make(map[string]botRuntime) // bot_id -> runtime config
+	names := c.BotNames()
+	for _, name := range names {
+		bot := c.Bots[name]
+		if bot.ID == "" {
+			continue
+		}
+		if prev, ok := seen[bot.ID]; ok {
+			// Same bot_id — check runtime config matches
+			if bot.Host != prev.Host {
+				return fmt.Errorf("bot %q and %q have same id %q but different host (%q vs %q)",
+					name, prev.Alias, bot.ID, bot.Host, prev.Host)
+			}
+			if bot.Secret != prev.Secret {
+				return fmt.Errorf("bot %q and %q have same id %q but different secret",
+					name, prev.Alias, bot.ID)
+			}
+			if bot.Token != prev.Token {
+				return fmt.Errorf("bot %q and %q have same id %q but different token",
+					name, prev.Alias, bot.ID)
+			}
+			if bot.Timeout != prev.Timeout {
+				return fmt.Errorf("bot %q and %q have same id %q but different timeout (%d vs %d)",
+					name, prev.Alias, bot.ID, bot.Timeout, prev.Timeout)
+			}
+		} else {
+			seen[bot.ID] = botRuntime{
+				Host:    bot.Host,
+				Secret:  bot.Secret,
+				Token:   bot.Token,
+				Timeout: bot.Timeout,
+				Alias:   name,
+			}
+		}
+	}
+	return nil
+}
+
+// BotByID returns the bot config and one of its aliases for a given bot_id.
+// Returns an error if the bot_id is not found.
+func (c *Config) BotByID(botID string) (name string, bot BotConfig, err error) {
+	for n, b := range c.Bots {
+		if b.ID == botID {
+			return n, b, nil
+		}
+	}
+	return "", BotConfig{}, fmt.Errorf("unknown bot_id %q", botID)
+}
+
+// LoadForServeEnqueue reads configuration for the serve --enqueue command.
+// Unlike LoadForServe, it does not require bot credentials (producer doesn't authenticate).
+// It validates queue config for async message publishing.
+func LoadForServeEnqueue(flags Flags) (*Config, error) {
+	cfg, err := loadBase(flags)
+	if err != nil {
+		return nil, err
+	}
+
+	// Default routing mode
+	if cfg.Producer.RoutingMode == "" {
+		cfg.Producer.RoutingMode = string(RoutingMixed)
+	}
+	if err := ValidateRoutingMode(cfg.Producer.RoutingMode); err != nil {
+		return nil, err
+	}
+
+	// Queue driver is required
+	if cfg.Queue.Driver == "" {
+		return nil, fmt.Errorf("queue driver is required for --enqueue mode (queue.driver in config)")
+	}
+
+	return cfg, nil
 }

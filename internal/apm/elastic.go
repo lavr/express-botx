@@ -34,6 +34,17 @@ func (p *elasticProvider) WrapHandler(pattern string, h http.Handler) http.Handl
 	)
 }
 
+func (p *elasticProvider) StartTransaction(name string) Transaction {
+	tx := p.tracer.StartTransaction(name, "worker")
+	return &elasticTxn{tx: tx}
+}
+
+type elasticTxn struct {
+	tx *apm.Transaction
+}
+
+func (t *elasticTxn) End() { t.tx.End() }
+
 func (p *elasticProvider) Shutdown() {
 	p.tracer.Flush(nil)
 	p.tracer.Close()
@@ -42,4 +53,9 @@ func (p *elasticProvider) Shutdown() {
 type noopFallback struct{}
 
 func (noopFallback) WrapHandler(_ string, h http.Handler) http.Handler { return h }
+func (noopFallback) StartTransaction(string) Transaction               { return noopTxn{} }
 func (noopFallback) Shutdown()                                          {}
+
+type noopTxn struct{}
+
+func (noopTxn) End() {}

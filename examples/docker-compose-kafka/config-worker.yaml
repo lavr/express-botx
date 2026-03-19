@@ -1,0 +1,34 @@
+# Worker config — consumes messages from Kafka and sends them via BotX API.
+#
+# Fields with "env:X" are resolved from environment variables at startup.
+# See .env.example for the list of required variables.
+
+bots:
+  mybot:
+    host: "env:BOT_HOST"
+    id: "env:BOT_ID"
+    secret: "env:BOT_SECRET"
+
+chats:
+  default:
+    id: "env:CHAT_ID"
+    bot: mybot
+
+queue:
+  driver: kafka
+  url: kafka:9094
+  name: express-botx-work
+  group: express-botx-workers
+
+worker:
+  retry_count: 3
+  retry_backoff: 2s
+  shutdown_timeout: 30s
+  health_listen: ":9090"
+
+catalog:
+  queue_name: express-botx-catalog
+  publish_interval: 60s
+
+cache:
+  type: none

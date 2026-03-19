@@ -1,0 +1,55 @@
+# express-botx async mode with RabbitMQ
+#
+# Usage:
+#   cp .env.example .env   # fill in real values
+#   docker compose up --build
+#
+# Architecture:
+#   producer (serve --enqueue) → RabbitMQ → worker → BotX API
+
+services:
+  rabbitmq:
+    image: rabbitmq:3-management-alpine
+    ports:
+      - "5672:5672"
+      - "15672:15672"
+    environment:
+      RABBITMQ_DEFAULT_USER: guest
+      RABBITMQ_DEFAULT_PASS: guest
+    healthcheck:
+      test: rabbitmq-diagnostics -q check_port_connectivity
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  producer:
+    build:
+      context: ../..
+      args:
+        BUILD_TAGS: "rabbitmq"
+    command: ["serve", "--enqueue", "--config", "/config/config.yaml"]
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./config-producer.yaml:/config/config.yaml:ro
+      - catalog-cache:/cache
+    env_file: .env
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+
+  worker:
+    build:
+      context: ../..
+      args:
+        BUILD_TAGS: "rabbitmq"
+    command: ["worker", "--config", "/config/config.yaml"]
+    volumes:
+      - ./config-worker.yaml:/config/config.yaml:ro
+    env_file: .env
+    depends_on:
+      rabbitmq:
+        condition: service_healthy
+
+volumes:
+  catalog-cache:
