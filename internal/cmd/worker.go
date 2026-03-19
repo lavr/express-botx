@@ -27,10 +27,12 @@ func runWorker(args []string, deps Deps) error {
 	var flags config.Flags
 	var noCatalogPublish bool
 	var healthListen string
+	var dryRun bool
 
 	globalFlags(fs, &flags)
 	fs.BoolVar(&noCatalogPublish, "no-catalog-publish", false, "disable catalog snapshot publishing")
 	fs.StringVar(&healthListen, "health-listen", "", "health check listen address (e.g. :8081)")
+	fs.BoolVar(&dryRun, "dry-run", false, "process messages without sending to BotX API")
 	fs.Usage = func() {
 		fmt.Fprintf(deps.Stderr, `Usage: express-botx worker [options]
 
@@ -94,7 +96,7 @@ Options:
 	defer provider.Shutdown()
 
 	// Build worker
-	w, err := newWorkerRunner(cfg, publisher, provider)
+	w, err := newWorkerRunner(cfg, publisher, provider, dryRun)
 	if err != nil {
 		return err
 	}
@@ -171,6 +173,7 @@ type workerRunner struct {
 	retryCount      int
 	retryBackoff    time.Duration
 	shutdownTimeout time.Duration
+	dryRun          bool
 
 	healthy  atomic.Bool
 	ready    atomic.Bool
@@ -187,7 +190,7 @@ type workerBotClient struct {
 	cfg    *config.Config // bot-specific config for auth
 }
 
-func newWorkerRunner(cfg *config.Config, pub queue.Publisher, provider apm.Provider) (*workerRunner, error) {
+func newWorkerRunner(cfg *config.Config, pub queue.Publisher, provider apm.Provider, dryRun bool) (*workerRunner, error) {
 	retryCount := 3
 	if cfg.Worker.RetryCount > 0 {
 		retryCount = cfg.Worker.RetryCount
@@ -218,6 +221,7 @@ func newWorkerRunner(cfg *config.Config, pub queue.Publisher, provider apm.Provi
 		retryCount:      retryCount,
 		retryBackoff:    retryBackoff,
 		shutdownTimeout: shutdownTimeout,
+		dryRun:          dryRun,
 		clients:         make(map[string]*workerBotClient),
 	}, nil
 }
@@ -249,6 +253,15 @@ func (w *workerRunner) handleMessage(ctx context.Context, msg *queue.WorkMessage
 
 	// Build send request from work message
 	sr := buildSendRequestFromWork(msg)
+
+	// Dry-run: skip authentication and sending
+	if w.dryRun {
+		elapsed := time.Since(start)
+		vlog.Info("worker: request_id=%s bot_id=%s chat_id=%s duration=%dms status=dry-run",
+			msg.RequestID, msg.Routing.BotID, msg.Routing.ChatID, elapsed.Milliseconds())
+		w.publishResult(ctx, msg, "dry-run", "", "")
+		return nil
+	}
 
 	// Send with retry
 	var syncID string

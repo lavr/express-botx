@@ -42,3 +42,123 @@ jobs:
 
       - name: Test (vault integration)
         run: go test -tags vault ./... -v
+
+  test-rabbitmq:
+    runs-on: ubuntu-latest
+    services:
+      rabbitmq:
+        image: rabbitmq:3-alpine
+        ports:
+          - 5672:5672
+        options: >-
+          --health-cmd "rabbitmq-diagnostics -q check_port_connectivity"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+
+      - name: Build
+        run: go build -tags rabbitmq -o express-botx .
+
+      - name: Write test config
+        run: |
+          cat > /tmp/e2e-config.yaml <<'YAML'
+          bots:
+            testbot:
+              host: localhost
+              id: "00000000-0000-0000-0000-000000000001"
+              secret: fake
+          queue:
+            driver: rabbitmq
+            url: amqp://guest:guest@localhost:5672/
+            name: e2e-test-work
+          YAML
+
+      - name: E2E async flow (dry-run)
+        run: |
+          ./express-botx worker --config /tmp/e2e-config.yaml --dry-run --no-catalog-publish > /tmp/worker.log 2>&1 &
+          WORKER_PID=$!
+          sleep 2
+
+          ./express-botx enqueue --config /tmp/e2e-config.yaml \
+            --routing-mode direct \
+            --bot-id "00000000-0000-0000-0000-000000000001" \
+            --chat-id "00000000-0000-0000-0000-000000000002" \
+            "hello from CI"
+
+          sleep 2
+          kill $WORKER_PID 2>/dev/null; wait $WORKER_PID 2>/dev/null || true
+          cat /tmp/worker.log
+          grep -q "status=dry-run" /tmp/worker.log
+
+  test-kafka:
+    runs-on: ubuntu-latest
+    services:
+      kafka:
+        image: apache/kafka:3.9.0
+        ports:
+          - 9092:9092
+        env:
+          KAFKA_NODE_ID: 1
+          KAFKA_PROCESS_ROLES: broker,controller
+          KAFKA_CONTROLLER_QUORUM_VOTERS: 1@localhost:9093
+          KAFKA_CONTROLLER_LISTENER_NAMES: CONTROLLER
+          KAFKA_LISTENERS: PLAINTEXT://:9092,CONTROLLER://:9093
+          KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://localhost:9092
+          KAFKA_LISTENER_SECURITY_PROTOCOL_MAP: CONTROLLER:PLAINTEXT,PLAINTEXT:PLAINTEXT
+          KAFKA_INTER_BROKER_LISTENER_NAME: PLAINTEXT
+          KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+          KAFKA_GROUP_INITIAL_REBALANCE_DELAY_MS: 0
+          CLUSTER_ID: ci-kafka-cluster-id-001
+        options: >-
+          --health-cmd "/opt/kafka/bin/kafka-topics.sh --bootstrap-server localhost:9092 --list"
+          --health-interval 5s
+          --health-timeout 10s
+          --health-retries 15
+          --health-start-period 30s
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+
+      - name: Build
+        run: go build -tags kafka -o express-botx .
+
+      - name: Write test config
+        run: |
+          cat > /tmp/e2e-config.yaml <<'YAML'
+          bots:
+            testbot:
+              host: localhost
+              id: "00000000-0000-0000-0000-000000000001"
+              secret: fake
+          queue:
+            driver: kafka
+            url: localhost:9092
+            name: e2e-test-work
+          YAML
+
+      - name: E2E async flow (dry-run)
+        run: |
+          ./express-botx worker --config /tmp/e2e-config.yaml --dry-run --no-catalog-publish > /tmp/worker.log 2>&1 &
+          WORKER_PID=$!
+          sleep 3
+
+          ./express-botx enqueue --config /tmp/e2e-config.yaml \
+            --routing-mode direct \
+            --bot-id "00000000-0000-0000-0000-000000000001" \
+            --chat-id "00000000-0000-0000-0000-000000000002" \
+            "hello from CI"
+
+          sleep 5
+          kill $WORKER_PID 2>/dev/null; wait $WORKER_PID 2>/dev/null || true
+          cat /tmp/worker.log
+          grep -q "status=dry-run" /tmp/worker.log
+          grep -q "status=dry-run" /tmp/worker.log

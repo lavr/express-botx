@@ -33,7 +33,7 @@ func TestWorker_HandleMessage_Success(t *testing.T) {
 		Cache: config.CacheConfig{Type: "none"},
 	}
 
-	w, err := newWorkerRunner(cfg, fakeQ, apm.New())
+	w, err := newWorkerRunner(cfg, fakeQ, apm.New(), false)
 	if err != nil {
 		t.Fatalf("newWorkerRunner: %v", err)
 	}
@@ -99,7 +99,7 @@ func TestWorker_HandleMessage_UnknownBotID(t *testing.T) {
 		Cache: config.CacheConfig{Type: "none"},
 	}
 
-	w, err := newWorkerRunner(cfg, fakeQ, apm.New())
+	w, err := newWorkerRunner(cfg, fakeQ, apm.New(), false)
 	if err != nil {
 		t.Fatalf("newWorkerRunner: %v", err)
 	}
@@ -177,7 +177,7 @@ func TestWorker_HandleMessage_UpstreamError_RetryExhausted(t *testing.T) {
 		Worker: config.WorkerConfig{RetryCount: 2, RetryBackoff: "10ms"},
 	}
 
-	w, err := newWorkerRunner(cfg, fakeQ, apm.New())
+	w, err := newWorkerRunner(cfg, fakeQ, apm.New(), false)
 	if err != nil {
 		t.Fatalf("newWorkerRunner: %v", err)
 	}
@@ -260,7 +260,7 @@ func TestWorker_HandleMessage_401_TokenRefresh_Success(t *testing.T) {
 		Cache: config.CacheConfig{Type: "none"},
 	}
 
-	w, err := newWorkerRunner(cfg, fakeQ, apm.New())
+	w, err := newWorkerRunner(cfg, fakeQ, apm.New(), false)
 	if err != nil {
 		t.Fatalf("newWorkerRunner: %v", err)
 	}
@@ -314,7 +314,7 @@ func TestWorker_HandleMessage_NoReplyTo(t *testing.T) {
 		Cache: config.CacheConfig{Type: "none"},
 	}
 
-	w, err := newWorkerRunner(cfg, fakeQ, apm.New())
+	w, err := newWorkerRunner(cfg, fakeQ, apm.New(), false)
 	if err != nil {
 		t.Fatalf("newWorkerRunner: %v", err)
 	}
@@ -365,7 +365,7 @@ func TestWorker_HandleMessage_NoChatsSectionRequired(t *testing.T) {
 		Cache: config.CacheConfig{Type: "none"},
 	}
 
-	w, err := newWorkerRunner(cfg, fakeQ, apm.New())
+	w, err := newWorkerRunner(cfg, fakeQ, apm.New(), false)
 	if err != nil {
 		t.Fatalf("newWorkerRunner: %v", err)
 	}
@@ -409,7 +409,7 @@ func TestWorker_HealthCheck(t *testing.T) {
 		Cache: config.CacheConfig{Type: "none"},
 	}
 
-	w, err := newWorkerRunner(cfg, fakeQ, apm.New())
+	w, err := newWorkerRunner(cfg, fakeQ, apm.New(), false)
 	if err != nil {
 		t.Fatalf("newWorkerRunner: %v", err)
 	}
@@ -475,7 +475,7 @@ func TestWorker_CatalogPublish_OnStartup(t *testing.T) {
 		Cache: config.CacheConfig{Type: "none"},
 	}
 
-	w, err := newWorkerRunner(cfg, fakeQ, apm.New())
+	w, err := newWorkerRunner(cfg, fakeQ, apm.New(), false)
 	if err != nil {
 		t.Fatalf("newWorkerRunner: %v", err)
 	}
@@ -524,7 +524,7 @@ func TestWorker_CatalogPublish_Periodic(t *testing.T) {
 		Cache: config.CacheConfig{Type: "none"},
 	}
 
-	w, err := newWorkerRunner(cfg, fakeQ, apm.New())
+	w, err := newWorkerRunner(cfg, fakeQ, apm.New(), false)
 	if err != nil {
 		t.Fatalf("newWorkerRunner: %v", err)
 	}
@@ -585,7 +585,7 @@ func TestWorker_CatalogPublish_EmptyQueueName_NoPublish(t *testing.T) {
 		Cache: config.CacheConfig{Type: "none"},
 	}
 
-	_, err := newWorkerRunner(cfg, fakeQ, apm.New())
+	_, err := newWorkerRunner(cfg, fakeQ, apm.New(), false)
 	if err != nil {
 		t.Fatalf("newWorkerRunner: %v", err)
 	}
@@ -616,7 +616,7 @@ func TestWorker_HandleMessage_WithFileAttachment(t *testing.T) {
 		Cache: config.CacheConfig{Type: "none"},
 	}
 
-	w, err := newWorkerRunner(cfg, fakeQ, apm.New())
+	w, err := newWorkerRunner(cfg, fakeQ, apm.New(), false)
 	if err != nil {
 		t.Fatalf("newWorkerRunner: %v", err)
 	}
@@ -653,5 +653,58 @@ func TestWorker_HandleMessage_WithFileAttachment(t *testing.T) {
 	}
 	if calls[0].File.FileName != "test.txt" {
 		t.Errorf("FileName = %q, want %q", calls[0].File.FileName, "test.txt")
+	}
+}
+
+func TestWorker_HandleMessage_DryRun(t *testing.T) {
+	mock := newMockBotxAPI()
+	botxSrv := httptest.NewServer(mock.handler())
+	defer botxSrv.Close()
+
+	fakeQ := queue.NewFake()
+
+	cfg := &config.Config{
+		Bots: map[string]config.BotConfig{
+			"alerts": {
+				Host:   botxSrv.URL,
+				ID:     "bot-uuid-001",
+				Secret: "test-secret",
+			},
+		},
+		Cache: config.CacheConfig{Type: "none"},
+	}
+
+	w, err := newWorkerRunner(cfg, fakeQ, apm.New(), true)
+	if err != nil {
+		t.Fatalf("newWorkerRunner: %v", err)
+	}
+
+	msg := &queue.WorkMessage{
+		RequestID: "dry-run-req-001",
+		Routing:   queue.Routing{BotID: "bot-uuid-001", ChatID: "chat-uuid-001"},
+		Payload:   queue.Payload{Message: "dry run test", Status: "ok"},
+		ReplyTo:   "reply-queue",
+	}
+
+	err = w.handleMessage(context.Background(), msg)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// No BotX API calls should have been made
+	if calls := mock.getCalls(); len(calls) != 0 {
+		t.Errorf("expected 0 BotX calls in dry-run, got %d", len(calls))
+	}
+
+	// Result should be published with dry-run status
+	results := fakeQ.Results("reply-queue")
+	if len(results) != 1 {
+		t.Fatalf("expected 1 result, got %d", len(results))
+	}
+	if results[0].Status != "dry-run" {
+		t.Errorf("result status = %q, want %q", results[0].Status, "dry-run")
+	}
+	if results[0].RequestID != "dry-run-req-001" {
+		t.Errorf("result request_id = %q, want %q", results[0].RequestID, "dry-run-req-001")
 	}
 }
