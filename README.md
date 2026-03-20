@@ -25,6 +25,8 @@ sudo mv express-botx /usr/local/bin/
 
 Проект также можно установить из homebrew, собрать из исходников, запустить в готовом контейнере.
 
+Подробнее: [docs/install.md](docs/install.md)
+
 ### Создание конфига
 
 В конфиге можно сохранить параметры бота и параметры чатов.
@@ -53,78 +55,27 @@ express-botx config chat add \
 express-botx send "Привет из express-botx!"
 ```
 
-## Установка
-
-### Бинарник с GitHub
-
-```bash
-OS=$(uname -s | tr '[:upper:]' '[:lower:]')
-ARCH=$(uname -m | sed 's/x86_64/amd64/' | sed 's/aarch64/arm64/')
-curl -sL "https://github.com/lavr/express-botx/releases/latest/download/express-botx-${OS}-${ARCH}.tar.gz" | tar xz
-sudo mv express-botx /usr/local/bin/
-```
-
-### Homebrew
-
-```bash
-brew install lavr/tap/express-botx
-```
-
-### Docker
-
-```bash
-docker pull lavr/express-botx
-```
-
-### Go
-
-```bash
-go install github.com/lavr/express-botx@latest
-```
-
-### Из исходников
-
-```bash
-git clone https://github.com/lavr/express-botx.git
-cd express-botx
-go build -o express-botx .
-
-# С поддержкой RabbitMQ / Kafka
-go build -tags "rabbitmq kafka" -o express-botx .
-```
-
-## Использование
-
-### Отправка сообщений (send)
-
-```bash
-# Текст как аргумент
-express-botx send "Сборка #42 прошла успешно"
-
-# Из stdin
-echo "Deploy OK" | express-botx send
-
-# Из файла
-express-botx send --body-from report.txt
-
-# С вложением
-express-botx send --file report.pdf "Отчёт за март"
-
-# В конкретный чат со статусом ошибки
-express-botx send --chat-id alerts "Диск заполнен на 95%" --status error
-```
-
-При успехе — exit 0 (молча). При ошибке — сообщение в stderr, exit 1.
+Подробнее: [docs/commands.md](docs/commands.md)
 
 ### HTTP-сервер (serve)
 
+Если нужно запустить как веб-сервис:
+
 ```bash
-# Запуск сервера
+# Создать токен для доступа к веб-сервису
+NEWAPIKEY=$(openssl rand -hex 32)
+express-botx config apikey add --name mykey1 --key "$NEWAPIKEY"
+
+# Запустить в режиме serve
 express-botx serve
 
-# На другом порту
-express-botx serve --listen :9090
+# Отправить сообщение через веб-сервис
+curl -X POST http://localhost:8080/api/v1/send \
+    -H "Authorization: Bearer <api-key>" \
+    -H "Content-Type: application/json" \
+    -d '{"message": "Test from express-botx web api"}'
 ```
+
 
 Эндпоинты (все POST требуют `Authorization: Bearer <key>`):
 
@@ -135,17 +86,13 @@ express-botx serve --listen :9090
 | `POST` | `/api/v1/alertmanager` | Вебхук Alertmanager |
 | `POST` | `/api/v1/grafana` | Вебхук Grafana |
 
-```bash
-# Отправка через API
-curl -X POST http://localhost:8080/api/v1/send \
-  -H "Authorization: Bearer <api-key>" \
-  -H "Content-Type: application/json" \
-  -d '{"chat_id": "alerts", "message": "Deploy OK"}'
-```
+
+Подробнее: [docs/integrations.md](docs/integrations.md)
+
 
 ### Очереди (enqueue / worker)
 
-Для надёжной асинхронной доставки express-botx поддерживает работу через RabbitMQ или Kafka. HTTP-сервер кладёт сообщения в очередь, worker забирает и отправляет в BotX API.
+Для асинхронной доставки express-botx поддерживает работу через RabbitMQ или Kafka. HTTP-сервер кладёт сообщения в очередь, worker забирает и отправляет в BotX API.
 
 ```bash
 # Producer: HTTP → очередь
@@ -162,7 +109,7 @@ express-botx worker
 ```bash
 express-botx config bot add --name prod --host express.company.ru --bot-id UUID --secret SECRET
 express-botx config chat add --chat-id UUID --alias deploy --bot prod
-express-botx config apikey add --name monitoring
+express-botx config apikey add --name app1
 express-botx config show
 ```
 
@@ -170,7 +117,8 @@ express-botx config show
 
 ## Конфигурация
 
-Минимальный конфиг (`<os.UserConfigDir>/express-botx/config.yaml`, например `~/.config/express-botx/config.yaml` на Linux или `~/Library/Application Support/express-botx/config.yaml` на macOS):
+Приложение может работать без конфига - параметры бота и чата можно задать из командной строки.
+Для удобной работы можно прописать в конфиг параметры бота/ботов и чатов, например:
 
 ```yaml
 bots:
@@ -186,17 +134,13 @@ chats:
     default: true
 ```
 
-Параметры загружаются слоями (каждый следующий перекрывает предыдущий):
-
-1. **YAML-файл** (`--config`, `EXPRESS_BOTX_CONFIG`, `./express-botx.yaml`, `<os.UserConfigDir>/express-botx/config.yaml`)
-2. **Переменные окружения** (`EXPRESS_BOTX_HOST`, `EXPRESS_BOTX_BOT_ID`, ...)
-3. **Флаги командной строки** (`--host`, `--bot-id`, ...)
-
 Полный референс конфигурации: [docs/configuration.md](docs/configuration.md)
 
 ## Интеграции
 
-### Alertmanager
+В режиме веб-сервера есть методы для интеграции с alertmanager и grafana.
+
+Пример конфига alertmanager:
 
 ```yaml
 # alertmanager.yml
@@ -209,68 +153,42 @@ receivers:
           bearer_token: "<api-key>"
 ```
 
-### Grafana
-
-Contact point → Webhook:
-- **URL:** `http://express-botx:8080/api/v1/grafana`
-- **Authorization Header:** `Bearer <api-key>`
-
 Подробнее: [docs/integrations.md](docs/integrations.md)
 
 ## Деплой
 
-### Docker
+Приложение собирается в образ `lavr/express-botx`.
+
+Его можно запустить:
+
+
 
 ```bash
 # HTTP-сервер
 docker run -d -p 8080:8080 -v ./config.yaml:/config.yaml \
   lavr/express-botx serve --config /config.yaml
-
-# Отправка из CLI
-docker run --rm lavr/express-botx send \
-  --host express.company.ru --bot-id UUID --secret KEY \
-  --chat-id UUID "Hello from Docker"
 ```
 
-### Kubernetes (Helm)
+Хелм-чарт для установки в kubernetes:
 
 ```bash
 helm install express-botx oci://ghcr.io/lavr/charts/express-botx -f values.yaml
 ```
 
-### systemd
-
-```ini
-# /etc/systemd/system/express-botx.service
-[Unit]
-Description=express-botx HTTP server
-After=network-online.target
-Wants=network-online.target
-
-[Service]
-Type=simple
-ExecStart=/usr/local/bin/express-botx serve --config /etc/express-botx/config.yaml
-Restart=always
-RestartSec=5
-User=express-botx
-Group=express-botx
-
-[Install]
-WantedBy=multi-user.target
-```
-
 Подробнее: [docs/deployment.md](docs/deployment.md)
+
 
 ## Документация
 
 | Документ | Описание |
 |----------|----------|
+| [docs/install.md](docs/install .md) | Варианты установки |
 | [docs/commands.md](docs/commands.md) | Все команды и флаги |
 | [docs/configuration.md](docs/configuration.md) | Полный референс конфигурации |
 | [docs/integrations.md](docs/integrations.md) | Alertmanager, Grafana, примеры |
 | [docs/deployment.md](docs/deployment.md) | Docker, Helm, systemd, docker-compose |
 | [docs/async-queues.md](docs/async-queues.md) | RabbitMQ, Kafka, архитектура очередей |
-| [QUICKSTART.md](QUICKSTART.md) | Пошаговые сценарии настройки |
+| [docs/quickstart.md](docs/quickstart.md) | Базовые сценарии настрофки |
 
 ## Лицензия
 
