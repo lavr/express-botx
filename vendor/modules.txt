@@ -30,6 +30,12 @@ github.com/getsentry/sentry-go/internal/ratelimit
 github.com/getsentry/sentry-go/internal/telemetry
 github.com/getsentry/sentry-go/internal/traceutils
 github.com/getsentry/sentry-go/internal/util
+# github.com/itchyny/gojq v0.12.18
+## explicit; go 1.24.0
+github.com/itchyny/gojq
+# github.com/itchyny/timefmt-go v0.1.7
+## explicit; go 1.24
+github.com/itchyny/timefmt-go
 # github.com/joeshaw/multierror v0.0.0-20140124173710-69b34d4ec901
 ## explicit
 github.com/joeshaw/multierror

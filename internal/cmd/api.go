@@ -110,6 +110,9 @@ func buildAPIBody(p apiBodyParams) (*apiBody, error) {
 	// Multipart mode: --input @file
 	if isMultipart {
 		filePath := p.inputFile[1:] // strip @ prefix
+		if filePath == "" {
+			return nil, fmt.Errorf("missing file path after @")
+		}
 		fileData, err := os.ReadFile(filePath)
 		if err != nil {
 			return nil, fmt.Errorf("reading input file: %w", err)
@@ -333,9 +336,12 @@ Options:
 		return fmt.Errorf("endpoint must start with /")
 	}
 
-	// Validate jq expression early (before auth/request)
+	// Parse jq expression early (before auth/request)
+	var jqQuery *gojq.Query
 	if jqExpr != "" {
-		if err := validateJQ(jqExpr); err != nil {
+		var err error
+		jqQuery, err = parseJQ(jqExpr)
+		if err != nil {
 			return fmt.Errorf("invalid jq expression: %w", err)
 		}
 	}
@@ -409,7 +415,6 @@ Options:
 	if err != nil {
 		return fmt.Errorf("request failed: %w", err)
 	}
-	defer resp.Body.Close()
 
 	// Handle 401 retry
 	if resp.StatusCode == http.StatusUnauthorized && !manualAuth {
@@ -435,17 +440,18 @@ Options:
 		if err != nil {
 			return fmt.Errorf("request failed after token refresh: %w", err)
 		}
-		defer resp.Body.Close()
 
 		if resp.StatusCode == http.StatusUnauthorized {
+			resp.Body.Close()
 			return fmt.Errorf("unauthorized after token refresh (401)")
 		}
 	}
+	defer resp.Body.Close()
 
-	return outputResponse(deps, resp, include, silent, jqExpr, cfg.Format)
+	return outputResponse(deps, resp, include, silent, jqQuery, cfg.Format)
 }
 
-func outputResponse(deps Deps, resp *http.Response, include, silent bool, jqExpr, format string) error {
+func outputResponse(deps Deps, resp *http.Response, include, silent bool, jqQuery *gojq.Query, format string) error {
 	if include {
 		fmt.Fprintf(deps.Stdout, "%s %s\n", resp.Proto, resp.Status)
 		for key, vals := range resp.Header {
@@ -460,12 +466,12 @@ func outputResponse(deps Deps, resp *http.Response, include, silent bool, jqExpr
 
 	if !silent {
 		if isSuccess {
-			if jqExpr != "" {
+			if jqQuery != nil {
 				data, err := io.ReadAll(resp.Body)
 				if err != nil {
 					return fmt.Errorf("reading response: %w", err)
 				}
-				if err := applyJQ(deps.Stdout, deps.Stderr, data, jqExpr); err != nil {
+				if err := applyJQ(deps.Stdout, deps.Stderr, data, jqQuery); err != nil {
 					return err
 				}
 			} else if format == "json" && isJSONContentType(resp.Header.Get("Content-Type")) {
@@ -475,15 +481,18 @@ func outputResponse(deps Deps, resp *http.Response, include, silent bool, jqExpr
 				}
 				prettyPrintJSON(deps.Stdout, data)
 			} else {
-				io.Copy(deps.Stdout, resp.Body)
+				if _, err := io.Copy(deps.Stdout, resp.Body); err != nil {
+					return fmt.Errorf("writing response: %w", err)
+				}
 			}
 		} else {
 			data, err := io.ReadAll(resp.Body)
 			if err != nil {
 				return fmt.Errorf("reading response: %w", err)
 			}
-			if jqExpr != "" {
-				if err := applyJQ(deps.Stdout, deps.Stderr, data, jqExpr); err != nil {
+			if jqQuery != nil {
+				if err := applyJQ(deps.Stdout, deps.Stderr, data, jqQuery); err != nil {
+					fmt.Fprintf(deps.Stderr, "warning: jq filter failed: %v\n", err)
 					deps.Stdout.Write(data)
 				}
 			} else if format == "json" && isJSONContentType(resp.Header.Get("Content-Type")) {
@@ -514,28 +523,22 @@ func prettyPrintJSON(w io.Writer, data []byte) {
 	w.Write(buf.Bytes())
 }
 
-// validateJQ checks if a jq expression is syntactically valid.
-func validateJQ(expr string) error {
+// parseJQ parses a jq expression and returns the compiled query.
+func parseJQ(expr string) (*gojq.Query, error) {
 	if expr == "" {
-		return fmt.Errorf("empty expression")
+		return nil, fmt.Errorf("empty expression")
 	}
-	_, err := gojq.Parse(expr)
-	return err
+	return gojq.Parse(expr)
 }
 
-// applyJQ applies a jq expression to JSON data and writes results to stdout.
+// applyJQ applies a parsed jq query to JSON data and writes results to stdout.
 // If data is not valid JSON, writes raw data to stdout and a warning to stderr.
-func applyJQ(stdout io.Writer, stderr io.Writer, data []byte, expr string) error {
+func applyJQ(stdout io.Writer, stderr io.Writer, data []byte, query *gojq.Query) error {
 	var input any
 	if err := json.Unmarshal(data, &input); err != nil {
 		stdout.Write(data)
 		fmt.Fprintf(stderr, "warning: response is not valid JSON, showing raw output\n")
 		return nil
-	}
-
-	query, err := gojq.Parse(expr)
-	if err != nil {
-		return fmt.Errorf("invalid jq expression: %w", err)
 	}
 
 	iter := query.Run(input)

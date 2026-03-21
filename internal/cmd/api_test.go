@@ -12,6 +12,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/itchyny/gojq"
 )
 
 // --- buildAPIBody ---
@@ -690,7 +692,7 @@ func TestOutputResponse_SilentWithInclude(t *testing.T) {
 		Body:       io.NopCloser(strings.NewReader("body")),
 	}
 
-	err := outputResponse(deps, resp, true, true, "", "")
+	err := outputResponse(deps, resp, true, true, nil, "")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -719,31 +721,40 @@ func TestExitError(t *testing.T) {
 
 // --- jq filtering ---
 
-func TestValidateJQ_Valid(t *testing.T) {
-	if err := validateJQ(".foo"); err != nil {
+func TestParseJQ_Valid(t *testing.T) {
+	if _, err := parseJQ(".foo"); err != nil {
 		t.Errorf("expected valid, got: %v", err)
 	}
-	if err := validateJQ(".result[].name"); err != nil {
+	if _, err := parseJQ(".result[].name"); err != nil {
 		t.Errorf("expected valid, got: %v", err)
 	}
-	if err := validateJQ(`.[] | select(.status == "ok")`); err != nil {
+	if _, err := parseJQ(`.[] | select(.status == "ok")`); err != nil {
 		t.Errorf("expected valid, got: %v", err)
 	}
 }
 
-func TestValidateJQ_Invalid(t *testing.T) {
-	if err := validateJQ(".[invalid"); err == nil {
+func TestParseJQ_Invalid(t *testing.T) {
+	if _, err := parseJQ(".[invalid"); err == nil {
 		t.Error("expected error for invalid expression")
 	}
-	if err := validateJQ(""); err == nil {
+	if _, err := parseJQ(""); err == nil {
 		t.Error("expected error for empty expression")
 	}
+}
+
+func mustParseJQ(t *testing.T, expr string) *gojq.Query {
+	t.Helper()
+	q, err := parseJQ(expr)
+	if err != nil {
+		t.Fatalf("failed to parse jq expression %q: %v", expr, err)
+	}
+	return q
 }
 
 func TestApplyJQ_SimpleField(t *testing.T) {
 	var stdout, stderr strings.Builder
 	data := []byte(`{"name":"Alice","age":30}`)
-	err := applyJQ(&stdout, &stderr, data, ".name")
+	err := applyJQ(&stdout, &stderr, data, mustParseJQ(t, ".name"))
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -755,7 +766,7 @@ func TestApplyJQ_SimpleField(t *testing.T) {
 func TestApplyJQ_ArrayIteration(t *testing.T) {
 	var stdout, stderr strings.Builder
 	data := []byte(`{"result":[{"name":"a"},{"name":"b"}]}`)
-	err := applyJQ(&stdout, &stderr, data, ".result[].name")
+	err := applyJQ(&stdout, &stderr, data, mustParseJQ(t, ".result[].name"))
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -768,7 +779,7 @@ func TestApplyJQ_ArrayIteration(t *testing.T) {
 func TestApplyJQ_NumericResult(t *testing.T) {
 	var stdout, stderr strings.Builder
 	data := []byte(`{"count":42}`)
-	err := applyJQ(&stdout, &stderr, data, ".count")
+	err := applyJQ(&stdout, &stderr, data, mustParseJQ(t, ".count"))
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -780,7 +791,7 @@ func TestApplyJQ_NumericResult(t *testing.T) {
 func TestApplyJQ_NullResult(t *testing.T) {
 	var stdout, stderr strings.Builder
 	data := []byte(`{"a":1}`)
-	err := applyJQ(&stdout, &stderr, data, ".missing")
+	err := applyJQ(&stdout, &stderr, data, mustParseJQ(t, ".missing"))
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -792,7 +803,7 @@ func TestApplyJQ_NullResult(t *testing.T) {
 func TestApplyJQ_NonJSONInput(t *testing.T) {
 	var stdout, stderr strings.Builder
 	data := []byte("this is not JSON")
-	err := applyJQ(&stdout, &stderr, data, ".foo")
+	err := applyJQ(&stdout, &stderr, data, mustParseJQ(t, ".foo"))
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
