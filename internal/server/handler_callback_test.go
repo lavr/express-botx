@@ -322,6 +322,41 @@ func TestHandleNotificationCallback(t *testing.T) {
 	})
 }
 
+func TestHandleNotificationCallbackNoRules(t *testing.T) {
+	handler := &recordingHandler{}
+	// Only "chat_created" rule — no "notification_callback" rule.
+	router, err := NewCallbackRouter(
+		[][]string{{"chat_created"}},
+		[]bool{false},
+		map[int]CallbackHandler{0: handler},
+	)
+	if err != nil {
+		t.Fatalf("NewCallbackRouter: %v", err)
+	}
+	srv := newTestServerWithCallbackRouter(router)
+
+	body := `{"sync_id":"n1","status":"ok"}`
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest("POST", "/notification/callback", strings.NewReader(body))
+	srv.handleNotificationCallback(w, req)
+
+	if w.Code != 200 {
+		t.Fatalf("expected 200, got %d", w.Code)
+	}
+
+	var resp callbackResponse
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode response: %v", err)
+	}
+	if resp.Result != "ok" {
+		t.Fatalf("expected result 'ok', got %q", resp.Result)
+	}
+
+	if handler.callCount() != 0 {
+		t.Fatalf("expected 0 calls, got %d", handler.callCount())
+	}
+}
+
 func TestHandleCommandNoRules(t *testing.T) {
 	handler := &recordingHandler{}
 	router, err := NewCallbackRouter(

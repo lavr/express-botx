@@ -341,8 +341,8 @@ go test ./internal/server/ -run TestHandleNotificationCallback -v
 
 ### 5.4 Нет совпавших правил
 
-- [ ] Если ни одно правило не совпало → 202 без вызова обработчиков
-- [ ] Debug-лог: `"no matching rules for event %s"`
+- [x] Если ни одно правило не совпало → 202 без вызова обработчиков
+- [x] Debug-лог: `"no matching rules for event %s"`
 
 ```
 go test ./internal/server/ -run TestHandleCommandNoRules -v
