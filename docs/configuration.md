@@ -58,10 +58,10 @@ server:
   api_keys:
     - name: monitoring
       key: env:MONITORING_API_KEY
-  alertmanager:
+  alertmanager:                              # опционально — endpoint включён по умолчанию
     default_chat_id: alerts               # UUID или алиас (опционально)
     error_severities: [critical, warning] # по умолчанию
-  grafana:
+  grafana:                                  # опционально — endpoint включён по умолчанию
     default_chat_id: alerts
     error_states: [alerting]              # по умолчанию
 ```

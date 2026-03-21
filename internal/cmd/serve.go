@@ -241,36 +241,39 @@ Options:
 	srvOpts = append(srvOpts, server.WithErrTracker(tracker))
 	srvOpts = append(srvOpts, server.WithConfigInfo(runtimeBotEntries(cfg), runtimeChatEntries(cfg)))
 
-	// Alertmanager endpoint
-	if am := cfg.Server.Alertmanager; am != nil {
-		amCfg, err := buildAlertmanagerConfig(am, cfg.ConfigPath())
-		if err != nil {
-			return err
-		}
-		// If no default_chat_id, use single chat alias as fallback
-		if amCfg.DefaultChatID == "" && len(cfg.Chats) == 1 {
-			for alias := range cfg.Chats {
-				amCfg.FallbackChatID = alias
-				vlog.V1("alertmanager: using single chat alias %q as fallback", alias)
-			}
-		}
-		srvOpts = append(srvOpts, server.WithAlertmanager(amCfg))
+	// Alertmanager endpoint (always enabled)
+	am := cfg.Server.Alertmanager
+	if am == nil {
+		am = &config.AlertmanagerYAMLConfig{}
 	}
+	amCfg, err := buildAlertmanagerConfig(am, cfg.ConfigPath())
+	if err != nil {
+		return err
+	}
+	if amCfg.DefaultChatID == "" && len(cfg.Chats) == 1 {
+		for alias := range cfg.Chats {
+			amCfg.FallbackChatID = alias
+			vlog.V1("alertmanager: using single chat alias %q as fallback", alias)
+		}
+	}
+	srvOpts = append(srvOpts, server.WithAlertmanager(amCfg))
 
-	// Grafana endpoint
-	if gr := cfg.Server.Grafana; gr != nil {
-		grCfg, err := buildGrafanaConfig(gr, cfg.ConfigPath())
-		if err != nil {
-			return err
-		}
-		if grCfg.DefaultChatID == "" && len(cfg.Chats) == 1 {
-			for alias := range cfg.Chats {
-				grCfg.FallbackChatID = alias
-				vlog.V1("grafana: using single chat alias %q as fallback", alias)
-			}
-		}
-		srvOpts = append(srvOpts, server.WithGrafana(grCfg))
+	// Grafana endpoint (always enabled)
+	gr := cfg.Server.Grafana
+	if gr == nil {
+		gr = &config.GrafanaYAMLConfig{}
 	}
+	grCfg, err := buildGrafanaConfig(gr, cfg.ConfigPath())
+	if err != nil {
+		return err
+	}
+	if grCfg.DefaultChatID == "" && len(cfg.Chats) == 1 {
+		for alias := range cfg.Chats {
+			grCfg.FallbackChatID = alias
+			vlog.V1("grafana: using single chat alias %q as fallback", alias)
+		}
+	}
+	srvOpts = append(srvOpts, server.WithGrafana(grCfg))
 
 	// Callback endpoints
 	if cb := cfg.Server.Callbacks; cb != nil && len(cb.Rules) > 0 {

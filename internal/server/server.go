@@ -218,30 +218,26 @@ func New(cfg Config, sendFn SendFunc, chatResolver ChatResolver, opts ...Option)
 
 	if s.amCfg != nil {
 		route("POST", "/alertmanager", s.handleAlertmanager)
-		chatInfo := s.amCfg.DefaultChatID
-		if chatInfo == "" {
+		chatInfo := "from ?chat_id param"
+		if s.amCfg.DefaultChatID != "" {
+			chatInfo = s.amCfg.DefaultChatID
+		} else if cfg.DefaultChatAlias != "" {
 			chatInfo = cfg.DefaultChatAlias
-		}
-		if chatInfo == "" {
+		} else if s.amCfg.FallbackChatID != "" {
 			chatInfo = s.amCfg.FallbackChatID
-		}
-		if chatInfo == "" {
-			chatInfo = "from ?chat_id param"
 		}
 		vlog.Info("server: alertmanager endpoint enabled (chat: %s)", chatInfo)
 	}
 
 	if s.grCfg != nil {
 		route("POST", "/grafana", s.handleGrafana)
-		chatInfo := s.grCfg.DefaultChatID
-		if chatInfo == "" {
+		chatInfo := "from ?chat_id param"
+		if s.grCfg.DefaultChatID != "" {
+			chatInfo = s.grCfg.DefaultChatID
+		} else if cfg.DefaultChatAlias != "" {
 			chatInfo = cfg.DefaultChatAlias
-		}
-		if chatInfo == "" {
+		} else if s.grCfg.FallbackChatID != "" {
 			chatInfo = s.grCfg.FallbackChatID
-		}
-		if chatInfo == "" {
-			chatInfo = "from ?chat_id param"
 		}
 		vlog.Info("server: grafana endpoint enabled (chat: %s)", chatInfo)
 	}

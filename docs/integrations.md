@@ -6,7 +6,7 @@
 
 ### Настройка express-botx
 
-В конфиге укажите чат для алертов:
+Endpoint `/api/v1/alertmanager` включён по умолчанию — никакой дополнительной настройки не требуется. Если в конфиге определён один чат, он используется автоматически. Секция `alertmanager` нужна только для кастомизации:
 
 ```yaml
 server:
@@ -15,9 +15,9 @@ server:
   api_keys:
     - name: alertmanager
       key: env:ALERTMANAGER_API_KEY
-  alertmanager:
-    default_chat_id: alerts         # чат по умолчанию для алертов
-    error_severities:               # при каких severity ставить статус "error"
+  alertmanager:                       # опционально — endpoint работает и без этой секции
+    default_chat_id: alerts           # чат по умолчанию для алертов
+    error_severities:                 # при каких severity ставить статус "error"
       - critical
       - warning
 ```
@@ -106,6 +106,8 @@ curl -X POST http://localhost:8080/api/v1/alertmanager \
 
 ### Настройка express-botx
 
+Endpoint `/api/v1/grafana` включён по умолчанию — никакой дополнительной настройки не требуется. Если в конфиге определён один чат, он используется автоматически. Секция `grafana` нужна только для кастомизации:
+
 ```yaml
 server:
   listen: ":8080"
@@ -113,9 +115,9 @@ server:
   api_keys:
     - name: grafana
       key: env:GRAFANA_API_KEY
-  grafana:
-    default_chat_id: alerts           # чат по умолчанию
-    error_states:                     # при каких состояниях ставить статус "error"
+  grafana:                              # опционально — endpoint работает и без этой секции
+    default_chat_id: alerts             # чат по умолчанию
+    error_states:                       # при каких состояниях ставить статус "error"
       - alerting
 ```
 

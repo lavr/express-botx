@@ -43,6 +43,8 @@ config:
     #api_keys: []
     #  - name: alertmanager
     #    key: "change-me"
+    # Alertmanager and Grafana webhook endpoints are enabled by default.
+    # These sections are only needed to customize templates, default_chat_id, or severity/states.
     # alertmanager:
     #   default_chat_id: alerts
     # grafana:
