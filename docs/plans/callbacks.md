@@ -115,13 +115,13 @@ srv := server.New(cfg, sendFn, chatResolver,
 
 ### 1.1 YAML-структуры конфига
 
-- [ ] Добавить `CallbacksConfig` в `internal/config/config.go`:
+- [x] Добавить `CallbacksConfig` в `internal/config/config.go`:
   поля `BasePath`, `VerifyJWT *bool`, `Rules []CallbackRule`
-- [ ] Добавить `CallbackRule`: поля `Events []string`, `Async bool`,
+- [x] Добавить `CallbackRule`: поля `Events []string`, `Async bool`,
   `Handler CallbackHandlerConfig`
-- [ ] Добавить `CallbackHandlerConfig`: поля `Type string`,
+- [x] Добавить `CallbackHandlerConfig`: поля `Type string`,
   `Command string`, `URL string`, `Timeout string`
-- [ ] Добавить `Callbacks *CallbacksConfig` в `ServerConfig`
+- [x] Добавить `Callbacks *CallbacksConfig` в `ServerConfig`
 
 ```
 go build ./...
@@ -129,11 +129,11 @@ go build ./...
 
 ### 1.2 Валидация конфига
 
-- [ ] Валидация при парсинге: events не пустой, handler.type один из
+- [x] Валидация при парсинге: events не пустой, handler.type один из
   `exec`/`webhook`, command/url заполнены в зависимости от type
-- [ ] Валидация events: предупреждение (не ошибка) при неизвестном имени
+- [x] Валидация events: предупреждение (не ошибка) при неизвестном имени
   события (чтобы не ломать custom events в будущем)
-- [ ] Валидация timeout: парсится через `time.ParseDuration`
+- [x] Валидация timeout: парсится через `time.ParseDuration`
 
 ```
 go test ./internal/config/ -run TestCallbacksConfig -v
@@ -141,8 +141,8 @@ go test ./internal/config/ -run TestCallbacksConfig -v
 
 ### 1.3 Интерфейс CallbackHandler
 
-- [ ] Создать `internal/server/callback.go`
-- [ ] Определить интерфейс `CallbackHandler` (`Type() string`,
+- [x] Создать `internal/server/callback.go`
+- [x] Определить интерфейс `CallbackHandler` (`Type() string`,
   `Handle(ctx, event, payload) error`)
 
 ```
@@ -151,9 +151,9 @@ go build ./internal/server/
 
 ### 1.4 Типы событий и парсинг
 
-- [ ] В `internal/server/callback.go` определить строковые константы для
+- [x] В `internal/server/callback.go` определить строковые константы для
   всех 16 system-событий + `message` + `notification_callback`
-- [ ] Функция `parseEventType(commandBody string) string` —
+- [x] Функция `parseEventType(commandBody string) string` —
   `"system:chat_created"` → `"chat_created"`, обычный текст → `"message"`
 
 ```
@@ -162,10 +162,10 @@ go test ./internal/server/ -run TestParseEventType -v
 
 ### 1.5 Структуры BotX API v4 payload
 
-- [ ] В `internal/server/callback.go` определить `CallbackPayload`:
+- [x] В `internal/server/callback.go` определить `CallbackPayload`:
   `SyncID`, `Command` (Body, CommandType, Data, Metadata),
   `From` (UserHUID, GroupChatID, Host, ...), `BotID`, `ProtoVersion`
-- [ ] Определить `NotificationCallbackPayload`:
+- [x] Определить `NotificationCallbackPayload`:
   `SyncID`, `Status`, `Result`, `Reason`, `Errors`, `ErrorData`
 
 ```

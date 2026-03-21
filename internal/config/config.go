@@ -97,8 +97,32 @@ type ServerConfig struct {
 	AllowBotSecretAuth bool                  `yaml:"allow_bot_secret_auth,omitempty"`
 	Alertmanager       *AlertmanagerYAMLConfig `yaml:"alertmanager,omitempty"`
 	Grafana            *GrafanaYAMLConfig      `yaml:"grafana,omitempty"`
+	Callbacks          *CallbacksConfig        `yaml:"callbacks,omitempty"`
 	Docs               *bool                   `yaml:"docs,omitempty"`         // enable /docs endpoint (default: true)
 	ExternalURL        string                  `yaml:"external_url,omitempty"` // public URL for OpenAPI docs (e.g. http://express-botx.invitro-dev.k8s)
+}
+
+// CallbacksConfig holds settings for BotX callback handling.
+type CallbacksConfig struct {
+	BasePath  string         `yaml:"base_path,omitempty"`  // separate base path (defaults to server.base_path)
+	VerifyJWT *bool          `yaml:"verify_jwt,omitempty"` // JWT verification enabled by default
+	Rules     []CallbackRule `yaml:"rules,omitempty"`
+}
+
+// CallbackRule maps a set of events to a handler with sync/async mode.
+type CallbackRule struct {
+	Events    []string              `yaml:"events"`
+	Async     bool                  `yaml:"async,omitempty"`
+	VerifyJWT *bool                 `yaml:"verify_jwt,omitempty"` // per-rule override
+	Handler   CallbackHandlerConfig `yaml:"handler"`
+}
+
+// CallbackHandlerConfig defines the handler type and its parameters.
+type CallbackHandlerConfig struct {
+	Type    string `yaml:"type"`              // "exec" or "webhook"
+	Command string `yaml:"command,omitempty"` // for exec handler
+	URL     string `yaml:"url,omitempty"`     // for webhook handler
+	Timeout string `yaml:"timeout,omitempty"` // e.g. "10s", "30s"
 }
 
 // AlertmanagerYAMLConfig holds YAML settings for the alertmanager webhook endpoint.
@@ -801,6 +825,60 @@ func (c *Config) validateBotConfigs() error {
 	for name, bot := range c.Bots {
 		if bot.Secret != "" && bot.Token != "" {
 			return fmt.Errorf("bot %q has both secret and token, use one", name)
+		}
+	}
+	return nil
+}
+
+// knownCallbackEvents is the set of recognized BotX callback event names.
+var knownCallbackEvents = map[string]bool{
+	"message":                    true,
+	"chat_created":               true,
+	"added_to_chat":              true,
+	"user_joined_to_chat":        true,
+	"deleted_from_chat":          true,
+	"left_from_chat":             true,
+	"chat_deleted_by_user":       true,
+	"cts_login":                  true,
+	"cts_logout":                 true,
+	"event_edit":                 true,
+	"smartapp_event":             true,
+	"internal_bot_notification":  true,
+	"conference_created":         true,
+	"conference_deleted":         true,
+	"call_started":               true,
+	"call_ended":                 true,
+	"notification_callback":      true,
+	"*":                          true,
+}
+
+// ValidateCallbacks checks the callbacks configuration for errors.
+func (c *CallbacksConfig) Validate() error {
+	for i, rule := range c.Rules {
+		if len(rule.Events) == 0 {
+			return fmt.Errorf("callbacks rule #%d: events must not be empty", i+1)
+		}
+		for _, ev := range rule.Events {
+			if !knownCallbackEvents[ev] {
+				vlog.Info("callbacks rule #%d: warning: unknown event %q (will still be matched)", i+1, ev)
+			}
+		}
+		switch rule.Handler.Type {
+		case "exec":
+			if rule.Handler.Command == "" {
+				return fmt.Errorf("callbacks rule #%d: exec handler requires command", i+1)
+			}
+		case "webhook":
+			if rule.Handler.URL == "" {
+				return fmt.Errorf("callbacks rule #%d: webhook handler requires url", i+1)
+			}
+		default:
+			return fmt.Errorf("callbacks rule #%d: handler type must be exec or webhook, got %q", i+1, rule.Handler.Type)
+		}
+		if rule.Handler.Timeout != "" {
+			if _, err := time.ParseDuration(rule.Handler.Timeout); err != nil {
+				return fmt.Errorf("callbacks rule #%d: invalid timeout %q: %w", i+1, rule.Handler.Timeout, err)
+			}
 		}
 	}
 	return nil
