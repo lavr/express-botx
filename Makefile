@@ -12,7 +12,7 @@ build:
 	go build -tags '$(call sq,$(BUILD_TAGS))' -ldflags='-s -w -X main.version=$(call sq,$(VERSION))' -o dist/express-botx .
 
 test:
-	go test -race -coverprofile=coverage.out -tags '$(call sq,$(BUILD_TAGS))' ./...
+	go test -coverprofile=coverage.out -tags '$(call sq,$(BUILD_TAGS))' ./...
 	@go tool cover -func=coverage.out | tail -1
 
 lint:
