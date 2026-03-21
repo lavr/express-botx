@@ -412,8 +412,8 @@ go test ./internal/server/ -run TestGracefulShutdown -v
 
 ### 7.2 Panic recovery в async-обработчиках
 
-- [ ] `recover()` в goroutine → лог + error tracker
-- [ ] Паника не роняет сервер
+- [x] `recover()` в goroutine → лог + error tracker
+- [x] Паника не роняет сервер
 
 ```
 go test ./internal/server/ -run TestAsyncPanicRecovery -v

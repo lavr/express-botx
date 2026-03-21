@@ -2,6 +2,7 @@ package server
 
 import (
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 
@@ -49,6 +50,13 @@ func (s *Server) handleCommand(w http.ResponseWriter, r *http.Request) {
 			s.callbackWG.Add(1)
 			go func(h CallbackHandler, ev string, data []byte) {
 				defer s.callbackWG.Done()
+				defer func() {
+					if r := recover(); r != nil {
+						err := fmt.Errorf("server: panic in async callback handler %s for event %q: %v", h.Type(), ev, r)
+						vlog.V1("%s", err)
+						s.errTracker.CaptureError(err)
+					}
+				}()
 				if err := h.Handle(s.callbackCtx, ev, data); err != nil {
 					vlog.V1("server: async callback handler %s error for event %q: %v", h.Type(), ev, err)
 					s.errTracker.CaptureError(err)
@@ -99,6 +107,13 @@ func (s *Server) handleNotificationCallback(w http.ResponseWriter, r *http.Reque
 			s.callbackWG.Add(1)
 			go func(h CallbackHandler, data []byte) {
 				defer s.callbackWG.Done()
+				defer func() {
+					if r := recover(); r != nil {
+						err := fmt.Errorf("server: panic in async callback handler %s for event %q: %v", h.Type(), EventNotificationCallback, r)
+						vlog.V1("%s", err)
+						s.errTracker.CaptureError(err)
+					}
+				}()
 				if err := h.Handle(s.callbackCtx, EventNotificationCallback, data); err != nil {
 					vlog.V1("server: async callback handler %s error for event %q: %v", h.Type(), EventNotificationCallback, err)
 					s.errTracker.CaptureError(err)

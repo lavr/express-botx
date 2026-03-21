@@ -436,6 +436,124 @@ func TestHandleCommandNoRules(t *testing.T) {
 	}
 }
 
+// panickingHandler panics when Handle is called — used to test panic recovery.
+type panickingHandler struct{}
+
+func (h *panickingHandler) Type() string { return "panicking" }
+func (h *panickingHandler) Handle(_ context.Context, _ string, _ []byte) error {
+	panic("test panic in handler")
+}
+
+func TestAsyncPanicRecovery(t *testing.T) {
+	t.Run("panic in async command handler is recovered", func(t *testing.T) {
+		ph := &panickingHandler{}
+		router, err := NewCallbackRouter(
+			[][]string{{"message"}},
+			[]bool{true},
+			map[int]CallbackHandler{0: ph},
+		)
+		if err != nil {
+			t.Fatalf("NewCallbackRouter: %v", err)
+		}
+
+		tracker := &mockErrTracker{}
+		srv := newTestServerWithCallbackRouter(router)
+		srv.errTracker = tracker
+
+		body := `{"sync_id":"s1","command":{"body":"hello"},"from":{"group_chat_id":"g1"},"bot_id":"b1"}`
+		w := httptest.NewRecorder()
+		req := httptest.NewRequest("POST", "/command", strings.NewReader(body))
+		srv.handleCommand(w, req)
+
+		if w.Code != 202 {
+			t.Fatalf("expected 202, got %d", w.Code)
+		}
+
+		// Wait for async goroutine to complete (panic + recover).
+		srv.callbackWG.Wait()
+
+		// Error tracker should have captured the panic.
+		if tracker.errorCount() != 1 {
+			t.Fatalf("expected 1 captured error from panic, got %d", tracker.errorCount())
+		}
+
+		tracker.mu.Lock()
+		errMsg := tracker.errors[0].Error()
+		tracker.mu.Unlock()
+		if !strings.Contains(errMsg, "panic") || !strings.Contains(errMsg, "test panic in handler") {
+			t.Fatalf("expected panic error message, got: %s", errMsg)
+		}
+	})
+
+	t.Run("panic in async notification handler is recovered", func(t *testing.T) {
+		ph := &panickingHandler{}
+		router, err := NewCallbackRouter(
+			[][]string{{"notification_callback"}},
+			[]bool{true},
+			map[int]CallbackHandler{0: ph},
+		)
+		if err != nil {
+			t.Fatalf("NewCallbackRouter: %v", err)
+		}
+
+		tracker := &mockErrTracker{}
+		srv := newTestServerWithCallbackRouter(router)
+		srv.errTracker = tracker
+
+		body := `{"sync_id":"n1","status":"ok"}`
+		w := httptest.NewRecorder()
+		req := httptest.NewRequest("POST", "/notification/callback", strings.NewReader(body))
+		srv.handleNotificationCallback(w, req)
+
+		if w.Code != 200 {
+			t.Fatalf("expected 200, got %d", w.Code)
+		}
+
+		srv.callbackWG.Wait()
+
+		if tracker.errorCount() != 1 {
+			t.Fatalf("expected 1 captured error from panic, got %d", tracker.errorCount())
+		}
+	})
+
+	t.Run("server continues after panic", func(t *testing.T) {
+		ph := &panickingHandler{}
+		normalHandler := &recordingHandler{}
+		router, err := NewCallbackRouter(
+			[][]string{{"message"}, {"chat_created"}},
+			[]bool{true, false},
+			map[int]CallbackHandler{0: ph, 1: normalHandler},
+		)
+		if err != nil {
+			t.Fatalf("NewCallbackRouter: %v", err)
+		}
+
+		tracker := &mockErrTracker{}
+		srv := newTestServerWithCallbackRouter(router)
+		srv.errTracker = tracker
+
+		// First request: panicking handler (async).
+		body1 := `{"sync_id":"s1","command":{"body":"hello"},"from":{"group_chat_id":"g1"},"bot_id":"b1"}`
+		w1 := httptest.NewRecorder()
+		req1 := httptest.NewRequest("POST", "/command", strings.NewReader(body1))
+		srv.handleCommand(w1, req1)
+		srv.callbackWG.Wait()
+
+		// Second request: normal handler (sync) — server should still work.
+		body2 := `{"sync_id":"s2","command":{"body":"system:chat_created"},"from":{"group_chat_id":"g1"},"bot_id":"b1"}`
+		w2 := httptest.NewRecorder()
+		req2 := httptest.NewRequest("POST", "/command", strings.NewReader(body2))
+		srv.handleCommand(w2, req2)
+
+		if w2.Code != 202 {
+			t.Fatalf("expected 202 after panic recovery, got %d", w2.Code)
+		}
+		if normalHandler.callCount() != 1 {
+			t.Fatalf("expected normal handler to be called after panic recovery, got %d calls", normalHandler.callCount())
+		}
+	})
+}
+
 func TestGracefulShutdown(t *testing.T) {
 	t.Run("shutdown waits for async handlers", func(t *testing.T) {
 		bh := newBlockingHandler()
