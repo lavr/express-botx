@@ -145,6 +145,9 @@ func TestConfigEdit_EditorFailure(t *testing.T) {
 	if !strings.Contains(err.Error(), "editor exited with error") {
 		t.Fatalf("unexpected error: %v", err)
 	}
+	if !strings.Contains(stderr.String(), "Your edits are preserved at:") {
+		t.Fatalf("expected temp file preservation message, got stderr: %s", stderr.String())
+	}
 }
 
 func TestConfigEdit_InvalidYAML_Retry(t *testing.T) {
@@ -201,5 +204,92 @@ fi
 	}
 	if !strings.Contains(string(data), "retried") {
 		t.Fatalf("config file was not updated after retry, content: %s", string(data))
+	}
+}
+
+func TestConfigEdit_ConcurrentModification(t *testing.T) {
+	configPath := writeTestConfig(t, testConfigYAML)
+
+	// Editor script that also modifies the original config file to simulate
+	// a concurrent change, then writes a different edit to the temp file.
+	scriptDir := t.TempDir()
+	scriptPath := filepath.Join(scriptDir, "editor.sh")
+	script := `#!/bin/sh
+# Simulate concurrent modification of the real config file.
+echo "bots: {concurrent: {host: h, id: i, secret: s}}" > "` + configPath + `"
+# Write the user's intended edit to the temp file.
+cat > "$1" << 'ENDOFCONTENT'
+bots:
+  edited:
+    host: express.example.com
+    id: bot-123
+    secret: env:BOT_SECRET
+ENDOFCONTENT
+`
+	if err := os.WriteFile(scriptPath, []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("EDITOR", scriptPath)
+
+	var stderr bytes.Buffer
+	deps := Deps{
+		Stdout:     &bytes.Buffer{},
+		Stderr:     &stderr,
+		Stdin:      strings.NewReader(""),
+		IsTerminal: false,
+	}
+
+	err := runConfigEdit([]string{"--config", configPath}, deps)
+	if err == nil {
+		t.Fatal("expected error for concurrent modification")
+	}
+	if !strings.Contains(err.Error(), "changed on disk") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !strings.Contains(stderr.String(), "modified externally") {
+		t.Fatalf("expected external modification warning, got: %s", stderr.String())
+	}
+	if !strings.Contains(stderr.String(), "Your edits are preserved at:") {
+		t.Fatalf("expected preservation message, got: %s", stderr.String())
+	}
+
+	// The concurrent change should be preserved, not overwritten.
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), "concurrent") {
+		t.Fatalf("concurrent modification was overwritten, content: %s", string(data))
+	}
+}
+
+func TestSplitEditorCmd(t *testing.T) {
+	tests := []struct {
+		input string
+		want  []string
+	}{
+		{"vim", []string{"vim"}},
+		{"code --wait", []string{"code", "--wait"}},
+		{`"/usr/bin/my editor" --wait`, []string{"/usr/bin/my editor", "--wait"}},
+		{`'/usr/bin/my editor' --wait`, []string{"/usr/bin/my editor", "--wait"}},
+		{"  vim  ", []string{"vim"}},
+		{`sh -c "vim \"$1\"" sh`, []string{"sh", "-c", `vim "$1"`, "sh"}},
+		{`editor\ with\ spaces`, []string{"editor with spaces"}},
+		{`C:\Users\me\editor.exe`, []string{`C:\Users\me\editor.exe`}},
+		{`"C:\Program Files\Notepad++\notepad++.exe" -multiInst`, []string{`C:\Program Files\Notepad++\notepad++.exe`, "-multiInst"}},
+		{"", nil},
+		{"   ", nil},
+	}
+	for _, tt := range tests {
+		got := splitEditorCmd(tt.input)
+		if len(got) != len(tt.want) {
+			t.Errorf("splitEditorCmd(%q) = %v, want %v", tt.input, got, tt.want)
+			continue
+		}
+		for i := range got {
+			if got[i] != tt.want[i] {
+				t.Errorf("splitEditorCmd(%q)[%d] = %q, want %q", tt.input, i, got[i], tt.want[i])
+			}
+		}
 	}
 }

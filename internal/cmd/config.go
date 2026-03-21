@@ -176,12 +176,10 @@ func runConfigEdit(args []string, deps Deps) error {
 		return err
 	}
 
-	cfg, err := config.LoadMinimal(flags)
-	if err != nil {
-		return err
+	configPath, _ := config.ResolveConfigPath(flags.ConfigPath)
+	if configPath == "" {
+		configPath = "express-botx.yaml"
 	}
-
-	configPath := cfg.ConfigPath()
 	info, err := os.Stat(configPath)
 	if err != nil {
 		if os.IsNotExist(err) {
@@ -191,7 +189,13 @@ func runConfigEdit(args []string, deps Deps) error {
 	}
 	configMode := info.Mode()
 
-	original, err := os.ReadFile(configPath)
+	// Resolve symlinks so atomic rename targets the real file, not the symlink.
+	resolvedConfigPath, err := filepath.EvalSymlinks(configPath)
+	if err != nil {
+		return fmt.Errorf("resolving config path: %w", err)
+	}
+
+	original, err := os.ReadFile(resolvedConfigPath)
 	if err != nil {
 		return fmt.Errorf("reading config: %w", err)
 	}
@@ -205,14 +209,22 @@ func runConfigEdit(args []string, deps Deps) error {
 	if err != nil {
 		return fmt.Errorf("creating temp dir: %w", err)
 	}
-	defer os.RemoveAll(tmpDir)
+	cleanupTmp := true
+	defer func() {
+		if cleanupTmp {
+			os.RemoveAll(tmpDir)
+		}
+	}()
 
 	tmpFile := filepath.Join(tmpDir, "config.yaml")
 	if err := os.WriteFile(tmpFile, original, 0o600); err != nil {
 		return fmt.Errorf("writing temp file: %w", err)
 	}
 
-	editorParts := strings.Fields(editor)
+	editorParts := splitEditorCmd(editor)
+	if len(editorParts) == 0 {
+		return fmt.Errorf("EDITOR is set but empty")
+	}
 	reader := bufio.NewReader(deps.Stdin)
 
 	for {
@@ -222,11 +234,15 @@ func runConfigEdit(args []string, deps Deps) error {
 		cmd.Stderr = os.Stderr
 
 		if err := cmd.Run(); err != nil {
+			cleanupTmp = false
+			fmt.Fprintf(deps.Stderr, "Your edits are preserved at: %s\n", tmpFile)
 			return fmt.Errorf("editor exited with error: %w", err)
 		}
 
 		newData, err := os.ReadFile(tmpFile)
 		if err != nil {
+			cleanupTmp = false
+			fmt.Fprintf(deps.Stderr, "Your edits are preserved at: %s\n", tmpFile)
 			return fmt.Errorf("reading edited file: %w", err)
 		}
 
@@ -249,8 +265,59 @@ func runConfigEdit(args []string, deps Deps) error {
 			return nil
 		}
 
-		if err := os.WriteFile(configPath, newData, configMode); err != nil {
-			return fmt.Errorf("writing config: %w", err)
+		// Check for concurrent modifications right before writing.
+		currentData, err := os.ReadFile(resolvedConfigPath)
+		if err != nil {
+			cleanupTmp = false
+			fmt.Fprintf(deps.Stderr, "Your edits are preserved at: %s\n", tmpFile)
+			return fmt.Errorf("reading config for conflict check: %w", err)
+		}
+		if string(currentData) != string(original) {
+			cleanupTmp = false
+			fmt.Fprintf(deps.Stderr, "Config file was modified externally while editing, aborting to avoid data loss\n")
+			fmt.Fprintf(deps.Stderr, "Your edits are preserved at: %s\n", tmpFile)
+			return fmt.Errorf("config file changed on disk")
+		}
+
+		// saveErr preserves the temp file and informs the user on write failure.
+		saveErr := func(err error) error {
+			cleanupTmp = false
+			fmt.Fprintf(deps.Stderr, "Your edits are preserved at: %s\n", tmpFile)
+			return err
+		}
+
+		// Atomic write: write to temp file in the same directory, then rename.
+		// Fall back to direct write if the directory is not writable (e.g.
+		// --config points to a writable file in a read-only directory).
+		configDir := filepath.Dir(resolvedConfigPath)
+		atomicTmp, atomicErr := os.CreateTemp(configDir, ".config-*.yaml.tmp")
+		if atomicErr != nil {
+			if !errors.Is(atomicErr, os.ErrPermission) {
+				return saveErr(fmt.Errorf("creating temp file for atomic write: %w", atomicErr))
+			}
+			// Directory not writable; fall back to direct write.
+			if err := os.WriteFile(resolvedConfigPath, newData, configMode); err != nil {
+				return saveErr(fmt.Errorf("writing config: %w", err))
+			}
+		} else {
+			atomicTmpPath := atomicTmp.Name()
+			if _, err := atomicTmp.Write(newData); err != nil {
+				atomicTmp.Close()
+				os.Remove(atomicTmpPath)
+				return saveErr(fmt.Errorf("writing config: %w", err))
+			}
+			if err := atomicTmp.Close(); err != nil {
+				os.Remove(atomicTmpPath)
+				return saveErr(fmt.Errorf("writing config: %w", err))
+			}
+			if err := os.Chmod(atomicTmpPath, configMode); err != nil {
+				os.Remove(atomicTmpPath)
+				return saveErr(fmt.Errorf("setting config permissions: %w", err))
+			}
+			if err := os.Rename(atomicTmpPath, resolvedConfigPath); err != nil {
+				os.Remove(atomicTmpPath)
+				return saveErr(fmt.Errorf("writing config: %w", err))
+			}
 		}
 		fmt.Fprintf(deps.Stderr, "Config updated: %s\n", configPath)
 		return nil
@@ -295,6 +362,48 @@ Commands:
 
 Run "express-botx config chat <command> --help" for details on a specific command.
 `)
+}
+
+// splitEditorCmd splits an editor command string into parts, honoring single
+// and double quotes and backslash escapes so that paths with spaces and
+// shell wrappers like `sh -c "vim \"$1\"" sh` work correctly.
+func splitEditorCmd(s string) []string {
+	var parts []string
+	var cur strings.Builder
+	inSingle, inDouble := false, false
+	runes := []rune(s)
+	for i := 0; i < len(runes); i++ {
+		r := runes[i]
+		switch {
+		case r == '\\' && !inSingle && i+1 < len(runes) && isEscapable(runes[i+1]):
+			// Only consume backslash when followed by a character that
+			// needs escaping. This preserves Windows-style paths like
+			// C:\Program Files\... where backslashes are literal.
+			i++
+			cur.WriteRune(runes[i])
+		case r == '\'' && !inDouble:
+			inSingle = !inSingle
+		case r == '"' && !inSingle:
+			inDouble = !inDouble
+		case r == ' ' && !inSingle && !inDouble:
+			if cur.Len() > 0 {
+				parts = append(parts, cur.String())
+				cur.Reset()
+			}
+		default:
+			cur.WriteRune(r)
+		}
+	}
+	if cur.Len() > 0 {
+		parts = append(parts, cur.String())
+	}
+	return parts
+}
+
+// isEscapable returns true for characters that a backslash should escape.
+// Limiting this set preserves literal backslashes in Windows paths.
+func isEscapable(r rune) bool {
+	return r == '\\' || r == '"' || r == '\'' || r == ' '
 }
 
 func printConfigAPIKeyUsage(w io.Writer) {

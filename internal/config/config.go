@@ -769,6 +769,13 @@ func LoadMinimal(flags Flags) (*Config, error) {
 	return cfg, nil
 }
 
+// ResolveConfigPath determines the config file path from: CLI flag → env → auto-discovery.
+// Returns the path and whether it was explicitly specified (flag or env).
+// Unlike LoadMinimal, this does not read or parse the file.
+func ResolveConfigPath(flagPath string) (path string, explicit bool) {
+	return resolveConfigPath(flagPath)
+}
+
 // resolveConfigPath determines the config file path from: CLI flag → env → auto-discovery.
 // Returns the path and whether it was explicitly specified (flag or env).
 func resolveConfigPath(flagPath string) (path string, explicit bool) {
