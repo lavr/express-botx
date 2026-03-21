@@ -236,10 +236,10 @@ go test ./internal/server/ -run TestWebhookHandlerErrors -v
 
 ### 3.1 CallbackRouter — структура
 
-- [ ] Создать `internal/server/callback_router.go`
-- [ ] `type matchedRule struct { handler CallbackHandler; async bool }`
-- [ ] `type CallbackRouter struct` — хранит правила и handler registry
-- [ ] `NewCallbackRouter(rules, handlerRegistry) (*CallbackRouter, error)`
+- [x] Создать `internal/server/callback_router.go`
+- [x] `type matchedRule struct { handler CallbackHandler; async bool }`
+- [x] `type CallbackRouter struct` — хранит правила и handler registry
+- [x] `NewCallbackRouter(rules, handlerRegistry) (*CallbackRouter, error)`
 
 ```
 go build ./internal/server/
