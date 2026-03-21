@@ -272,6 +272,25 @@ Options:
 		srvOpts = append(srvOpts, server.WithGrafana(grCfg))
 	}
 
+	// Callback endpoints
+	if cb := cfg.Server.Callbacks; cb != nil && len(cb.Rules) > 0 {
+		cbOpts := []server.CallbackOption{
+			server.WithCallbackSecretLookup(buildBotSecretLookup(cfg)),
+		}
+		srvOpts = append(srvOpts, server.WithCallbacks(*cb, cbOpts...))
+
+		basePath := cb.BasePath
+		if basePath == "" {
+			basePath = srvCfg.BasePath
+		}
+		verifyJWT := true
+		if cb.VerifyJWT != nil {
+			verifyJWT = *cb.VerifyJWT
+		}
+		vlog.Info("serve: callbacks enabled, rules=%d, base_path=%s, verify_jwt=%v",
+			len(cb.Rules), basePath, verifyJWT)
+	}
+
 	srv := server.New(srvCfg, sendFn, chatResolver, srvOpts...)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -468,6 +487,32 @@ type sendResponseJSON struct {
 	SyncID string `json:"sync_id,omitempty"`
 }
 
+
+// buildBotSecretLookup returns a function that resolves a bot_id to its secret.
+// Used for JWT verification in callback endpoints.
+func buildBotSecretLookup(cfg *config.Config) func(botID string) (string, error) {
+	return func(botID string) (string, error) {
+		if cfg.IsMultiBot() {
+			for _, bot := range cfg.Bots {
+				if bot.ID == botID {
+					if bot.Secret == "" {
+						return "", fmt.Errorf("bot %s has no secret configured", botID)
+					}
+					return secret.Resolve(bot.Secret)
+				}
+			}
+			return "", fmt.Errorf("unknown bot_id %s", botID)
+		}
+		// Single-bot mode
+		if cfg.BotID != botID {
+			return "", fmt.Errorf("unknown bot_id %s", botID)
+		}
+		if cfg.BotSecret == "" {
+			return "", fmt.Errorf("bot %s has no secret configured", botID)
+		}
+		return secret.Resolve(cfg.BotSecret)
+	}
+}
 
 // runtimeBotEntries returns bot entries reflecting the actual runtime state.
 // In multi-bot mode, returns all configured bots.

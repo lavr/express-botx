@@ -376,10 +376,10 @@ go build ./... && go test ./internal/server/ -run TestServerWithCallbacks -v
 
 ### 6.3 Интеграция в serve-команду
 
-- [ ] В `internal/cmd/serve.go` — чтение `cfg.Server.Callbacks`
-- [ ] Создание handlers по правилам (ExecHandler / WebhookHandler)
-- [ ] Сборка CallbackRouter, передача через `WithCallbacks()`
-- [ ] Лог: количество правил, base_path, verify_jwt
+- [x] В `internal/cmd/serve.go` — чтение `cfg.Server.Callbacks`
+- [x] Создание handlers по правилам (ExecHandler / WebhookHandler)
+- [x] Сборка CallbackRouter, передача через `WithCallbacks()`
+- [x] Лог: количество правил, base_path, verify_jwt
 
 ```
 go build ./... && go run . serve --help
