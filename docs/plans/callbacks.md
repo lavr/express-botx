@@ -178,10 +178,10 @@ go build ./internal/server/
 
 ### 2.1 ExecHandler — базовая реализация
 
-- [ ] Создать `internal/server/callback_exec.go`
-- [ ] `NewExecHandler(command string, timeout time.Duration) *ExecHandler`
-- [ ] `Handle()`: запуск через `exec.CommandContext`, JSON → stdin
-- [ ] `Type()` → `"exec"`
+- [x] Создать `internal/server/callback_exec.go`
+- [x] `NewExecHandler(command string, timeout time.Duration) *ExecHandler`
+- [x] `Handle()`: запуск через `exec.CommandContext`, JSON → stdin
+- [x] `Type()` → `"exec"`
 
 ```
 go build ./internal/server/
