@@ -331,9 +331,9 @@ go test ./internal/server/ -run TestHandleCommandAsync -v
 
 ### 5.3 handleNotificationCallback — POST /notification/callback
 
-- [ ] Парсинг JSON body → `NotificationCallbackPayload`
-- [ ] Маршрутизация как событие `notification_callback`
-- [ ] Ответ `{"result": "ok"}` с кодом 200
+- [x] Парсинг JSON body → `NotificationCallbackPayload`
+- [x] Маршрутизация как событие `notification_callback`
+- [x] Ответ `{"result": "ok"}` с кодом 200
 
 ```
 go test ./internal/server/ -run TestHandleNotificationCallback -v
