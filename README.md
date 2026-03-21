@@ -185,8 +185,9 @@ receivers:
 | `make race`         | Тесты с race-детектором (таймаут 60с)    |
 | `make docker-build` | Собрать Docker-образ                     |
 | `make version`      | Показать текущую версию                  |
+| `make run`          | Запустить сервер локально                |
 
-Для пользователей Zed: в `.zed/tasks.json` настроены задачи для всех Makefile-целей.
+Для пользователей Zed: в `.zed/tasks.json` настроены задачи для основных Makefile-целей.
 
 ## Деплой
 
