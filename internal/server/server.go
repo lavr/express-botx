@@ -142,7 +142,7 @@ func WithCallbacks(cfg config.CallbacksConfig, opts ...CallbackOption) Option {
 
 		handlers, err := buildHandlers(cfg.Rules, co.customHandlers)
 		if err != nil {
-			vlog.V1("server: failed to build callback handlers: %v", err)
+			vlog.Info("server: failed to build callback handlers: %v", err)
 			return
 		}
 
@@ -155,7 +155,7 @@ func WithCallbacks(cfg config.CallbacksConfig, opts ...CallbackOption) Option {
 
 		router, err := NewCallbackRouter(events, asyncFlags, handlers)
 		if err != nil {
-			vlog.V1("server: failed to create callback router: %v", err)
+			vlog.Info("server: failed to create callback router: %v", err)
 			return
 		}
 

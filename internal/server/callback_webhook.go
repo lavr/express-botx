@@ -23,14 +23,10 @@ type WebhookHandler struct {
 // NewWebhookHandler creates a WebhookHandler that POSTs callback payloads
 // to the given URL with the specified timeout. A zero timeout means no deadline.
 func NewWebhookHandler(url string, timeout time.Duration) *WebhookHandler {
-	clientTimeout := timeout
-	if clientTimeout == 0 {
-		clientTimeout = 30 * time.Second
-	}
 	return &WebhookHandler{
 		url:     url,
 		timeout: timeout,
-		client:  &http.Client{Timeout: clientTimeout},
+		client:  &http.Client{},
 	}
 }
 

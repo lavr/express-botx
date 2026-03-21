@@ -59,13 +59,6 @@ func (s *Server) handleCommand(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if payload.Command.Body == "" {
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusBadRequest)
-		json.NewEncoder(w).Encode(map[string]any{"ok": false, "error": "missing required field: command.body"})
-		return
-	}
-
 	event := parseEventType(payload.Command.Body)
 
 	matched := s.callbackRouter.Route(event)
