@@ -361,7 +361,12 @@ func (s *Server) Run(ctx context.Context) error {
 	defer cancel()
 	vlog.Info("server: shutting down...")
 
-	// Signal async callback handlers to stop accepting new work.
+	// Stop accepting new connections first.
+	if err := s.srv.Shutdown(shutdownCtx); err != nil {
+		vlog.V1("server: HTTP shutdown error: %v", err)
+	}
+
+	// Signal async callback handlers to stop.
 	s.callbackCancel()
 
 	// Wait for in-flight async callback handlers to finish (bounded by shutdownCtx).
@@ -377,7 +382,7 @@ func (s *Server) Run(ctx context.Context) error {
 		vlog.V1("server: timeout waiting for async callback handlers")
 	}
 
-	return s.srv.Shutdown(shutdownCtx)
+	return nil
 }
 
 func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {

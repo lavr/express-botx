@@ -243,7 +243,6 @@ server:
     rules:
       - events: [chat_created, added_to_chat]
         async: false            # sync — ждём завершения перед ответом 202
-        verify_jwt: false       # переопределение verify_jwt для правила
         handler:
           type: exec
           command: ./on-membership.sh
@@ -279,7 +278,6 @@ server:
 |---|---|---|---|
 | `events` | list | (обязательное) | Список типов событий для обработки |
 | `async` | bool | `false` | `true` — ответ 202 сразу, обработка в фоне |
-| `verify_jwt` | bool | наследуется | Переопределение `verify_jwt` для правила |
 | `handler` | object | (обязательное) | Конфигурация обработчика |
 
 ### Поля обработчика (`handler`)
@@ -335,17 +333,6 @@ server:
   callbacks:
     verify_jwt: false
     rules: [...]
-```
-
-Или для конкретного правила:
-
-```yaml
-rules:
-  - events: [chat_created]
-    verify_jwt: false
-    handler:
-      type: exec
-      command: ./handler.sh
 ```
 
 ---

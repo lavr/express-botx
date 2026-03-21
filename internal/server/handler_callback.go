@@ -18,6 +18,7 @@ type callbackResponse struct {
 // It parses the callback payload, determines the event type, routes to matching
 // handlers, and responds with 202 Accepted.
 func (s *Server) handleCommand(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, 10<<20) // 10 MB
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
 		w.Header().Set("Content-Type", "application/json")
@@ -65,6 +66,7 @@ func (s *Server) handleCommand(w http.ResponseWriter, r *http.Request) {
 		} else {
 			if err := m.handler.Handle(r.Context(), event, body); err != nil {
 				vlog.V1("server: sync callback handler %s error for event %q: %v", m.handler.Type(), event, err)
+				s.errTracker.CaptureError(err)
 			}
 		}
 	}
@@ -78,6 +80,7 @@ func (s *Server) handleCommand(w http.ResponseWriter, r *http.Request) {
 // It parses the notification callback payload, routes as a "notification_callback" event,
 // and responds with 200 OK.
 func (s *Server) handleNotificationCallback(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, 10<<20) // 10 MB
 	body, err := io.ReadAll(r.Body)
 	if err != nil {
 		w.Header().Set("Content-Type", "application/json")
@@ -122,6 +125,7 @@ func (s *Server) handleNotificationCallback(w http.ResponseWriter, r *http.Reque
 		} else {
 			if err := m.handler.Handle(r.Context(), EventNotificationCallback, body); err != nil {
 				vlog.V1("server: sync callback handler %s error for event %q: %v", m.handler.Type(), EventNotificationCallback, err)
+				s.errTracker.CaptureError(err)
 			}
 		}
 	}

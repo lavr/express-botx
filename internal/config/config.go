@@ -111,10 +111,9 @@ type CallbacksConfig struct {
 
 // CallbackRule maps a set of events to a handler with sync/async mode.
 type CallbackRule struct {
-	Events    []string              `yaml:"events"`
-	Async     bool                  `yaml:"async,omitempty"`
-	VerifyJWT *bool                 `yaml:"verify_jwt,omitempty"` // per-rule override
-	Handler   CallbackHandlerConfig `yaml:"handler"`
+	Events  []string              `yaml:"events"`
+	Async   bool                  `yaml:"async,omitempty"`
+	Handler CallbackHandlerConfig `yaml:"handler"`
 }
 
 // CallbackHandlerConfig defines the handler type and its parameters.

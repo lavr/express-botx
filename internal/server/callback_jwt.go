@@ -125,6 +125,12 @@ func callbackJWTMiddleware(h http.Handler, secretLookup func(botID string) (stri
 			return
 		}
 
+		if secretLookup == nil {
+			vlog.V1("server: JWT verification enabled but no secret lookup configured")
+			writeJWTError(w, "JWT verification is not configured")
+			return
+		}
+
 		auth := r.Header.Get("Authorization")
 		if auth == "" {
 			writeJWTError(w, "missing Authorization header")
@@ -145,7 +151,7 @@ func callbackJWTMiddleware(h http.Handler, secretLookup func(botID string) (stri
 		_, err := verifyCallbackJWT(token, secretLookup)
 		if err != nil {
 			vlog.Info("server: callback JWT verification failed: %v", err)
-			writeJWTError(w, fmt.Sprintf("JWT verification failed: %v", err))
+			writeJWTError(w, "JWT verification failed")
 			return
 		}
 

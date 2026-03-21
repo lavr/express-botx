@@ -274,21 +274,13 @@ Options:
 
 	// Callback endpoints
 	if cb := cfg.Server.Callbacks; cb != nil && len(cb.Rules) > 0 {
+		if err := cb.Validate(); err != nil {
+			return fmt.Errorf("callbacks config: %w", err)
+		}
 		cbOpts := []server.CallbackOption{
 			server.WithCallbackSecretLookup(buildBotSecretLookup(cfg)),
 		}
 		srvOpts = append(srvOpts, server.WithCallbacks(*cb, cbOpts...))
-
-		basePath := cb.BasePath
-		if basePath == "" {
-			basePath = srvCfg.BasePath
-		}
-		verifyJWT := true
-		if cb.VerifyJWT != nil {
-			verifyJWT = *cb.VerifyJWT
-		}
-		vlog.Info("serve: callbacks enabled, rules=%d, base_path=%s, verify_jwt=%v",
-			len(cb.Rules), basePath, verifyJWT)
 	}
 
 	srv := server.New(srvCfg, sendFn, chatResolver, srvOpts...)

@@ -232,7 +232,7 @@ func TestHandleCommandAsync(t *testing.T) {
 	}
 
 	// Wait for async handler to complete.
-	time.Sleep(50 * time.Millisecond)
+	srv.callbackWG.Wait()
 	if asyncHandler.callCount() != 1 {
 		t.Fatalf("async handler: expected 1 call, got %d", asyncHandler.callCount())
 	}
@@ -282,7 +282,7 @@ func TestHandleCommandAsyncError(t *testing.T) {
 	}
 
 	// Wait for async handler to complete.
-	time.Sleep(50 * time.Millisecond)
+	srv.callbackWG.Wait()
 
 	if handler.callCount() != 1 {
 		t.Fatalf("expected 1 call, got %d", handler.callCount())

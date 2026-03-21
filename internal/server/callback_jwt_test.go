@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 )
@@ -148,7 +149,7 @@ func TestVerifyCallbackJWT(t *testing.T) {
 		if err == nil {
 			t.Fatal("expected error for unknown bot")
 		}
-		if !contains(err.Error(), "unknown bot") {
+		if !strings.Contains(err.Error(), "unknown bot") {
 			t.Fatalf("expected 'unknown bot' in error, got: %v", err)
 		}
 	})
@@ -181,7 +182,7 @@ func TestVerifyCallbackJWT(t *testing.T) {
 
 	t.Run("invalid header encoding", func(t *testing.T) {
 		_, err := verifyCallbackJWT("!!!.YQ.YQ", lookup)
-		if err == nil || !contains(err.Error(), "header encoding") {
+		if err == nil || !strings.Contains(err.Error(), "header encoding") {
 			t.Fatalf("expected header encoding error, got: %v", err)
 		}
 	})
@@ -191,7 +192,7 @@ func TestVerifyCallbackJWT(t *testing.T) {
 		token := base64.RawURLEncoding.EncodeToString(hdr) + ".!!!.YQ"
 
 		_, err := verifyCallbackJWT(token, lookup)
-		if err == nil || !contains(err.Error(), "claims encoding") {
+		if err == nil || !strings.Contains(err.Error(), "claims encoding") {
 			t.Fatalf("expected claims encoding error, got: %v", err)
 		}
 	})
@@ -272,7 +273,7 @@ func TestJWTClaims(t *testing.T) {
 		if err == nil {
 			t.Fatal("expected error for unknown bot_id in aud")
 		}
-		if !contains(err.Error(), "unknown bot") {
+		if !strings.Contains(err.Error(), "unknown bot") {
 			t.Fatalf("expected 'unknown bot' error, got: %v", err)
 		}
 	})
@@ -451,7 +452,7 @@ func TestJWTMiddleware(t *testing.T) {
 		if rec.Code != http.StatusUnauthorized {
 			t.Fatalf("expected 401, got %d", rec.Code)
 		}
-		assertJSONError(t, rec, "expired")
+		assertJSONError(t, rec, "JWT verification failed")
 	})
 
 	t.Run("valid JWT passes through", func(t *testing.T) {
@@ -501,7 +502,7 @@ func assertJSONError(t *testing.T, rec *httptest.ResponseRecorder, substr string
 		t.Fatalf("response is not valid JSON: %v", err)
 	}
 	errMsg, _ := resp["error"].(string)
-	if !contains(errMsg, substr) {
+	if !strings.Contains(errMsg, substr) {
 		t.Fatalf("expected error containing %q, got %q", substr, errMsg)
 	}
 	if ok, _ := resp["ok"].(bool); ok {
@@ -509,15 +510,4 @@ func assertJSONError(t *testing.T, rec *httptest.ResponseRecorder, substr string
 	}
 }
 
-func contains(s, substr string) bool {
-	return len(s) >= len(substr) && searchSubstring(s, substr)
-}
 
-func searchSubstring(s, substr string) bool {
-	for i := 0; i <= len(s)-len(substr); i++ {
-		if s[i:i+len(substr)] == substr {
-			return true
-		}
-	}
-	return false
-}
