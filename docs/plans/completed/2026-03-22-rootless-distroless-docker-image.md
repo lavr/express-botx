@@ -39,9 +39,9 @@ Use multi-stage targets in the same Dockerfile: the existing alpine stage become
 
 Add a second `docker/build-push-action` step for the rootless variant with `-rootless` tag suffix.
 
-- [ ] Add a second build-push step that uses `--target rootless` and tags `lavr/express-botx:<version>-rootless` and `lavr/express-botx:latest-rootless`
-- [ ] Add `--target alpine` to the existing build-push step to keep it explicit
-- [ ] Verify the workflow YAML is valid
+- [x] Add a second build-push step that uses `--target rootless` and tags `lavr/express-botx:<version>-rootless` and `lavr/express-botx:latest-rootless`
+- [x] Add `--target alpine` to the existing build-push step to keep it explicit
+- [x] Verify the workflow YAML is valid
 
 ### Task 3: Switch Helm chart default to rootless image
 
