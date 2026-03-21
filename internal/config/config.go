@@ -206,7 +206,7 @@ func Load(flags Flags) (*Config, error) {
 	}
 
 	// Resolve env:/vault: references in bot and chat configs
-	if err := cfg.resolveSecrets(); err != nil {
+	if err := cfg.resolveSecrets(false); err != nil {
 		return nil, err
 	}
 
@@ -299,7 +299,7 @@ func LoadForServe(flags Flags) (*Config, error) {
 	}
 
 	// Resolve env:/vault: references in bot and chat configs
-	if err := cfg.resolveSecrets(); err != nil {
+	if err := cfg.resolveSecrets(false); err != nil {
 		return nil, err
 	}
 
@@ -836,6 +836,10 @@ func (c *Config) clearStaleBotName() {
 }
 
 func applyEnv(cfg *Config) error {
+	return applyEnvWithAuth(cfg, false)
+}
+
+func applyEnvWithAuth(cfg *Config, manualAuth bool) error {
 	if v := os.Getenv("EXPRESS_BOTX_HOST"); v != "" {
 		cfg.Host = v
 	}
@@ -843,18 +847,23 @@ func applyEnv(cfg *Config) error {
 		cfg.BotID = v
 	}
 
-	envSecret := os.Getenv("EXPRESS_BOTX_SECRET")
-	envToken := os.Getenv("EXPRESS_BOTX_TOKEN")
-	if envSecret != "" && envToken != "" {
-		return fmt.Errorf("both EXPRESS_BOTX_SECRET and EXPRESS_BOTX_TOKEN are set, use one")
-	}
-	if envSecret != "" {
-		cfg.BotSecret = envSecret
-		cfg.BotToken = "" // env secret wins over config token
-	}
-	if envToken != "" {
-		cfg.BotToken = envToken
-		cfg.BotSecret = "" // env token wins over config secret
+	// When manualAuth is true, credentials from env vars are irrelevant —
+	// the user provided their own Authorization header. Skip conflict check
+	// and credential assignment to avoid spurious errors.
+	if !manualAuth {
+		envSecret := os.Getenv("EXPRESS_BOTX_SECRET")
+		envToken := os.Getenv("EXPRESS_BOTX_TOKEN")
+		if envSecret != "" && envToken != "" {
+			return fmt.Errorf("both EXPRESS_BOTX_SECRET and EXPRESS_BOTX_TOKEN are set, use one")
+		}
+		if envSecret != "" {
+			cfg.BotSecret = envSecret
+			cfg.BotToken = "" // env secret wins over config token
+		}
+		if envToken != "" {
+			cfg.BotToken = envToken
+			cfg.BotSecret = "" // env token wins over config secret
+		}
 	}
 
 	if v := os.Getenv("EXPRESS_BOTX_CACHE_TYPE"); v != "" {
@@ -904,6 +913,111 @@ func applyFlags(cfg *Config, flags Flags) {
 	if cfg.Format == "" {
 		cfg.Format = "text"
 	}
+}
+
+// LoadForAPI reads configuration for the api command.
+// When manualAuth is true (user provided Authorization header), bot credentials
+// (secret/token) and bot_id are not required — only host must be present.
+// All other config validation (YAML parsing, explicit --config errors, etc.) is preserved.
+func LoadForAPI(flags Flags, manualAuth bool) (*Config, error) {
+	cfg := &Config{
+		Cache: CacheConfig{
+			Type: "file",
+			TTL:  31536000,
+		},
+	}
+
+	// Layer 1: YAML file
+	configPath, explicit := resolveConfigPath(flags.ConfigPath)
+	cfg.configPath = configPath
+	if configPath != "" {
+		if data, err := os.ReadFile(configPath); err == nil {
+			vlog.V1("config: loaded from %s", configPath)
+			if err := yaml.Unmarshal(data, cfg); err != nil {
+				if manualAuth && !explicit {
+					vlog.V1("config: ignoring malformed auto-discovered config %s (manual auth)", configPath)
+				} else {
+					return nil, fmt.Errorf("parsing config %s: %w", configPath, err)
+				}
+			}
+		} else if explicit {
+			return nil, fmt.Errorf("reading config %s: %w", configPath, err)
+		} else {
+			vlog.V2("config: %s not found, skipping", configPath)
+		}
+	}
+
+	// Resolve env:/vault: references in bot and chat configs.
+	// When manualAuth is true, skip secret/token resolution since credentials
+	// won't be used — avoids failures from unavailable env:/vault: refs.
+	if err := cfg.resolveSecrets(manualAuth); err != nil {
+		return nil, err
+	}
+
+	// When using manual auth, skip config validations that are irrelevant
+	// to the request — avoids failing on unrelated auto-discovered config
+	// problems (duplicate defaults, bot config issues, etc.).
+	if !manualAuth {
+		// Validate: no bot has both secret and token in YAML
+		if err := cfg.validateBotConfigs(); err != nil {
+			return nil, err
+		}
+
+		// Validate: at most one chat marked as default
+		if err := cfg.ValidateDefaultChat(); err != nil {
+			return nil, err
+		}
+	}
+
+	// Layer 2: resolve bot from config
+	if flags.Bot != "" || len(cfg.Bots) <= 1 {
+		if err := cfg.resolveBot(flags.Bot); err != nil {
+			return nil, err
+		}
+		if cfg.BotName != "" {
+			vlog.V1("config: using bot %q (%s)", cfg.BotName, cfg.Host)
+		}
+	}
+
+	// Layer 3: environment variables (override resolved bot)
+	// Pass manualAuth so credential env vars are skipped when the user
+	// provided their own Authorization header.
+	if err := applyEnvWithAuth(cfg, manualAuth); err != nil {
+		return nil, err
+	}
+
+	// Layer 4: CLI flags (highest priority)
+	applyFlags(cfg, flags)
+
+	// If env/flags replaced credentials, the resolved bot name is stale
+	cfg.clearStaleBotName()
+
+	vlog.V2("config: host=%s bot_id=%s cache=%s", cfg.Host, cfg.BotID, cfg.Cache.Type)
+
+	// Multiple bots, no --bot: try env/flags credentials, then error
+	if flags.Bot == "" && len(cfg.Bots) > 1 && cfg.BotName == "" {
+		if cfg.hasCredentials() {
+			vlog.V1("config: using bot from env/flags (%s)", cfg.Host)
+		} else if !manualAuth {
+			return nil, fmt.Errorf("multiple bots configured, specify one with --bot: %s", cfg.botNames())
+		}
+	}
+
+	// Validate required fields
+	if cfg.Host == "" {
+		return nil, fmt.Errorf("host is required (--host, EXPRESS_BOTX_HOST, or config file)")
+	}
+
+	if !manualAuth {
+		if cfg.BotID == "" {
+			return nil, fmt.Errorf("bot id is required (--bot-id, EXPRESS_BOTX_BOT_ID, or config file)")
+		}
+		if cfg.BotSecret == "" && cfg.BotToken == "" {
+			return nil, fmt.Errorf("bot secret or token is required (--secret, --token, EXPRESS_BOTX_SECRET, EXPRESS_BOTX_TOKEN, or config file)")
+		}
+	}
+
+	return cfg, nil
 }
 
 // LoadForEnqueue reads configuration for the enqueue command.
@@ -959,34 +1073,45 @@ func LoadForWorker(flags Flags) (*Config, error) {
 
 // resolveSecrets resolves env:/vault: references in bot and chat config values.
 // This allows using "env:VAR" syntax for host, id, secret, and token fields.
-func (c *Config) resolveSecrets() error {
+// When skipCredentials is true (manual-auth mode), bot host resolution errors
+// are non-fatal (logged and skipped) and chat IDs are not resolved at all,
+// since the api command does not use chats and --host/env may override the host.
+func (c *Config) resolveSecrets(skipCredentials bool) error {
 	for name, bot := range c.Bots {
 		var err error
 		if bot.Host, err = secret.Resolve(bot.Host); err != nil {
+			if skipCredentials {
+				vlog.V1("config: bot %q host: %v (skipped, manual auth)", name, err)
+				continue // don't store bot with unresolved host
+			}
 			return fmt.Errorf("bot %q host: %w", name, err)
 		}
-		if bot.ID, err = secret.Resolve(bot.ID); err != nil {
-			return fmt.Errorf("bot %q id: %w", name, err)
-		}
-		if bot.Secret != "" {
-			if bot.Secret, err = secret.Resolve(bot.Secret); err != nil {
-				return fmt.Errorf("bot %q secret: %w", name, err)
+		if !skipCredentials {
+			if bot.ID, err = secret.Resolve(bot.ID); err != nil {
+				return fmt.Errorf("bot %q id: %w", name, err)
 			}
-		}
-		if bot.Token != "" {
-			if bot.Token, err = secret.Resolve(bot.Token); err != nil {
-				return fmt.Errorf("bot %q token: %w", name, err)
+			if bot.Secret != "" {
+				if bot.Secret, err = secret.Resolve(bot.Secret); err != nil {
+					return fmt.Errorf("bot %q secret: %w", name, err)
+				}
+			}
+			if bot.Token != "" {
+				if bot.Token, err = secret.Resolve(bot.Token); err != nil {
+					return fmt.Errorf("bot %q token: %w", name, err)
+				}
 			}
 		}
 		c.Bots[name] = bot
 	}
-	for name, chat := range c.Chats {
-		if chat.ID != "" {
-			var err error
-			if chat.ID, err = secret.Resolve(chat.ID); err != nil {
-				return fmt.Errorf("chat %q id: %w", name, err)
+	if !skipCredentials {
+		for name, chat := range c.Chats {
+			if chat.ID != "" {
+				var err error
+				if chat.ID, err = secret.Resolve(chat.ID); err != nil {
+					return fmt.Errorf("chat %q id: %w", name, err)
+				}
+				c.Chats[name] = chat
 			}
-			c.Chats[name] = chat
 		}
 	}
 	return nil
@@ -1017,7 +1142,7 @@ func loadBase(flags Flags) (*Config, error) {
 		}
 	}
 
-	if err := cfg.resolveSecrets(); err != nil {
+	if err := cfg.resolveSecrets(false); err != nil {
 		return nil, err
 	}
 	if err := cfg.validateBotConfigs(); err != nil {

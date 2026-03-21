@@ -7,6 +7,7 @@
 | Команда | Описание |
 |---------|----------|
 | `send` | Отправить сообщение и/или файл в чат |
+| `api` | Отправить произвольный HTTP-запрос к BotX API |
 | `enqueue` | Положить сообщение в очередь для асинхронной отправки |
 | `serve` | Запустить HTTP-сервер (API + вебхуки) |
 | `worker` | Читать сообщения из очереди и отправлять в BotX API |
@@ -81,6 +82,74 @@ express-botx send --host express.company.ru --bot-id UUID --secret KEY --chat-id
 --no-notify     не отправлять уведомление вообще
 --metadata      произвольный JSON для notification.metadata
 ```
+
+---
+
+## api
+
+Отправляет произвольный HTTP-запрос к eXpress BotX API с автоматической аутентификацией. Поддерживает JSON-тело через `-f`/`-F`, raw body через `--input`, multipart-загрузку через `--input @file`, фильтрацию ответа через jq-выражения (`-q`).
+
+### Примеры
+
+```bash
+# GET-запрос
+express-botx api /api/v3/botx/chats/list
+
+# GET с query-параметрами
+express-botx api '/api/v3/botx/chats/info?group_chat_id=<UUID>'
+
+# POST с JSON-телом из полей
+express-botx api -X POST /api/v3/botx/chats/create -f name=test -f chat_type=group_chat
+
+# POST с JSON-телом из файла (raw mode)
+express-botx api -X POST /api/v4/botx/notifications/direct \
+  --input payload.json -H 'Content-Type: application/json'
+
+# POST raw body с кастомным Content-Type
+express-botx api -X POST /api/v3/botx/smartapps/event \
+  --input event.xml -H 'Content-Type: application/xml'
+
+# Загрузить файл (multipart)
+express-botx api -X POST /api/v3/botx/files/upload \
+  --input @photo.jpg \
+  -f group_chat_id=<UUID> -f file_name=photo.jpg -f mime_type=image/jpeg
+
+# Скачать файл
+express-botx api '/api/v3/botx/files/download?group_chat_id=<UUID>&file_id=<UUID>' > photo.jpg
+
+# Фильтрация через jq
+express-botx api /api/v3/botx/chats/list -q '.result[].name'
+
+# Показать заголовки ответа
+express-botx api -i /api/v3/botx/chats/list
+```
+
+При HTTP 2xx — exit 0. При non-2xx — тело ответа выводится в stdout, exit 1. Ошибки валидации и auth выводятся в stderr (exit 1, stdout пустой).
+
+### Флаги
+
+```
+-X, --method     HTTP-метод (авто: POST при -f/-F/--input, иначе GET)
+-f, --field      строковое поле для JSON-тела (key=value, повторяемый)
+-F               типизированное поле: true/false → bool, числа → number, @file → содержимое
+-H, --header     дополнительный HTTP-заголовок (key:value, повторяемый)
+--input          файл с телом запроса (- для stdin, @file для multipart)
+--part-name      имя multipart-part для бинарного файла (по умолчанию: content)
+-q, --jq         jq-выражение для фильтрации JSON-ответа
+-i, --include    показать HTTP-статус и заголовки ответа
+--timeout        таймаут запроса (перезаписывает значение из конфига)
+--silent         подавить вывод тела ответа
+```
+
+### Режимы тела запроса
+
+| Режим | Флаги | Content-Type |
+|-------|-------|-------------|
+| JSON | `-f`/`-F` | `application/json` (авто) |
+| Raw | `--input file` | не выставляется — задать через `-H` |
+| Multipart | `--input @file` [+ `-f`] | `multipart/form-data` (авто) |
+
+`-f`/`-F` и `--input` (без `@`) взаимоисключающие. `-F` запрещён в multipart-режиме.
 
 ---
 

@@ -87,12 +87,14 @@ func Run(args []string, deps Deps) error {
 
 	if len(args) == 0 {
 		printUsage(deps.Stderr)
-		return fmt.Errorf("subcommand required: send, enqueue, serve, worker, chats, bot, config, user")
+		return fmt.Errorf("subcommand required: send, api, enqueue, serve, worker, chats, bot, config, user")
 	}
 
 	switch args[0] {
 	case "send":
 		return runSend(args[1:], deps)
+	case "api":
+		return runApi(args[1:], deps)
 	case "enqueue":
 		return runEnqueue(args[1:], deps)
 	case "serve":
@@ -231,6 +233,7 @@ func printUsage(w io.Writer) {
 
 Commands:
   send      Send a message and/or file to an eXpress chat
+  api       Make authenticated API requests to eXpress
   enqueue   Enqueue a message for async delivery via broker
   serve     Start HTTP server for sending messages via API
   worker    Consume messages from broker and send via BotX API

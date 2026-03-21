@@ -1,6 +1,7 @@
 package main
 
 import (
+	"errors"
 	"fmt"
 	"os"
 
@@ -21,6 +22,10 @@ func main() {
 		IsTerminal: term.IsTerminal(int(os.Stdin.Fd())),
 	}
 	if err := cmd.Run(os.Args[1:], deps); err != nil {
+		var exitErr *cmd.ExitError
+		if errors.As(err, &exitErr) {
+			os.Exit(exitErr.Code)
+		}
 		fmt.Fprintf(os.Stderr, "error: %v\n", err)
 		os.Exit(1)
 	}
