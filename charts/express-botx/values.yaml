@@ -15,8 +15,16 @@ imagePullSecrets: []
 nameOverride: ""
 fullnameOverride: ""
 
+# Raw config string. When set, takes priority over the structured `config` below.
+# Supports Helm templates (rendered via tpl). Useful when you want full control
+# over config.yaml, e.g. to include a file:
+#   configRaw: |
+#     {{ .Files.Get "files/config.yaml" | nindent 4 }}
+configRaw: ""
+
 # Config is mounted from a Secret into /etc/express-botx/config.yaml.
 # It contains secrets (bot secret, API keys), so it uses Secret, not ConfigMap.
+# Ignored when configRaw is set.
 config:
   bots: {}
     # prod:
