@@ -79,5 +79,8 @@ func (h *WebhookHandler) Handle(ctx context.Context, event string, payload []byt
 		return fmt.Errorf("webhook handler %q: unexpected status %d: %s", h.url, resp.StatusCode, strings.TrimSpace(string(body)))
 	}
 
+	// Drain the response body so the underlying TCP connection can be reused.
+	_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, 1<<20))
+
 	return nil
 }
