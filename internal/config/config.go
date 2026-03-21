@@ -872,7 +872,7 @@ func (c *CallbacksConfig) Validate() error {
 				return fmt.Errorf("callbacks rule #%d: webhook handler requires url", i+1)
 			}
 		default:
-			return fmt.Errorf("callbacks rule #%d: handler type must be exec or webhook, got %q", i+1, rule.Handler.Type)
+			vlog.Info("callbacks rule #%d: warning: unknown handler type %q (must be registered via WithCallbackHandler)", i+1, rule.Handler.Type)
 		}
 		if rule.Handler.Timeout != "" {
 			if _, err := time.ParseDuration(rule.Handler.Timeout); err != nil {

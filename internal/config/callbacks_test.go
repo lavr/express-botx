@@ -58,7 +58,7 @@ func TestCallbacksConfig_Validate(t *testing.T) {
 			wantErr: "events must not be empty",
 		},
 		{
-			name: "invalid handler type",
+			name: "unknown handler type accepted with warning",
 			cfg: CallbacksConfig{
 				Rules: []CallbackRule{
 					{
@@ -67,7 +67,7 @@ func TestCallbacksConfig_Validate(t *testing.T) {
 					},
 				},
 			},
-			wantErr: "handler type must be exec or webhook",
+			wantErr: "", // unknown types are now warnings, not errors (for custom handler extensibility)
 		},
 		{
 			name: "exec without command",
