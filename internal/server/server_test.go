@@ -71,6 +71,26 @@ func parseResponse(t *testing.T, w *httptest.ResponseRecorder) sendResponse {
 	return resp
 }
 
+// --- middleware ---
+
+func TestRequestID_Generated(t *testing.T) {
+	srv := newTestServer([]ResolvedKey{{Name: "t", Key: "k"}})
+	w := doRequest(srv, "GET", "/healthz", nil, nil)
+	if id := w.Header().Get("X-Request-Id"); id == "" {
+		t.Fatal("expected X-Request-Id header to be set on response")
+	}
+}
+
+func TestRequestID_Preserved(t *testing.T) {
+	srv := newTestServer([]ResolvedKey{{Name: "t", Key: "k"}})
+	w := doRequest(srv, "GET", "/healthz", nil, map[string]string{
+		"X-Request-Id": "custom-id-123",
+	})
+	if got := w.Header().Get("X-Request-Id"); got != "custom-id-123" {
+		t.Fatalf("expected X-Request-Id %q, got %q", "custom-id-123", got)
+	}
+}
+
 // --- healthz ---
 
 func TestHealthz(t *testing.T) {

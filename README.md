@@ -104,6 +104,7 @@ curl -X POST http://localhost:8080/api/v1/send \
 | `POST` | `/api/v1/alertmanager` | Вебхук Alertmanager |
 | `POST` | `/api/v1/grafana` | Вебхук Grafana |
 
+Сервер автоматически добавляет заголовок `X-Request-ID` к каждому ответу (если клиент не передал свой, генерируется уникальный). Все HTTP-запросы логируются в stderr (метод, путь, статус, время выполнения).
 
 Подробнее: [docs/integrations.md](docs/integrations.md)
 

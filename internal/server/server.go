@@ -3,7 +3,9 @@ package server
 import (
 	"context"
 	"fmt"
+	"log"
 	"net/http"
+	"os"
 	"strings"
 	"sync"
 	"time"
@@ -197,6 +199,17 @@ func New(cfg Config, sendFn SendFunc, chatResolver ChatResolver, opts ...Option)
 
 	r := chi.NewRouter()
 	r.Use(middleware.RequestID)
+	r.Use(func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+			if id := middleware.GetReqID(req.Context()); id != "" {
+				w.Header().Set(middleware.RequestIDHeader, id)
+			}
+			next.ServeHTTP(w, req)
+		})
+	})
+	middleware.DefaultLogger = middleware.RequestLogger(
+		&middleware.DefaultLogFormatter{Logger: log.New(os.Stderr, "", log.LstdFlags), NoColor: true},
+	)
 	r.Use(middleware.Logger)
 
 	base := strings.TrimRight(cfg.BasePath, "/")
