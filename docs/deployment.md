@@ -201,6 +201,23 @@ ingress:
 
 Для использования существующего секрета: `existingSecret: my-secret`.
 
+### Дополнительные переменные окружения
+
+Через `extraEnv` можно передавать переменные окружения в контейнер. Значения поддерживают Go-шаблоны Helm:
+
+```yaml
+extraEnv:
+  - name: NEW_RELIC_APP_NAME
+    value: '{{ .Release.Namespace }}/{{ .Release.Name }}'
+  - name: MY_VAR
+    value: "static-value"
+  - name: VAULT_TOKEN
+    valueFrom:
+      secretKeyRef:
+        name: vault-token
+        key: token
+```
+
 ### Async-режим (два Deployment)
 
 Для `serve --enqueue` + `worker` рекомендуется два отдельных Deployment:

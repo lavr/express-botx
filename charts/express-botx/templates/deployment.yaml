@@ -105,7 +105,7 @@ spec:
             - name: EXPRESS_BOTX_CONFIG
               value: /etc/express-botx/config.yaml
             {{- with .Values.extraEnv }}
-            {{- toYaml . | nindent 12 }}
+            {{- tpl (toYaml .) $ | nindent 12 }}
             {{- end }}
       volumes:
         - name: config
