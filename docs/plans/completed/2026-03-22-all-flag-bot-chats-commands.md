@@ -74,15 +74,15 @@ The --all commands need to iterate bots and create a resolved Config per bot. Ad
 - Modify: `internal/cmd/bot.go`
 - Modify: `internal/cmd/cmd_test.go`
 
-- [ ] Add --all / -A bool flag to runBotToken
-- [ ] When --all is set: use LoadMinimal, iterate bots, resolve token for each
-- [ ] Text output: "botname: <token>" per line (script-friendly)
-- [ ] JSON output: array of objects with name, token, error fields
-- [ ] Non-zero exit code if any bot failed
-- [ ] Add --format flag support to bot token (currently not supported, needed for --all json output)
-- [ ] Validate --all is mutually exclusive with --bot/--host/--bot-id/--secret/--token
-- [ ] Write tests for --all token
-- [ ] Run project test suite - must pass before task 5
+- [x] Add --all / -A bool flag to runBotToken
+- [x] When --all is set: use LoadMinimal, iterate bots, resolve token for each
+- [x] Text output: "botname: <token>" per line (script-friendly)
+- [x] JSON output: array of objects with name, token, error fields
+- [x] Non-zero exit code if any bot failed
+- [x] Add --format flag support to bot token (currently not supported, needed for --all json output)
+- [x] Validate --all is mutually exclusive with --bot/--host/--bot-id/--secret/--token
+- [x] Write tests for --all token
+- [x] Run project test suite - must pass before task 5
 
 ### Task 5: chats list --all
 

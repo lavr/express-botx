@@ -1178,3 +1178,157 @@ bots:
 		t.Errorf("expected bot name in output, got: %s", out)
 	}
 }
+
+// --- bot token --all tests ---
+
+func TestBotToken_All_Text(t *testing.T) {
+	cfgPath := writeTestConfig(t, `
+bots:
+  alpha:
+    host: alpha.example.com
+    id: id-alpha
+    token: tok-alpha
+  beta:
+    host: beta.example.com
+    id: id-beta
+    token: tok-beta
+`)
+	deps, stdout, _ := testDeps()
+
+	err := runBotToken([]string{"--config", cfgPath, "--all"}, deps)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	out := stdout.String()
+	if !strings.Contains(out, "alpha: tok-alpha") {
+		t.Errorf("expected alpha token in output, got: %s", out)
+	}
+	if !strings.Contains(out, "beta: tok-beta") {
+		t.Errorf("expected beta token in output, got: %s", out)
+	}
+}
+
+func TestBotToken_All_JSON(t *testing.T) {
+	cfgPath := writeTestConfig(t, `
+bots:
+  alpha:
+    host: alpha.example.com
+    id: id-alpha
+    token: tok-alpha
+`)
+	deps, stdout, _ := testDeps()
+
+	err := runBotToken([]string{"--config", cfgPath, "--all", "--format", "json"}, deps)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	out := stdout.String()
+	if !strings.Contains(out, `"name": "alpha"`) {
+		t.Errorf("expected JSON with bot name, got: %s", out)
+	}
+	if !strings.Contains(out, `"token": "tok-alpha"`) {
+		t.Errorf("expected JSON with token, got: %s", out)
+	}
+}
+
+func TestBotToken_All_WithBotFlag_Error(t *testing.T) {
+	cfgPath := writeTestConfig(t, `
+bots:
+  alpha:
+    host: h
+    id: b
+    token: t
+`)
+	deps, _, _ := testDeps()
+
+	err := runBotToken([]string{"--config", cfgPath, "--all", "--bot", "alpha"}, deps)
+	if err == nil {
+		t.Fatal("expected error for --all with --bot")
+	}
+	if !strings.Contains(err.Error(), "mutually exclusive") {
+		t.Errorf("expected mutually exclusive error, got: %v", err)
+	}
+}
+
+func TestBotToken_All_EmptyConfig(t *testing.T) {
+	cfgPath := writeTestConfig(t, `{}`)
+	deps, _, _ := testDeps()
+
+	err := runBotToken([]string{"--config", cfgPath, "--all"}, deps)
+	if err == nil {
+		t.Fatal("expected error for empty config with --all")
+	}
+	if !strings.Contains(err.Error(), "no bots configured") {
+		t.Errorf("expected 'no bots configured' error, got: %v", err)
+	}
+}
+
+func TestBotToken_All_PartialFailure(t *testing.T) {
+	cfgPath := writeTestConfig(t, `
+bots:
+  good:
+    host: good.example.com
+    id: id-good
+    token: tok-good
+  bad:
+    host: bad.example.com
+    id: id-bad
+    secret: bad-secret
+`)
+	deps, stdout, _ := testDeps()
+
+	err := runBotToken([]string{"--config", cfgPath, "--all"}, deps)
+	if err == nil {
+		t.Fatal("expected error for partial failure")
+	}
+	if !strings.Contains(err.Error(), "one or more bots failed") {
+		t.Errorf("expected 'one or more bots failed' error, got: %v", err)
+	}
+	out := stdout.String()
+	if !strings.Contains(out, "good: tok-good") {
+		t.Errorf("expected good bot token in output, got: %s", out)
+	}
+	if !strings.Contains(out, "bad: ERROR") {
+		t.Errorf("expected bad bot error in output, got: %s", out)
+	}
+}
+
+func TestBotToken_All_Shorthand(t *testing.T) {
+	cfgPath := writeTestConfig(t, `
+bots:
+  only:
+    host: only.example.com
+    id: id-only
+    token: tok-only
+`)
+	deps, stdout, _ := testDeps()
+
+	err := runBotToken([]string{"--config", cfgPath, "-A"}, deps)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	out := stdout.String()
+	if !strings.Contains(out, "only: tok-only") {
+		t.Errorf("expected bot token in output, got: %s", out)
+	}
+}
+
+func TestBotToken_SingleBot_JSON(t *testing.T) {
+	cfgPath := writeTestConfig(t, `
+bots:
+  alpha:
+    host: alpha.example.com
+    id: id-alpha
+    token: tok-alpha
+`)
+	deps, stdout, _ := testDeps()
+
+	err := runBotToken([]string{"--config", cfgPath, "--bot", "alpha", "--format", "json"}, deps)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	out := stdout.String()
+	if !strings.Contains(out, `"token": "tok-alpha"`) {
+		t.Errorf("expected JSON with token, got: %s", out)
+	}
+}

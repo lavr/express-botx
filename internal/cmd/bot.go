@@ -565,12 +565,21 @@ func runBotRm(args []string, deps Deps) error {
 	return nil
 }
 
+type botTokenResult struct {
+	Name  string `json:"name"`
+	Token string `json:"token,omitempty"`
+	Error string `json:"error,omitempty"`
+}
+
 func runBotToken(args []string, deps Deps) error {
 	fs := flag.NewFlagSet("bot token", flag.ContinueOnError)
 	fs.SetOutput(deps.Stderr)
 	var flags config.Flags
+	var all bool
 
 	globalFlags(fs, &flags)
+	fs.BoolVar(&all, "all", false, "get tokens for all configured bots")
+	fs.BoolVar(&all, "A", false, "get tokens for all configured bots (shorthand)")
 	fs.Usage = func() {
 		fmt.Fprintf(deps.Stderr, "Usage: express-botx bot token [options]\n\nGet a bot token by exchanging the secret via eXpress API.\nPrints the token to stdout (useful for scripts).\n\nWith --bot or a single-bot config, uses the bot from config.\nWith --host/--bot-id/--secret, uses the provided credentials.\n\nOptions:\n")
 		fs.PrintDefaults()
@@ -583,31 +592,96 @@ func runBotToken(args []string, deps Deps) error {
 		return err
 	}
 
+	if all {
+		return runBotTokenAll(flags, deps)
+	}
+
 	cfg, err := config.Load(flags)
 	if err != nil {
 		return err
 	}
 
-	if cfg.BotToken != "" {
-		// Already have a static token — just resolve and print
-		tok, err := secret.Resolve(cfg.BotToken)
-		if err != nil {
-			return fmt.Errorf("resolving token: %w", err)
-		}
-		fmt.Fprintln(deps.Stdout, tok)
-		return nil
+	tok, _, err := authenticate(cfg)
+	if err != nil {
+		return err
 	}
 
-	secretKey, err := secret.Resolve(cfg.BotSecret)
-	if err != nil {
-		return fmt.Errorf("resolving secret: %w", err)
+	if flags.Format == "json" || cfg.Format == "json" {
+		format := flags.Format
+		if format == "" {
+			format = cfg.Format
+		}
+		return printOutput(deps.Stdout, format, nil, botTokenResult{Token: tok})
 	}
-	signature := auth.BuildSignature(cfg.BotID, secretKey)
-	tok, err := auth.GetToken(context.Background(), cfg.Host, cfg.BotID, signature, cfg.HTTPTimeout())
-	if err != nil {
-		return fmt.Errorf("getting token: %w", err)
-	}
+
 	fmt.Fprintln(deps.Stdout, tok)
+	return nil
+}
+
+func runBotTokenAll(flags config.Flags, deps Deps) error {
+	if perBotFlagsSet(flags) {
+		return fmt.Errorf("--all is mutually exclusive with --bot, --host, --bot-id, --secret, --token")
+	}
+
+	cfg, err := config.LoadMinimal(flags)
+	if err != nil {
+		return err
+	}
+	if err := cfg.ValidateFormat(); err != nil {
+		return err
+	}
+
+	names := cfg.BotNames()
+	if len(names) == 0 {
+		return fmt.Errorf("no bots configured")
+	}
+
+	var results []botTokenResult
+	var anyFailed bool
+
+	for _, name := range names {
+		botCfg, err := cfg.ConfigForBot(name)
+		if err != nil {
+			results = append(results, botTokenResult{
+				Name:  name,
+				Error: err.Error(),
+			})
+			anyFailed = true
+			continue
+		}
+
+		tok, _, authErr := authenticate(botCfg)
+		if authErr != nil {
+			results = append(results, botTokenResult{
+				Name:  name,
+				Error: authErr.Error(),
+			})
+			anyFailed = true
+			continue
+		}
+
+		results = append(results, botTokenResult{
+			Name:  name,
+			Token: tok,
+		})
+	}
+
+	printErr := printOutput(deps.Stdout, cfg.Format, func() {
+		for _, r := range results {
+			if r.Error != "" {
+				fmt.Fprintf(deps.Stdout, "%s: ERROR %s\n", r.Name, r.Error)
+			} else {
+				fmt.Fprintf(deps.Stdout, "%s: %s\n", r.Name, r.Token)
+			}
+		}
+	}, results)
+	if printErr != nil {
+		return printErr
+	}
+
+	if anyFailed {
+		return fmt.Errorf("one or more bots failed")
+	}
 	return nil
 }
 
