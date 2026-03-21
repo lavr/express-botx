@@ -1,8 +1,8 @@
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
-IMAGE_NAME ?= express-send
+IMAGE_NAME ?= express-botx
 BUILD_TAGS = sentry newrelic kafka rabbitmq
 
-.PHONY: build test lint fmt race docker-build version
+.PHONY: build test lint fmt race docker-build version run
 
 build:
 	mkdir -p dist/
@@ -15,7 +15,7 @@ test:
 lint:
 	golangci-lint run
 
-GO_FILES = $(shell find . -name '*.go' -not -path './vendor/*')
+GO_FILES = $(shell find . -name '*.go' -not -path './vendor/*' -not -path './.ralphex/*')
 
 fmt:
 	goimports -w $(GO_FILES)
@@ -28,3 +28,6 @@ docker-build:
 
 version:
 	@echo "$(VERSION)"
+
+run:
+	go run -tags "$(BUILD_TAGS)" . serve
