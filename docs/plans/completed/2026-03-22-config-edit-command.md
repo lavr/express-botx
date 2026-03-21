@@ -63,8 +63,8 @@ This function will be used by config edit to validate the edited file. It parses
 
 ### Task 3: Verify acceptance criteria
 
-- [ ] Run full test suite (`go test ./...`)
-- [ ] Run linter (`go vet ./...`)
+- [x] Run full test suite (`go test ./...`)
+- [x] Run linter (`go vet ./...`)
 
 ### Task 4: Update documentation
 
