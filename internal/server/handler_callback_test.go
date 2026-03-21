@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/http"
 	"net/http/httptest"
 	"strings"
 	"sync"
@@ -191,6 +192,60 @@ func TestHandleCommandAsync(t *testing.T) {
 	time.Sleep(50 * time.Millisecond)
 	if asyncHandler.callCount() != 1 {
 		t.Fatalf("async handler: expected 1 call, got %d", asyncHandler.callCount())
+	}
+}
+
+// mockErrTracker records errors captured via CaptureError.
+type mockErrTracker struct {
+	mu     sync.Mutex
+	errors []error
+}
+
+func (m *mockErrTracker) Middleware(h http.Handler) http.Handler { return h }
+func (m *mockErrTracker) CaptureError(err error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.errors = append(m.errors, err)
+}
+func (m *mockErrTracker) Flush() {}
+func (m *mockErrTracker) errorCount() int {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return len(m.errors)
+}
+
+func TestHandleCommandAsyncError(t *testing.T) {
+	handler := &recordingHandler{err: fmt.Errorf("async handler failed")}
+	router, err := NewCallbackRouter(
+		[][]string{{"message"}},
+		[]bool{true},
+		map[int]CallbackHandler{0: handler},
+	)
+	if err != nil {
+		t.Fatalf("NewCallbackRouter: %v", err)
+	}
+	tracker := &mockErrTracker{}
+	srv := newTestServerWithCallbackRouter(router)
+	srv.errTracker = tracker
+
+	body := `{"sync_id":"s1","command":{"body":"hello"},"from":{"group_chat_id":"g1"},"bot_id":"b1"}`
+	w := httptest.NewRecorder()
+	req := httptest.NewRequest("POST", "/command", strings.NewReader(body))
+	srv.handleCommand(w, req)
+
+	// Response should be 202 immediately.
+	if w.Code != 202 {
+		t.Fatalf("expected 202, got %d", w.Code)
+	}
+
+	// Wait for async handler to complete.
+	time.Sleep(50 * time.Millisecond)
+
+	if handler.callCount() != 1 {
+		t.Fatalf("expected 1 call, got %d", handler.callCount())
+	}
+	if tracker.errorCount() != 1 {
+		t.Fatalf("expected 1 captured error, got %d", tracker.errorCount())
 	}
 }
 

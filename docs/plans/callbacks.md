@@ -320,10 +320,10 @@ go test ./internal/server/ -run TestHandleCommand -v
 
 ### 5.2 handleCommand — sync/async выполнение
 
-- [ ] sync-правила: выполнить handler, дождаться, потом 202
-- [ ] async-правила: запустить goroutine, сразу 202
-- [ ] Ошибка обработчика (sync) → лог + 202 (не блокируем Express)
-- [ ] Ошибка обработчика (async) → лог + error tracker
+- [x] sync-правила: выполнить handler, дождаться, потом 202
+- [x] async-правила: запустить goroutine, сразу 202
+- [x] Ошибка обработчика (sync) → лог + 202 (не блокируем Express)
+- [x] Ошибка обработчика (async) → лог + error tracker
 
 ```
 go test ./internal/server/ -run TestHandleCommandAsync -v
