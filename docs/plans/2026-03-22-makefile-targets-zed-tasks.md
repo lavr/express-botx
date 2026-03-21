@@ -48,6 +48,6 @@ Extend the Makefile with standard Go development targets (test, lint, fmt, race,
 
 ### Task 3: Verify acceptance criteria
 
-- [ ] Run `make -n test` and `make -n build` to verify Makefile syntax
-- [ ] Run `make -n lint` to verify lint target
-- [ ] Validate `.zed/tasks.json` is valid JSON
+- [x] Run `make -n test` and `make -n build` to verify Makefile syntax
+- [x] Run `make -n lint` to verify lint target
+- [x] Validate `.zed/tasks.json` is valid JSON
