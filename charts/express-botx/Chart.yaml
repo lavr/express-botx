@@ -2,8 +2,8 @@ apiVersion: v2
 name: express-botx
 description: eXpress BotX API gateway
 type: application
-version: 0.24.2
-appVersion: "0.29.2"
+version: 0.25.0
+appVersion: "0.30.0"
 home: https://github.com/lavr/express-botx
 sources:
   - https://github.com/lavr/express-botx
