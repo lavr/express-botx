@@ -8,7 +8,10 @@ replicaCount: 1
 
 image:
   repository: lavr/express-botx
-  tag: ""  # defaults to appVersion
+  # Defaults to <appVersion>-rootless (scratch-based, distroless image).
+  # To use the alpine-based image instead, set tag without the -rootless suffix:
+  #   image.tag: "0.30.1"
+  tag: ""
   pullPolicy: IfNotPresent
 
 imagePullSecrets: []

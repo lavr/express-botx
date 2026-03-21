@@ -16,7 +16,13 @@ ARG APM_TAG=""
 ARG BUILD_TAGS="sentry newrelic rabbitmq kafka"
 RUN CGO_ENABLED=0 go build -tags "${BUILD_TAGS} ${APM_TAG}" -ldflags="-s -w -X main.version=${VERSION}" -o /express-botx .
 
-FROM alpine:3.21
+FROM alpine:3.21 AS alpine
 RUN apk add --no-cache ca-certificates
 COPY --from=build /express-botx /usr/local/bin/express-botx
 ENTRYPOINT ["express-botx"]
+
+FROM scratch AS rootless
+COPY --from=build /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
+COPY --from=build /express-botx /express-botx
+USER 65534:65534
+ENTRYPOINT ["/express-botx"]

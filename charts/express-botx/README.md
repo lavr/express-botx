@@ -48,7 +48,7 @@ config:
 | `mode` | Режим: `serve`, `serve-enqueue`, `worker` | `serve` |
 | `replicaCount` | Количество реплик | `1` |
 | `image.repository` | Docker-образ | `lavr/express-botx` |
-| `image.tag` | Тег образа | `appVersion` из Chart.yaml |
+| `image.tag` | Тег образа | `<appVersion>-rootless` из Chart.yaml |
 | `image.pullPolicy` | Pull policy | `IfNotPresent` |
 | `config.bots` | Боты (host, id, secret) | `{}` |
 | `config.chats` | Алиасы чатов (name → UUID) | `{}` |

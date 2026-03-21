@@ -183,10 +183,11 @@ jobs:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
 
-      - name: Build and push
+      - name: Build and push (alpine)
         uses: docker/build-push-action@v7
         with:
           context: .
+          target: alpine
           platforms: linux/amd64,linux/arm64
           push: true
           build-args: |
@@ -195,3 +196,17 @@ jobs:
           tags: |
             lavr/express-botx:${{ github.ref_name }}
             lavr/express-botx:latest
+
+      - name: Build and push (rootless)
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          target: rootless
+          platforms: linux/amd64,linux/arm64
+          push: true
+          build-args: |
+            VERSION=${{ github.ref_name }}
+            APM_TAG=newrelic
+          tags: |
+            lavr/express-botx:${{ github.ref_name }}-rootless
+            lavr/express-botx:latest-rootless

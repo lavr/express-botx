@@ -32,15 +32,15 @@ spec:
       securityContext:
         runAsNonRoot: true
         runAsUser: 65534
+        runAsGroup: 65534
         fsGroup: 65534
       {{- if eq .Values.mode "worker" }}
       terminationGracePeriodSeconds: 35
       {{- end }}
       containers:
         - name: {{ .Chart.Name }}
-          image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default (printf "%s-rootless" .Chart.AppVersion) }}"
           imagePullPolicy: {{ .Values.image.pullPolicy }}
-          command: ["express-botx"]
           {{- if eq .Values.mode "serve-enqueue" }}
           args: ["serve", "--enqueue"]
           {{- else if eq .Values.mode "worker" }}
