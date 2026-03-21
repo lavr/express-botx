@@ -1,6 +1,6 @@
 # RFC-020: Alertmanager и Grafana endpoints включены по умолчанию
 
-- **Статус:** Proposed
+- **Статус:** Done
 - **Дата:** 2026-03-21
 
 ## Контекст
