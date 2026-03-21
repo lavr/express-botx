@@ -256,21 +256,28 @@ func runConfigEdit(args []string, deps Deps) error {
 
 		if err := config.ValidateConfig(newData); err != nil {
 			fmt.Fprintf(deps.Stderr, "Validation error: %s\n", err)
-			fmt.Fprint(deps.Stderr, "[r]etry editing / [d]iscard changes? (r/d) ")
 
-			answer, readErr := reader.ReadString('\n')
-			answer = strings.TrimSpace(strings.ToLower(answer))
+			for {
+				fmt.Fprint(deps.Stderr, "[r]etry editing / [d]iscard changes? (r/d) ")
 
-			if readErr != nil && answer == "" {
-				cleanupTmp = false
-				fmt.Fprintf(deps.Stderr, "\nYour edits are preserved at: %s\n", tmpFile)
-				return fmt.Errorf("unable to read user input: %w", readErr)
+				answer, readErr := reader.ReadString('\n')
+				answer = strings.TrimSpace(strings.ToLower(answer))
+
+				if readErr != nil && answer == "" {
+					cleanupTmp = false
+					fmt.Fprintf(deps.Stderr, "\nYour edits are preserved at: %s\n", tmpFile)
+					return fmt.Errorf("unable to read user input: %w", readErr)
+				}
+				if answer == "r" || answer == "d" {
+					if answer == "d" {
+						fmt.Fprintln(deps.Stderr, "Changes discarded")
+						return nil
+					}
+					break
+				}
+				fmt.Fprintf(deps.Stderr, "Please enter 'r' to retry or 'd' to discard.\n")
 			}
-			if answer == "r" {
-				continue
-			}
-			fmt.Fprintln(deps.Stderr, "Changes discarded")
-			return nil
+			continue
 		}
 
 		// Check for concurrent modifications right before writing.
