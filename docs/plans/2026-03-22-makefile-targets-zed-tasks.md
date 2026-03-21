@@ -22,14 +22,14 @@ Extend the Makefile with standard Go development targets (test, lint, fmt, race,
 **Files:**
 - Modify: `Makefile`
 
-- [ ] Add `test` target: run `go test -race -coverprofile=coverage.out -tags "sentry newrelic kafka rabbitmq" ./...` with coverage summary, excluding vendor
-- [ ] Add `lint` target: run `golangci-lint run`
-- [ ] Add `fmt` target: run gofmt and goimports on project .go files (excluding vendor)
-- [ ] Add `race` target: run `go test -race -timeout=60s -tags "sentry newrelic kafka rabbitmq" ./...`
-- [ ] Add `docker-build` target: build docker image with appropriate tag
-- [ ] Add `version` target: print current version info
-- [ ] Update `.PHONY` declaration with all new targets
-- [ ] Verify Makefile syntax by running `make -n test` and `make -n build`
+- [x] Add `test` target: run `go test -race -coverprofile=coverage.out -tags "sentry newrelic kafka rabbitmq" ./...` with coverage summary, excluding vendor
+- [x] Add `lint` target: run `golangci-lint run`
+- [x] Add `fmt` target: run gofmt and goimports on project .go files (excluding vendor)
+- [x] Add `race` target: run `go test -race -timeout=60s -tags "sentry newrelic kafka rabbitmq" ./...`
+- [x] Add `docker-build` target: build docker image with appropriate tag
+- [x] Add `version` target: print current version info
+- [x] Update `.PHONY` declaration with all new targets
+- [x] Verify Makefile syntax by running `make -n test` and `make -n build`
 
 ### Task 2: Create .zed/tasks.json
 
