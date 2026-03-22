@@ -37,7 +37,7 @@ func (e *slogLogEntry) Write(status, bytes int, header http.Header, elapsed time
 		slog.String("path", e.path),
 		slog.Int("status", status),
 		slog.Int("bytes", bytes),
-		slog.String("duration", elapsed.Round(time.Millisecond).String()),
+		slog.Float64("duration", elapsed.Seconds()),
 		slog.String("remote", e.remote),
 	}
 	if e.reqID != "" {
