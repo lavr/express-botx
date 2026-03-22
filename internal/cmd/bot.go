@@ -611,7 +611,7 @@ func runBotToken(args []string, deps Deps) error {
 		return err
 	}
 
-	tok, _, err := authenticate(cfg)
+	tok, err := freshToken(cfg)
 	if err != nil {
 		return err
 	}
@@ -653,11 +653,11 @@ func runBotTokenAll(flags config.Flags, deps Deps) error {
 			continue
 		}
 
-		tok, _, authErr := authenticate(botCfg)
-		if authErr != nil {
+		tok, tokenErr := freshToken(botCfg)
+		if tokenErr != nil {
 			results = append(results, botTokenResult{
 				Name:  name,
-				Error: authErr.Error(),
+				Error: tokenErr.Error(),
 			})
 			anyFailed = true
 			continue

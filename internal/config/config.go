@@ -55,6 +55,7 @@ type Config struct {
 	ChatID     string `yaml:"-"`
 	Format     string `yaml:"-"`
 	multiBot   bool   // true when serve starts with multiple bots, no --bot
+	noCache    bool   // true when --no-cache flag was passed (flag provenance)
 	configPath string
 }
 
@@ -461,6 +462,10 @@ func (c *Config) ConfigForBot(name string) (*Config, error) {
 		return nil, fmt.Errorf("unknown bot %q, available: %s", name, c.botNames())
 	}
 
+	if bot.Secret != "" && bot.Token != "" {
+		return nil, fmt.Errorf("bot %q has both secret and token, use one", name)
+	}
+
 	host, err := secret.Resolve(bot.Host)
 	if err != nil {
 		return nil, fmt.Errorf("bot %q host: %w", name, err)
@@ -482,7 +487,7 @@ func (c *Config) ConfigForBot(name string) (*Config, error) {
 		}
 	}
 
-	return &Config{
+	resolved := &Config{
 		Bots:       c.Bots,
 		Chats:      c.Chats,
 		Cache:      c.Cache,
@@ -494,7 +499,15 @@ func (c *Config) ConfigForBot(name string) (*Config, error) {
 		BotTimeout: bot.Timeout,
 		Format:     c.Format,
 		configPath: c.configPath,
-	}, nil
+	}
+	applyCacheEnv(resolved)
+	// Restore --no-cache override: the flag sets noCache=true; applyCacheEnv
+	// must not override that decision (flags beat env, matching the Load path).
+	if c.noCache {
+		resolved.Cache.Type = "none"
+		resolved.noCache = true
+	}
+	return resolved, nil
 }
 
 // BotEntry is a bot summary for display (no secrets).
@@ -808,6 +821,7 @@ func LoadMinimal(flags Flags) (*Config, error) {
 	// Apply format and no-cache flags for LoadMinimal
 	if flags.NoCache {
 		cfg.Cache.Type = "none"
+		cfg.noCache = true
 	}
 	if flags.Format != "" {
 		cfg.Format = flags.Format
@@ -1033,6 +1047,12 @@ func applyEnvWithAuth(cfg *Config, manualAuth bool) error {
 		}
 	}
 
+	applyCacheEnv(cfg)
+	return nil
+}
+
+// applyCacheEnv applies EXPRESS_BOTX_CACHE_* environment variable overrides.
+func applyCacheEnv(cfg *Config) {
 	if v := os.Getenv("EXPRESS_BOTX_CACHE_TYPE"); v != "" {
 		cfg.Cache.Type = v
 	}
@@ -1050,7 +1070,6 @@ func applyEnvWithAuth(cfg *Config, manualAuth bool) error {
 			cfg.Cache.TTL = ttl
 		}
 	}
-	return nil
 }
 
 func applyFlags(cfg *Config, flags Flags) {
@@ -1073,6 +1092,7 @@ func applyFlags(cfg *Config, flags Flags) {
 	}
 	if flags.NoCache {
 		cfg.Cache.Type = "none"
+		cfg.noCache = true
 	}
 	if flags.Format != "" {
 		cfg.Format = flags.Format

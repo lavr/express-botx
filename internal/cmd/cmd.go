@@ -209,6 +209,33 @@ func refreshToken(cfg *config.Config, cache token.Cache) (string, error) {
 	return tok, nil
 }
 
+// freshToken always fetches a new token from the API (bypasses cache).
+// For static token configs, resolves and returns the token directly.
+// Used by "bot token" which should always return a current token.
+func freshToken(cfg *config.Config) (string, error) {
+	if cfg.BotToken != "" {
+		vlog.V1("auth: using static token")
+		resolved, err := secret.Resolve(cfg.BotToken)
+		if err != nil {
+			return "", fmt.Errorf("resolving token: %w", err)
+		}
+		return resolved, nil
+	}
+
+	vlog.V1("auth: requesting fresh token (no cache)")
+	secretKey, err := secret.Resolve(cfg.BotSecret)
+	if err != nil {
+		return "", fmt.Errorf("resolving secret: %w", err)
+	}
+
+	signature := auth.BuildSignature(cfg.BotID, secretKey)
+	tok, err := auth.GetToken(context.Background(), cfg.Host, cfg.BotID, signature, cfg.HTTPTimeout())
+	if err != nil {
+		return "", fmt.Errorf("getting token: %w", err)
+	}
+	return tok, nil
+}
+
 func newCache(cfg config.CacheConfig) token.Cache {
 	switch cfg.Type {
 	case "file":

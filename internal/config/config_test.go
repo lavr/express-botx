@@ -2290,4 +2290,42 @@ func TestConfigForBot(t *testing.T) {
 			t.Errorf("error = %q, want it to contain 'unknown bot'", err.Error())
 		}
 	})
+
+	t.Run("preserves no-cache flag override despite cache env", func(t *testing.T) {
+		noCacheCfg := &Config{
+			Bots: map[string]BotConfig{
+				"alpha": {Host: "alpha.example.com", ID: "a-id", Secret: "a-secret"},
+			},
+			Cache:   CacheConfig{Type: "none"},
+			noCache: true, // set by LoadMinimal/applyFlags when --no-cache is passed
+		}
+		t.Setenv("EXPRESS_BOTX_CACHE_TYPE", "file")
+		got, err := noCacheCfg.ConfigForBot("alpha")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if got.Cache.Type != "none" {
+			t.Errorf("Cache.Type = %q, want %q (--no-cache flag must win over env)", got.Cache.Type, "none")
+		}
+	})
+
+	t.Run("yaml cache none allows env override", func(t *testing.T) {
+		// Config file has cache.type: none, but noCache flag is NOT set.
+		// Env var EXPRESS_BOTX_CACHE_TYPE=file should win (env overrides YAML).
+		yamlNoneCfg := &Config{
+			Bots: map[string]BotConfig{
+				"alpha": {Host: "alpha.example.com", ID: "a-id", Secret: "a-secret"},
+			},
+			Cache: CacheConfig{Type: "none"}, // from YAML, not from --no-cache flag
+			// noCache is false — no flag was passed
+		}
+		t.Setenv("EXPRESS_BOTX_CACHE_TYPE", "file")
+		got, err := yamlNoneCfg.ConfigForBot("alpha")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if got.Cache.Type != "file" {
+			t.Errorf("Cache.Type = %q, want %q (env should override YAML cache.type: none)", got.Cache.Type, "file")
+		}
+	})
 }
