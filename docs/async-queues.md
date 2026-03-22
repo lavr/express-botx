@@ -16,7 +16,7 @@ express-botx поддерживает RabbitMQ и Kafka для надёжной 
      │          └───────────────┘
      │
      ├── CLI: express-botx enqueue
-     └── HTTP: POST /api/v1/send
+     └── HTTP: POST /api/v1/...
 ```
 
 **Producer** (HTTP-сервер в режиме `serve --enqueue` или CLI `enqueue`) кладёт сообщение в очередь.
