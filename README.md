@@ -1,5 +1,10 @@
 # express-botx
 
+![Test](https://github.com/lavr/express-botx/actions/workflows/test.yml/badge.svg)
+[![Go Report Card](https://goreportcard.com/badge/github.com/lavr/express-botx)](https://goreportcard.com/report/github.com/lavr/express-botx)
+[![Release](https://img.shields.io/github/v/release/lavr/express-botx)](https://github.com/lavr/express-botx/releases/latest)
+![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)
+
 CLI и HTTP-сервер для отправки сообщений в корпоративный мессенджер [eXpress](https://express.ms) через BotX API.
 
 Принимает вебхуки от Alertmanager и Grafana, поддерживает асинхронную отправку через RabbitMQ/Kafka, работает как утилита командной строки или HTTP-сервис.
