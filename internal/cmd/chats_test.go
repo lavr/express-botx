@@ -427,9 +427,9 @@ func TestSlugify(t *testing.T) {
 		{"", ""},
 	}
 	for _, tt := range tests {
-		got := slugify(tt.input)
+		got := slugifyChatAlias(tt.input)
 		if got != tt.want {
-			t.Errorf("slugify(%q) = %q, want %q", tt.input, got, tt.want)
+			t.Errorf("slugifyChatAlias(%q) = %q, want %q", tt.input, got, tt.want)
 		}
 	}
 }
@@ -778,6 +778,408 @@ bots:
     token: test-token
 %s
 `, botName, host, extra))
+}
+
+// --- chats list --all ---
+
+func TestChatsList_All_Text(t *testing.T) {
+	chats := []botapi.ChatInfo{
+		{GroupChatID: "chat-1", Name: "General", ChatType: chatTypeGroup, Members: []string{"a", "b"}},
+		{GroupChatID: "chat-2", Name: "Alerts", ChatType: chatTypeGroup, Members: []string{"a"}},
+	}
+	srv := newChatsListServer(t, chats)
+	defer srv.Close()
+
+	cfgPath := writeTestConfig(t, fmt.Sprintf(`
+bots:
+  alpha:
+    host: %s
+    id: id-alpha
+    token: test-token
+  beta:
+    host: %s
+    id: id-beta
+    token: test-token
+`, srv.URL, srv.URL))
+
+	deps, stdout, _ := testDeps()
+	err := runChatsList([]string{"--config", cfgPath, "--all"}, deps)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	out := stdout.String()
+	if !strings.Contains(out, "alpha:") {
+		t.Errorf("expected 'alpha:' header, got: %s", out)
+	}
+	if !strings.Contains(out, "beta:") {
+		t.Errorf("expected 'beta:' header, got: %s", out)
+	}
+	if !strings.Contains(out, "chat-1") || !strings.Contains(out, "General") {
+		t.Errorf("expected chat details, got: %s", out)
+	}
+}
+
+func TestChatsList_All_JSON(t *testing.T) {
+	chats := []botapi.ChatInfo{
+		{GroupChatID: "chat-1", Name: "General", ChatType: chatTypeGroup, Members: []string{"a"}},
+	}
+	srv := newChatsListServer(t, chats)
+	defer srv.Close()
+
+	cfgPath := writeTestConfig(t, fmt.Sprintf(`
+bots:
+  alpha:
+    host: %s
+    id: id-alpha
+    token: test-token
+`, srv.URL))
+
+	deps, stdout, _ := testDeps()
+	err := runChatsList([]string{"--config", cfgPath, "--all", "--format", "json"}, deps)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	out := stdout.String()
+	if !strings.Contains(out, `"bot_name"`) {
+		t.Errorf("expected bot_name field in JSON, got: %s", out)
+	}
+	if !strings.Contains(out, `"group_chat_id"`) {
+		t.Errorf("expected group_chat_id field in JSON, got: %s", out)
+	}
+
+	var entries []chatsListEntry
+	if err := json.Unmarshal(stdout.Bytes(), &entries); err != nil {
+		t.Fatalf("invalid JSON: %v\n%s", err, out)
+	}
+	if len(entries) != 1 || entries[0].BotName != "alpha" || entries[0].GroupChatID != "chat-1" {
+		t.Errorf("unexpected JSON entries: %+v", entries)
+	}
+}
+
+func TestChatsList_All_WithBotFlag_Error(t *testing.T) {
+	cfgPath := writeTestConfig(t, `
+bots:
+  alpha:
+    host: h
+    id: b
+    token: t
+`)
+	deps, _, _ := testDeps()
+	err := runChatsList([]string{"--config", cfgPath, "--all", "--bot", "alpha"}, deps)
+	if err == nil {
+		t.Fatal("expected error for --all with --bot")
+	}
+	if !strings.Contains(err.Error(), "mutually exclusive") {
+		t.Errorf("expected mutually exclusive error, got: %v", err)
+	}
+}
+
+func TestChatsList_All_EmptyConfig(t *testing.T) {
+	cfgPath := writeTestConfig(t, `{}`)
+	deps, _, _ := testDeps()
+	err := runChatsList([]string{"--config", cfgPath, "--all"}, deps)
+	if err == nil {
+		t.Fatal("expected error for empty config with --all")
+	}
+	if !strings.Contains(err.Error(), "no bots configured") {
+		t.Errorf("expected 'no bots configured' error, got: %v", err)
+	}
+}
+
+func TestChatsList_All_PartialFailure(t *testing.T) {
+	chats := []botapi.ChatInfo{
+		{GroupChatID: "chat-1", Name: "General", ChatType: chatTypeGroup, Members: []string{"a"}},
+	}
+	srv := newChatsListServer(t, chats)
+	defer srv.Close()
+
+	cfgPath := writeTestConfig(t, fmt.Sprintf(`
+bots:
+  good:
+    host: %s
+    id: id-good
+    token: test-token
+  bad:
+    host: http://unreachable.invalid
+    id: id-bad
+    token: bad-token
+`, srv.URL))
+
+	deps, stdout, _ := testDeps()
+	err := runChatsList([]string{"--config", cfgPath, "--all"}, deps)
+	if err == nil {
+		t.Fatal("expected error for partial failure")
+	}
+	if !strings.Contains(err.Error(), "one or more bots failed") {
+		t.Errorf("expected 'one or more bots failed' error, got: %v", err)
+	}
+	out := stdout.String()
+	if !strings.Contains(out, "good:") {
+		t.Errorf("expected good bot in output, got: %s", out)
+	}
+	if !strings.Contains(out, "bad:") {
+		t.Errorf("expected bad bot in output, got: %s", out)
+	}
+	if !strings.Contains(out, "chat-1") {
+		t.Errorf("expected successful bot's chats, got: %s", out)
+	}
+}
+
+func TestChatsList_All_Shorthand(t *testing.T) {
+	cfgPath := writeTestConfig(t, `
+bots:
+  only:
+    host: only.example.com
+    id: id-only
+    token: tok-only
+`)
+	deps, stdout, _ := testDeps()
+	// Will fail at API call but should parse -A flag
+	err := runChatsList([]string{"--config", cfgPath, "-A"}, deps)
+	if err == nil {
+		t.Fatal("expected error (no real API server)")
+	}
+	if !strings.Contains(err.Error(), "one or more bots failed") {
+		t.Errorf("expected 'one or more bots failed' error, got: %v", err)
+	}
+	out := stdout.String()
+	if !strings.Contains(out, "only:") {
+		t.Errorf("expected bot name in output (via -A shorthand), got: %s", out)
+	}
+}
+
+// --- chats import --all ---
+
+func TestChatsImport_All_DryRun(t *testing.T) {
+	chats := []botapi.ChatInfo{
+		{GroupChatID: "chat-1", Name: "General", ChatType: chatTypeGroup},
+		{GroupChatID: "chat-2", Name: "Alerts", ChatType: chatTypeGroup},
+	}
+	srv := newChatsListServer(t, chats)
+	defer srv.Close()
+
+	cfgPath := writeTestConfig(t, fmt.Sprintf(`
+bots:
+  alpha:
+    host: %s
+    id: id-alpha
+    token: test-token
+  beta:
+    host: %s
+    id: id-beta
+    token: test-token
+`, srv.URL, srv.URL))
+
+	before, err := os.ReadFile(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	deps, stdout, _ := testDeps()
+	err = runChatsImport([]string{"--config", cfgPath, "--all", "--dry-run"}, deps)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	out := stdout.String()
+	if !strings.Contains(out, "Imported chats:") {
+		t.Errorf("expected import summary, got: %s", out)
+	}
+
+	after, err := os.ReadFile(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(before) != string(after) {
+		t.Fatalf("config changed during dry-run:\n%s", string(after))
+	}
+}
+
+func TestChatsImport_All_MultiBotImport(t *testing.T) {
+	chats := []botapi.ChatInfo{
+		{GroupChatID: "chat-1", Name: "General", ChatType: chatTypeGroup},
+	}
+	srv := newChatsListServer(t, chats)
+	defer srv.Close()
+
+	cfgPath := writeTestConfig(t, fmt.Sprintf(`
+bots:
+  alpha:
+    host: %s
+    id: id-alpha
+    token: test-token
+  beta:
+    host: %s
+    id: id-beta
+    token: test-token
+`, srv.URL, srv.URL))
+
+	deps, stdout, _ := testDeps()
+	err := runChatsImport([]string{"--config", cfgPath, "--all"}, deps)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	data, err := os.ReadFile(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	content := string(data)
+	// Both bots have the same chat-1 but the first import should claim it;
+	// the second bot's chat should be skipped (same UUID).
+	out := stdout.String()
+	if !strings.Contains(out, "Imported chats:") {
+		t.Errorf("expected import output, got: %s", out)
+	}
+	// The alias should include the bot name as prefix
+	if !strings.Contains(content, "alpha-general") {
+		t.Errorf("expected alpha-general alias in config, got:\n%s", content)
+	}
+	// Bot binding should be set to source bot name
+	if !strings.Contains(content, "bot: alpha") {
+		t.Errorf("expected bot: alpha binding, got:\n%s", content)
+	}
+}
+
+func TestChatsImport_All_SkipExisting(t *testing.T) {
+	chats := []botapi.ChatInfo{
+		{GroupChatID: "chat-1", Name: "General", ChatType: chatTypeGroup},
+	}
+	srv := newChatsListServer(t, chats)
+	defer srv.Close()
+
+	cfgPath := writeTestConfig(t, fmt.Sprintf(`
+bots:
+  alpha:
+    host: %s
+    id: id-alpha
+    token: test-token
+chats:
+  alpha-general: chat-1
+`, srv.URL))
+
+	deps, stdout, _ := testDeps()
+	err := runChatsImport([]string{"--config", cfgPath, "--all"}, deps)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	out := stdout.String()
+	if !strings.Contains(out, "Skipped chats: 1") {
+		t.Errorf("expected 1 skipped chat, got: %s", out)
+	}
+	if !strings.Contains(out, "already exists") {
+		t.Errorf("expected 'already exists' reason, got: %s", out)
+	}
+}
+
+func TestChatsImport_All_PartialFailure(t *testing.T) {
+	chats := []botapi.ChatInfo{
+		{GroupChatID: "chat-1", Name: "General", ChatType: chatTypeGroup},
+	}
+	srv := newChatsListServer(t, chats)
+	defer srv.Close()
+
+	cfgPath := writeTestConfig(t, fmt.Sprintf(`
+bots:
+  good:
+    host: %s
+    id: id-good
+    token: test-token
+  bad:
+    host: http://unreachable.invalid
+    id: id-bad
+    token: bad-token
+`, srv.URL))
+
+	deps, stdout, _ := testDeps()
+	err := runChatsImport([]string{"--config", cfgPath, "--all"}, deps)
+	if err == nil {
+		t.Fatal("expected error for partial failure")
+	}
+	if !strings.Contains(err.Error(), "one or more bots failed") {
+		t.Errorf("expected 'one or more bots failed' error, got: %v", err)
+	}
+	out := stdout.String()
+	if !strings.Contains(out, "Imported chats:") {
+		t.Errorf("expected import summary, got: %s", out)
+	}
+
+	// Successful bot's chats should still be imported
+	data, err := os.ReadFile(cfgPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(data), "good-general") {
+		t.Errorf("expected good-general alias in config, got:\n%s", string(data))
+	}
+}
+
+func TestChatsImport_All_JSON(t *testing.T) {
+	chats := []botapi.ChatInfo{
+		{GroupChatID: "chat-1", Name: "General", ChatType: chatTypeGroup},
+	}
+	srv := newChatsListServer(t, chats)
+	defer srv.Close()
+
+	cfgPath := writeTestConfig(t, fmt.Sprintf(`
+bots:
+  alpha:
+    host: %s
+    id: id-alpha
+    token: test-token
+`, srv.URL))
+
+	deps, stdout, _ := testDeps()
+	err := runChatsImport([]string{"--config", cfgPath, "--all", "--dry-run", "--format", "json"}, deps)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	var got chatImportResult
+	if err := json.Unmarshal(stdout.Bytes(), &got); err != nil {
+		t.Fatalf("invalid json output: %v\n%s", err, stdout.String())
+	}
+	if !got.DryRun {
+		t.Error("expected dry_run=true")
+	}
+	if len(got.Added) != 1 {
+		t.Fatalf("expected 1 added, got %d", len(got.Added))
+	}
+	if got.Added[0].BotName != "alpha" {
+		t.Errorf("expected bot_name=alpha, got %s", got.Added[0].BotName)
+	}
+	if got.Added[0].Alias != "alpha-general" {
+		t.Errorf("expected alias=alpha-general, got %s", got.Added[0].Alias)
+	}
+}
+
+func TestChatsImport_All_WithBotFlag_Error(t *testing.T) {
+	cfgPath := writeTestConfig(t, `
+bots:
+  alpha:
+    host: h
+    id: b
+    token: t
+`)
+	deps, _, _ := testDeps()
+	err := runChatsImport([]string{"--config", cfgPath, "--all", "--bot", "alpha"}, deps)
+	if err == nil {
+		t.Fatal("expected error for --all with --bot")
+	}
+	if !strings.Contains(err.Error(), "mutually exclusive") {
+		t.Errorf("expected mutually exclusive error, got: %v", err)
+	}
+}
+
+func TestChatsImport_All_EmptyConfig(t *testing.T) {
+	cfgPath := writeTestConfig(t, `{}`)
+	deps, _, _ := testDeps()
+	err := runChatsImport([]string{"--config", cfgPath, "--all"}, deps)
+	if err == nil {
+		t.Fatal("expected error for empty config with --all")
+	}
+	if !strings.Contains(err.Error(), "no bots configured") {
+		t.Errorf("expected 'no bots configured' error, got: %v", err)
+	}
 }
 
 func newChatsListServer(t *testing.T, chats []botapi.ChatInfo) *httptest.Server {

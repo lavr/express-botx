@@ -36,6 +36,7 @@
 --config        путь к файлу конфигурации
 --no-cache      отключить кэширование токена
 --format        формат вывода: text или json (по умолчанию: text)
+--all / -A      итерировать все боты из конфига (bot ping/info/token, chats list, config chat import)
 -v / -vv / -vvv уровень подробности логирования
 ```
 
@@ -299,7 +300,13 @@ express-botx worker --config config.yaml --no-catalog-publish
 ```bash
 express-botx bot ping
 express-botx bot ping --bot prod
+
+# Проверить все боты из конфига
+express-botx bot ping --all
+express-botx bot ping -A --format json
 ```
+
+При `--all` / `-A` итерирует все боты из конфига и выводит статус каждого. Текстовый формат: `botname: OK 123ms` или `botname: FAIL reason`. JSON: массив объектов с полями `name`, `status`, `elapsed_ms`, `error`. Exit code ненулевой, если хотя бы один бот недоступен. Флаг `--all` несовместим с `--bot`, `--host`, `--bot-id`, `--secret`, `--token`.
 
 ### bot info
 
@@ -308,7 +315,13 @@ express-botx bot ping --bot prod
 ```bash
 express-botx bot info
 express-botx bot info --bot prod --format json
+
+# Информация по всем ботам
+express-botx bot info --all
+express-botx bot info -A --format json
 ```
+
+При `--all` / `-A` выводит таблицу (text) или массив (json) с информацией по каждому боту из конфига. Флаг `--all` несовместим с `--bot`, `--host`, `--bot-id`, `--secret`, `--token`.
 
 ### bot token
 
@@ -326,7 +339,13 @@ TOKEN=$(express-botx bot token --bot prod)
 
 # Если бот уже с token — просто выводит его
 express-botx bot token --bot token-bot
+
+# Токены всех ботов
+express-botx bot token --all
+express-botx bot token -A --format json
 ```
+
+При `--all` / `-A` выводит токены всех ботов из конфига. Текстовый формат: `botname: <token>` по одной строке на бота. JSON: массив объектов с полями `name`, `token`, `error`. Флаг `--all` несовместим с `--bot`, `--host`, `--bot-id`, `--secret`, `--token`.
 
 ---
 
@@ -337,7 +356,13 @@ express-botx bot token --bot token-bot
 ```bash
 express-botx chats list
 express-botx chats list --bot prod --format json
+
+# Чаты всех ботов
+express-botx chats list --all
+express-botx chats list -A --format json
 ```
+
+При `--all` / `-A` собирает чаты со всех ботов из конфига. В текстовом формате группирует по боту, в JSON добавляет поле `bot_name` к каждой записи. Чаты от успешных ботов выводятся даже если другие боты упали. Флаг `--all` несовместим с `--bot`, `--host`, `--bot-id`, `--secret`, `--token`.
 
 ### chats info
 
@@ -430,11 +455,18 @@ express-botx config chat import --only-type voex_call
 
 # С префиксом и привязкой к боту
 express-botx config chat import --bot deploy-bot --prefix team-
+
+# Импорт чатов от всех ботов
+express-botx config chat import --all
+express-botx config chat import -A --dry-run --format json
 ```
+
+При `--all` / `-A` импортирует чаты от каждого бота из конфига. Алиасы включают имя бота для предотвращения коллизий (например, `botname-chatname`). Импортированные чаты привязываются к боту-источнику через поле `bot`. Флаги `--dry-run`, `--only-type`, `--prefix`, `--skip-existing`, `--overwrite` применяются ко всем ботам. Флаг `--all` несовместим с `--bot`, `--host`, `--bot-id`, `--secret`, `--token`.
 
 Флаги:
 
 ```
+--all, -A        импортировать чаты от всех ботов из конфига
 --dry-run        показать что будет импортировано, без изменений
 --only-type      group_chat | voex_call
 --prefix         префикс для алиасов

@@ -55,6 +55,7 @@ type Config struct {
 	ChatID     string `yaml:"-"`
 	Format     string `yaml:"-"`
 	multiBot   bool   // true when serve starts with multiple bots, no --bot
+	noCache    bool   // true when --no-cache flag was passed (flag provenance)
 	configPath string
 }
 
@@ -277,7 +278,7 @@ func Load(flags Flags) (*Config, error) {
 			}
 			vlog.V1("config: using bot %q from chat binding", chatBot)
 		} else {
-			return nil, fmt.Errorf("multiple bots configured, specify one with --bot: %s", cfg.botNames())
+			return nil, fmt.Errorf("multiple bots configured (%s), specify one with --bot or use --all", cfg.botNames())
 		}
 	}
 
@@ -432,7 +433,7 @@ func (c *Config) resolveBot(botFlag string) error {
 			c.BotTimeout = bot.Timeout
 		}
 	default:
-		return fmt.Errorf("multiple bots configured, specify one with --bot: %s", c.botNames())
+		return fmt.Errorf("multiple bots configured (%s), specify one with --bot or use --all", c.botNames())
 	}
 	return nil
 }
@@ -449,6 +450,64 @@ func (c *Config) BotNames() []string {
 	}
 	sort.Strings(names)
 	return names
+}
+
+// ConfigForBot returns a copy of this Config resolved for the named bot.
+// The returned config has Host, BotID, BotSecret, BotToken, BotName, BotTimeout
+// set from the bot entry, and inherits Cache, Chats, configPath from the parent.
+// Bot fields with env:/vault: references are resolved before returning.
+func (c *Config) ConfigForBot(name string) (*Config, error) {
+	bot, ok := c.Bots[name]
+	if !ok {
+		return nil, fmt.Errorf("unknown bot %q, available: %s", name, c.botNames())
+	}
+
+	if bot.Secret != "" && bot.Token != "" {
+		return nil, fmt.Errorf("bot %q has both secret and token, use one", name)
+	}
+
+	host, err := secret.Resolve(bot.Host)
+	if err != nil {
+		return nil, fmt.Errorf("bot %q host: %w", name, err)
+	}
+	botID, err := secret.Resolve(bot.ID)
+	if err != nil {
+		return nil, fmt.Errorf("bot %q id: %w", name, err)
+	}
+	botSecret := bot.Secret
+	if botSecret != "" {
+		if botSecret, err = secret.Resolve(botSecret); err != nil {
+			return nil, fmt.Errorf("bot %q secret: %w", name, err)
+		}
+	}
+	botToken := bot.Token
+	if botToken != "" {
+		if botToken, err = secret.Resolve(botToken); err != nil {
+			return nil, fmt.Errorf("bot %q token: %w", name, err)
+		}
+	}
+
+	resolved := &Config{
+		Bots:       c.Bots,
+		Chats:      c.Chats,
+		Cache:      c.Cache,
+		Host:       host,
+		BotID:      botID,
+		BotSecret:  botSecret,
+		BotToken:   botToken,
+		BotName:    name,
+		BotTimeout: bot.Timeout,
+		Format:     c.Format,
+		configPath: c.configPath,
+	}
+	applyCacheEnv(resolved)
+	// Restore --no-cache override: the flag sets noCache=true; applyCacheEnv
+	// must not override that decision (flags beat env, matching the Load path).
+	if c.noCache {
+		resolved.Cache.Type = "none"
+		resolved.noCache = true
+	}
+	return resolved, nil
 }
 
 // BotEntry is a bot summary for display (no secrets).
@@ -759,7 +818,11 @@ func LoadMinimal(flags Flags) (*Config, error) {
 		vlog.V2("config: %s not found, using defaults", configPath)
 	}
 
-	// Apply only format flag for LoadMinimal
+	// Apply format and no-cache flags for LoadMinimal
+	if flags.NoCache {
+		cfg.Cache.Type = "none"
+		cfg.noCache = true
+	}
 	if flags.Format != "" {
 		cfg.Format = flags.Format
 	}
@@ -984,6 +1047,12 @@ func applyEnvWithAuth(cfg *Config, manualAuth bool) error {
 		}
 	}
 
+	applyCacheEnv(cfg)
+	return nil
+}
+
+// applyCacheEnv applies EXPRESS_BOTX_CACHE_* environment variable overrides.
+func applyCacheEnv(cfg *Config) {
 	if v := os.Getenv("EXPRESS_BOTX_CACHE_TYPE"); v != "" {
 		cfg.Cache.Type = v
 	}
@@ -1001,7 +1070,6 @@ func applyEnvWithAuth(cfg *Config, manualAuth bool) error {
 			cfg.Cache.TTL = ttl
 		}
 	}
-	return nil
 }
 
 func applyFlags(cfg *Config, flags Flags) {
@@ -1024,6 +1092,7 @@ func applyFlags(cfg *Config, flags Flags) {
 	}
 	if flags.NoCache {
 		cfg.Cache.Type = "none"
+		cfg.noCache = true
 	}
 	if flags.Format != "" {
 		cfg.Format = flags.Format
@@ -1117,7 +1186,7 @@ func LoadForAPI(flags Flags, manualAuth bool) (*Config, error) {
 		if cfg.hasCredentials() {
 			vlog.V1("config: using bot from env/flags (%s)", cfg.Host)
 		} else if !manualAuth {
-			return nil, fmt.Errorf("multiple bots configured, specify one with --bot: %s", cfg.botNames())
+			return nil, fmt.Errorf("multiple bots configured (%s), specify one with --bot or use --all", cfg.botNames())
 		}
 	}
 
