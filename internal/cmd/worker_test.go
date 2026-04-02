@@ -789,3 +789,235 @@ func TestWorker_HandleMessage_DryRun(t *testing.T) {
 		t.Errorf("result request_id = %q, want %q", results[0].RequestID, "dry-run-req-001")
 	}
 }
+
+func TestWorker_HandleMessage_WithInlineParsedMentions(t *testing.T) {
+	mock := newMockBotxAPI()
+	botxSrv := httptest.NewServer(mock.handler())
+	defer botxSrv.Close()
+
+	fakeQ := queue.NewFake()
+
+	cfg := &config.Config{
+		Bots: map[string]config.BotConfig{
+			"alerts": {
+				Host:   botxSrv.URL,
+				ID:     "bot-uuid-parsed",
+				Secret: "test-secret",
+			},
+		},
+		Cache: config.CacheConfig{Type: "none"},
+	}
+
+	w, err := newWorkerRunner(cfg, fakeQ, apm.New(), false)
+	if err != nil {
+		t.Fatalf("newWorkerRunner: %v", err)
+	}
+
+	// Simulate data that the inline parser would produce:
+	// - message has @{mention:id} BotX placeholder
+	// - mentions has the parsed entry merged with a raw entry
+	rawMention := `{"mention_id":"raw-id","mention_type":"user","mention_data":{"user_huid":"raw-huid","name":"Raw User"}}`
+	parsedMention := `{"mention_id":"parsed-id-1","mention_type":"user","mention_data":{"user_huid":"parsed-huid","name":"Alice"}}`
+	mergedMentions := json.RawMessage(fmt.Sprintf("[%s,%s]", rawMention, parsedMention))
+
+	msg := &queue.WorkMessage{
+		RequestID: "req-parsed-mentions",
+		Routing: queue.Routing{
+			BotID:  "bot-uuid-parsed",
+			ChatID: "chat-uuid-001",
+		},
+		Payload: queue.Payload{
+			Message:  "@{mention:raw-id} and @{mention:parsed-id-1} hello!",
+			Status:   "ok",
+			Mentions: mergedMentions,
+		},
+		ReplyTo:    "test-replies",
+		EnqueuedAt: time.Now().UTC(),
+	}
+
+	err = w.handleMessage(context.Background(), msg)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	calls := mock.getCalls()
+	if len(calls) != 1 {
+		t.Fatalf("expected 1 BotX API call, got %d", len(calls))
+	}
+
+	call := calls[0]
+	if call.Notification == nil {
+		t.Fatal("expected notification in BotX call")
+	}
+	// Body must preserve BotX placeholders
+	if call.Notification.Body != "@{mention:raw-id} and @{mention:parsed-id-1} hello!" {
+		t.Errorf("Body = %q, want %q", call.Notification.Body,
+			"@{mention:raw-id} and @{mention:parsed-id-1} hello!")
+	}
+	// Both raw and parsed mentions must reach BotX
+	if call.Notification.Mentions == nil {
+		t.Fatal("expected mentions in BotX API request")
+	}
+	var gotMentions []map[string]interface{}
+	if err := json.Unmarshal(call.Notification.Mentions, &gotMentions); err != nil {
+		t.Fatalf("failed to unmarshal mentions: %v", err)
+	}
+	if len(gotMentions) != 2 {
+		t.Fatalf("expected 2 mentions (raw + parsed), got %d", len(gotMentions))
+	}
+	if gotMentions[0]["mention_id"] != "raw-id" {
+		t.Errorf("first mention_id = %v, want %q", gotMentions[0]["mention_id"], "raw-id")
+	}
+	if gotMentions[1]["mention_id"] != "parsed-id-1" {
+		t.Errorf("second mention_id = %v, want %q", gotMentions[1]["mention_id"], "parsed-id-1")
+	}
+	parsedData, _ := gotMentions[1]["mention_data"].(map[string]interface{})
+	if parsedData == nil || parsedData["user_huid"] != "parsed-huid" {
+		t.Errorf("expected user_huid 'parsed-huid', got %v", parsedData)
+	}
+}
+
+func TestWorker_HandleMessage_ParsesDeferredInlineMentions(t *testing.T) {
+	mock := newMockBotxAPI()
+	mock.users = map[string]struct{ huid, name string }{
+		"user@example.com": {huid: "22222222-2222-2222-2222-222222222222", name: "Jane Doe"},
+	}
+	botxSrv := httptest.NewServer(mock.handler())
+	defer botxSrv.Close()
+
+	fakeQ := queue.NewFake()
+
+	cfg := &config.Config{
+		Bots: map[string]config.BotConfig{
+			"alerts": {
+				Host:   botxSrv.URL,
+				ID:     "bot-uuid-deferred",
+				Secret: "test-secret",
+			},
+		},
+		Cache: config.CacheConfig{Type: "none"},
+	}
+
+	w, err := newWorkerRunner(cfg, fakeQ, apm.New(), false)
+	if err != nil {
+		t.Fatalf("newWorkerRunner: %v", err)
+	}
+
+	rawMentions := json.RawMessage(`[{"mention_id":"raw-1","mention_type":"user","mention_data":{"user_huid":"raw-huid","name":"Raw User"}}]`)
+	msg := &queue.WorkMessage{
+		RequestID: "req-deferred-mentions",
+		Routing: queue.Routing{
+			BotID:  "bot-uuid-deferred",
+			ChatID: "chat-uuid-001",
+		},
+		Payload: queue.Payload{
+			Message:  "@{mention:raw-1} and @mention[email:user@example.com]",
+			Status:   "ok",
+			Mentions: rawMentions,
+		},
+		ReplyTo:    "test-replies",
+		EnqueuedAt: time.Now().UTC(),
+	}
+
+	err = w.handleMessage(context.Background(), msg)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	calls := mock.getCalls()
+	if len(calls) != 1 {
+		t.Fatalf("expected 1 BotX API call, got %d", len(calls))
+	}
+	call := calls[0]
+	if call.Notification == nil {
+		t.Fatal("expected notification in BotX call")
+	}
+	if strings.Contains(call.Notification.Body, "@mention[") {
+		t.Fatalf("expected inline mention to be parsed on worker, got body %q", call.Notification.Body)
+	}
+	if !strings.Contains(call.Notification.Body, "@{mention:raw-1}") || !strings.Contains(call.Notification.Body, "@{mention:") {
+		t.Fatalf("expected BotX placeholders in body, got %q", call.Notification.Body)
+	}
+
+	var gotMentions []map[string]interface{}
+	if err := json.Unmarshal(call.Notification.Mentions, &gotMentions); err != nil {
+		t.Fatalf("failed to unmarshal mentions: %v", err)
+	}
+	if len(gotMentions) != 2 {
+		t.Fatalf("expected 2 mentions (raw + parsed), got %d", len(gotMentions))
+	}
+	if gotMentions[0]["mention_id"] != "raw-1" {
+		t.Errorf("first mention_id = %v, want %q", gotMentions[0]["mention_id"], "raw-1")
+	}
+	if gotMentions[1]["mention_type"] != "user" {
+		t.Errorf("second mention_type = %v, want %q", gotMentions[1]["mention_type"], "user")
+	}
+	parsedData, _ := gotMentions[1]["mention_data"].(map[string]interface{})
+	if parsedData == nil || parsedData["user_huid"] != "22222222-2222-2222-2222-222222222222" {
+		t.Fatalf("unexpected parsed mention_data: %v", parsedData)
+	}
+}
+
+func TestWorker_HandleMessage_NoParseSkipsDeferredInlineMentions(t *testing.T) {
+	mock := newMockBotxAPI()
+	mock.users = map[string]struct{ huid, name string }{
+		"user@example.com": {huid: "22222222-2222-2222-2222-222222222222", name: "Jane Doe"},
+	}
+	botxSrv := httptest.NewServer(mock.handler())
+	defer botxSrv.Close()
+
+	fakeQ := queue.NewFake()
+
+	cfg := &config.Config{
+		Bots: map[string]config.BotConfig{
+			"alerts": {
+				Host:   botxSrv.URL,
+				ID:     "bot-uuid-no-parse",
+				Secret: "test-secret",
+			},
+		},
+		Cache: config.CacheConfig{Type: "none"},
+	}
+
+	w, err := newWorkerRunner(cfg, fakeQ, apm.New(), false)
+	if err != nil {
+		t.Fatalf("newWorkerRunner: %v", err)
+	}
+
+	msg := &queue.WorkMessage{
+		RequestID: "req-no-parse",
+		Routing: queue.Routing{
+			BotID:  "bot-uuid-no-parse",
+			ChatID: "chat-uuid-001",
+		},
+		Payload: queue.Payload{
+			Message: "@mention[email:user@example.com]",
+			Status:  "ok",
+			Opts: queue.DeliveryOpts{
+				NoParse: true,
+			},
+		},
+		ReplyTo:    "test-replies",
+		EnqueuedAt: time.Now().UTC(),
+	}
+
+	err = w.handleMessage(context.Background(), msg)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	calls := mock.getCalls()
+	if len(calls) != 1 {
+		t.Fatalf("expected 1 BotX API call, got %d", len(calls))
+	}
+	call := calls[0]
+	if call.Notification == nil {
+		t.Fatal("expected notification in BotX call")
+	}
+	if call.Notification.Body != "@mention[email:user@example.com]" {
+		t.Fatalf("body = %q, want raw inline mention to remain unchanged", call.Notification.Body)
+	}
+	if call.Notification.Mentions != nil {
+		t.Fatalf("expected no mentions when no_parse is set, got %s", string(call.Notification.Mentions))
+	}
+}

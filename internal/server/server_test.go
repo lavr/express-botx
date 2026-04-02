@@ -12,6 +12,7 @@ import (
 	"testing"
 
 	"github.com/lavr/express-botx/internal/config"
+	"github.com/lavr/express-botx/internal/mentions"
 )
 
 // newTestServer creates a Server with stub send/chat functions for testing.
@@ -2386,6 +2387,102 @@ func TestSend_AsyncMode_CatalogMode_ChatIDOnly(t *testing.T) {
 	}
 }
 
+func TestSend_AsyncMode_DefersInlineMentionParsing(t *testing.T) {
+	var capturedPayload *SendPayload
+	cfg := Config{
+		Listen:             ":0",
+		BasePath:           "/api/v1",
+		Keys:               []ResolvedKey{{Name: "t", Key: "k"}},
+		AsyncMode:          true,
+		DefaultRoutingMode: "direct",
+	}
+	sendFn := func(ctx context.Context, p *SendPayload) (string, error) {
+		capturedPayload = p
+		return "req-async-inline", nil
+	}
+	chatResolver := func(chatID string) (ChatResolveResult, error) {
+		return ChatResolveResult{ChatID: chatID}, nil
+	}
+	srv := New(cfg, sendFn, chatResolver, WithMentionsResolver(&stubResolver{huid: "ignored", name: "Ignored"}))
+
+	body := `{"bot_id":"00000000-0000-0000-0000-000000000111","chat_id":"00000000-0000-0000-0000-000000000222","message":"hello @mention[email:alice@example.com]"}`
+	w := doRequest(srv, "POST", "/api/v1/send", strings.NewReader(body), map[string]string{
+		"X-API-Key":    "k",
+		"Content-Type": "application/json",
+	})
+
+	if w.Code != 202 {
+		t.Fatalf("expected 202, got %d: %s", w.Code, w.Body.String())
+	}
+	if capturedPayload == nil {
+		t.Fatal("send function was not called")
+	}
+	if capturedPayload.Message != "hello @mention[email:alice@example.com]" {
+		t.Fatalf("message = %q, want raw inline mention to be deferred", capturedPayload.Message)
+	}
+	if capturedPayload.Mentions != nil {
+		t.Fatalf("expected mentions to remain unset in async mode, got %s", string(capturedPayload.Mentions))
+	}
+	if capturedPayload.NoParse {
+		t.Fatal("NoParse should be false by default in async mode")
+	}
+}
+
+func TestSend_SyncMode_UsesBotSpecificMentionResolverAfterChatBinding(t *testing.T) {
+	var capturedPayload *SendPayload
+	cfg := Config{
+		Listen:   ":0",
+		BasePath: "/api/v1",
+		Keys:     []ResolvedKey{{Name: "t", Key: "k"}},
+		BotNames: []string{"prod", "test"},
+	}
+	sendFn := func(ctx context.Context, p *SendPayload) (string, error) {
+		capturedPayload = p
+		return "test-sync-id", nil
+	}
+	chatResolver := func(chatID string) (ChatResolveResult, error) {
+		if chatID == "deploy" {
+			return ChatResolveResult{ChatID: "chat-uuid-1", Bot: "prod"}, nil
+		}
+		return ChatResolveResult{ChatID: chatID}, nil
+	}
+	srv := New(cfg, sendFn, chatResolver,
+		WithMentionsResolver(&stubResolver{huid: "default-huid", name: "Default"}),
+		WithBotMentionsResolvers(map[string]mentions.UserResolver{
+			"prod": &stubResolver{huid: "prod-huid", name: "Prod User"},
+			"test": &stubResolver{huid: "test-huid", name: "Test User"},
+		}),
+	)
+
+	body := `{"chat_id":"deploy","message":"hello @mention[email:alice@example.com]"}`
+	w := doRequest(srv, "POST", "/api/v1/send", strings.NewReader(body), map[string]string{
+		"X-API-Key":    "k",
+		"Content-Type": "application/json",
+	})
+	if w.Code != 200 {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	if capturedPayload == nil {
+		t.Fatal("send function was not called")
+	}
+
+	var mentionsList []struct {
+		MentionData struct {
+			UserHUID string `json:"user_huid"`
+			Name     string `json:"name"`
+		} `json:"mention_data"`
+	}
+	if err := json.Unmarshal(capturedPayload.Mentions, &mentionsList); err != nil {
+		t.Fatalf("unmarshal mentions: %v", err)
+	}
+	if len(mentionsList) != 1 {
+		t.Fatalf("expected 1 mention, got %d", len(mentionsList))
+	}
+	if mentionsList[0].MentionData.UserHUID != "prod-huid" {
+		t.Fatalf("expected prod resolver to be used after chat binding, got %q", mentionsList[0].MentionData.UserHUID)
+	}
+}
+
 // --- callback endpoint registration ---
 
 func TestServerWithCallbacksEndpointsRegistered(t *testing.T) {
@@ -2565,5 +2662,257 @@ func TestServerWithCallbacksJWTDefaultEnabled(t *testing.T) {
 	w := doRequest(srv, "POST", "/api/v1/command", strings.NewReader(body), nil)
 	if w.Code != 401 {
 		t.Fatalf("expected 401 with default JWT enabled, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+// --- inline mentions parsing ---
+
+// stubResolver is a test mentions.UserResolver that returns a fixed HUID and name.
+type stubResolver struct {
+	huid string
+	name string
+	err  error
+}
+
+func (r *stubResolver) GetUserByEmail(_ context.Context, _ string) (string, string, error) {
+	if r.err != nil {
+		return "", "", r.err
+	}
+	return r.huid, r.name, nil
+}
+
+func TestSend_JSON_InlineMention(t *testing.T) {
+	var capturedPayload *SendPayload
+	cfg := Config{
+		Listen:   ":0",
+		BasePath: "/api/v1",
+		Keys:     []ResolvedKey{{Name: "t", Key: "k"}},
+	}
+	sendFn := func(ctx context.Context, p *SendPayload) (string, error) {
+		capturedPayload = p
+		return "test-sync-id", nil
+	}
+	chatResolver := func(chatID string) (ChatResolveResult, error) {
+		return ChatResolveResult{ChatID: chatID}, nil
+	}
+	resolver := &stubResolver{huid: "user-huid-1", name: "Alice"}
+	srv := New(cfg, sendFn, chatResolver, WithMentionsResolver(resolver))
+
+	body := `{"chat_id":"chat-1","message":"hello @mention[email:alice@example.com]"}`
+	w := doRequest(srv, "POST", "/api/v1/send", strings.NewReader(body), map[string]string{
+		"X-API-Key":    "k",
+		"Content-Type": "application/json",
+	})
+	if w.Code != 200 {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	if capturedPayload == nil {
+		t.Fatal("send function was not called")
+	}
+	// Message should be normalized with BotX placeholder
+	if !strings.Contains(capturedPayload.Message, "@{mention:") {
+		t.Fatalf("expected message to contain BotX placeholder, got: %s", capturedPayload.Message)
+	}
+	if strings.Contains(capturedPayload.Message, "@mention[") {
+		t.Fatalf("expected inline token to be replaced, got: %s", capturedPayload.Message)
+	}
+	// Mentions should contain the parsed entry
+	if capturedPayload.Mentions == nil {
+		t.Fatal("expected mentions to be set")
+	}
+	var mentions []json.RawMessage
+	if err := json.Unmarshal(capturedPayload.Mentions, &mentions); err != nil {
+		t.Fatalf("failed to unmarshal mentions: %v", err)
+	}
+	if len(mentions) != 1 {
+		t.Fatalf("expected 1 mention, got %d", len(mentions))
+	}
+	// Verify mention has correct user_huid
+	var entry struct {
+		MentionType string `json:"mention_type"`
+		MentionData *struct {
+			UserHUID string `json:"user_huid"`
+		} `json:"mention_data"`
+	}
+	if err := json.Unmarshal(mentions[0], &entry); err != nil {
+		t.Fatalf("failed to unmarshal mention entry: %v", err)
+	}
+	if entry.MentionType != "user" {
+		t.Fatalf("expected mention_type 'user', got %q", entry.MentionType)
+	}
+	if entry.MentionData == nil || entry.MentionData.UserHUID != "user-huid-1" {
+		t.Fatalf("expected user_huid 'user-huid-1', got %+v", entry.MentionData)
+	}
+}
+
+func TestSend_Multipart_InlineMention(t *testing.T) {
+	var capturedPayload *SendPayload
+	cfg := Config{
+		Listen:   ":0",
+		BasePath: "/api/v1",
+		Keys:     []ResolvedKey{{Name: "t", Key: "k"}},
+	}
+	sendFn := func(ctx context.Context, p *SendPayload) (string, error) {
+		capturedPayload = p
+		return "test-sync-id", nil
+	}
+	chatResolver := func(chatID string) (ChatResolveResult, error) {
+		return ChatResolveResult{ChatID: chatID}, nil
+	}
+	resolver := &stubResolver{huid: "user-huid-2", name: "Bob"}
+	srv := New(cfg, sendFn, chatResolver, WithMentionsResolver(resolver))
+
+	var buf bytes.Buffer
+	mw := multipart.NewWriter(&buf)
+	mw.WriteField("chat_id", "chat-1")
+	mw.WriteField("message", "hi @mention[email:bob@example.com]")
+	mw.Close()
+
+	w := doRequest(srv, "POST", "/api/v1/send", &buf, map[string]string{
+		"X-API-Key":    "k",
+		"Content-Type": mw.FormDataContentType(),
+	})
+	if w.Code != 200 {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	if capturedPayload == nil {
+		t.Fatal("send function was not called")
+	}
+	if !strings.Contains(capturedPayload.Message, "@{mention:") {
+		t.Fatalf("expected message to contain BotX placeholder, got: %s", capturedPayload.Message)
+	}
+	if capturedPayload.Mentions == nil {
+		t.Fatal("expected mentions to be set")
+	}
+	var mentions []json.RawMessage
+	if err := json.Unmarshal(capturedPayload.Mentions, &mentions); err != nil {
+		t.Fatalf("failed to unmarshal mentions: %v", err)
+	}
+	if len(mentions) != 1 {
+		t.Fatalf("expected 1 mention, got %d", len(mentions))
+	}
+}
+
+func TestSend_JSON_InlineMention_MergeWithRaw(t *testing.T) {
+	var capturedPayload *SendPayload
+	cfg := Config{
+		Listen:   ":0",
+		BasePath: "/api/v1",
+		Keys:     []ResolvedKey{{Name: "t", Key: "k"}},
+	}
+	sendFn := func(ctx context.Context, p *SendPayload) (string, error) {
+		capturedPayload = p
+		return "test-sync-id", nil
+	}
+	chatResolver := func(chatID string) (ChatResolveResult, error) {
+		return ChatResolveResult{ChatID: chatID}, nil
+	}
+	resolver := &stubResolver{huid: "user-huid-3", name: "Charlie"}
+	srv := New(cfg, sendFn, chatResolver, WithMentionsResolver(resolver))
+
+	// Raw mention + inline mention in the same request
+	body := `{"chat_id":"chat-1","message":"@{mention:raw-id} and @mention[email:charlie@example.com]","mentions":[{"mention_id":"raw-id","mention_type":"user","mention_data":{"user_huid":"raw-huid"}}]}`
+	w := doRequest(srv, "POST", "/api/v1/send", strings.NewReader(body), map[string]string{
+		"X-API-Key":    "k",
+		"Content-Type": "application/json",
+	})
+	if w.Code != 200 {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	if capturedPayload == nil {
+		t.Fatal("send function was not called")
+	}
+	// Should have 2 mentions: raw + parsed
+	var mentions []json.RawMessage
+	if err := json.Unmarshal(capturedPayload.Mentions, &mentions); err != nil {
+		t.Fatalf("failed to unmarshal mentions: %v", err)
+	}
+	if len(mentions) != 2 {
+		t.Fatalf("expected 2 mentions (1 raw + 1 parsed), got %d", len(mentions))
+	}
+	// First mention should be the raw one
+	var first struct {
+		MentionID string `json:"mention_id"`
+	}
+	if err := json.Unmarshal(mentions[0], &first); err != nil {
+		t.Fatalf("unmarshal first mention: %v", err)
+	}
+	if first.MentionID != "raw-id" {
+		t.Fatalf("expected first mention to be raw (id=raw-id), got %q", first.MentionID)
+	}
+}
+
+func TestSend_JSON_NoParse(t *testing.T) {
+	var capturedPayload *SendPayload
+	cfg := Config{
+		Listen:   ":0",
+		BasePath: "/api/v1",
+		Keys:     []ResolvedKey{{Name: "t", Key: "k"}},
+	}
+	sendFn := func(ctx context.Context, p *SendPayload) (string, error) {
+		capturedPayload = p
+		return "test-sync-id", nil
+	}
+	chatResolver := func(chatID string) (ChatResolveResult, error) {
+		return ChatResolveResult{ChatID: chatID}, nil
+	}
+	resolver := &stubResolver{huid: "should-not-appear", name: "Nope"}
+	srv := New(cfg, sendFn, chatResolver, WithMentionsResolver(resolver))
+
+	body := `{"chat_id":"chat-1","message":"hello @mention[email:alice@example.com]"}`
+	// Note: ?no_parse=true query parameter
+	w := doRequest(srv, "POST", "/api/v1/send?no_parse=true", strings.NewReader(body), map[string]string{
+		"X-API-Key":    "k",
+		"Content-Type": "application/json",
+	})
+	if w.Code != 200 {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	if capturedPayload == nil {
+		t.Fatal("send function was not called")
+	}
+	// Message should remain unchanged — token not replaced
+	if !strings.Contains(capturedPayload.Message, "@mention[email:alice@example.com]") {
+		t.Fatalf("expected message to contain original token with no_parse=true, got: %s", capturedPayload.Message)
+	}
+	// No mentions should be generated
+	if capturedPayload.Mentions != nil {
+		t.Fatalf("expected no mentions with no_parse=true, got: %s", string(capturedPayload.Mentions))
+	}
+}
+
+func TestSend_JSON_InlineMention_ParseError_StillSends(t *testing.T) {
+	var capturedPayload *SendPayload
+	cfg := Config{
+		Listen:   ":0",
+		BasePath: "/api/v1",
+		Keys:     []ResolvedKey{{Name: "t", Key: "k"}},
+	}
+	sendFn := func(ctx context.Context, p *SendPayload) (string, error) {
+		capturedPayload = p
+		return "test-sync-id", nil
+	}
+	chatResolver := func(chatID string) (ChatResolveResult, error) {
+		return ChatResolveResult{ChatID: chatID}, nil
+	}
+	// Resolver that always fails
+	resolver := &stubResolver{err: fmt.Errorf("user not found")}
+	srv := New(cfg, sendFn, chatResolver, WithMentionsResolver(resolver))
+
+	body := `{"chat_id":"chat-1","message":"hello @mention[email:unknown@example.com]"}`
+	w := doRequest(srv, "POST", "/api/v1/send", strings.NewReader(body), map[string]string{
+		"X-API-Key":    "k",
+		"Content-Type": "application/json",
+	})
+	// Should NOT return 400 — parse/lookup errors are soft
+	if w.Code != 200 {
+		t.Fatalf("expected 200 despite lookup error, got %d: %s", w.Code, w.Body.String())
+	}
+	if capturedPayload == nil {
+		t.Fatal("send function was not called")
+	}
+	// Token should remain as literal text since lookup failed
+	if !strings.Contains(capturedPayload.Message, "@mention[email:unknown@example.com]") {
+		t.Fatalf("expected failed token to remain as literal text, got: %s", capturedPayload.Message)
 	}
 }

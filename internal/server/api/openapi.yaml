@@ -123,6 +123,27 @@ paths:
         `chat_id` is optional when a default chat is configured (`default: true` in chats section).
 
         In multi-bot mode, `bot` is required unless the chat alias has a default bot binding in config.
+
+        By default, inline mention tokens (`@mention[...]`) in the `message` field are automatically
+        parsed and normalized into BotX wire-format mentions. Supported syntax:
+        - `@mention[email:<address>]` — resolve user by email
+        - `@mention[email:<address>;<url-encoded name>]` — with display name override
+        - `@mention[huid:<uuid>]` — mention by HUID (no lookup)
+        - `@mention[huid:<uuid>;<url-encoded name>]` — with display name
+        - `@mention[all]` — broadcast mention
+
+        Parsed mentions are appended to any raw `mentions` provided in the request body.
+        On parse or lookup errors, the token remains as literal text and the message is still sent.
+        Use `?no_parse=true` to disable inline parsing entirely.
+      parameters:
+        - name: no_parse
+          in: query
+          description: |
+            Disable inline `@mention[...]` parsing. When set to `true`, mention tokens
+            in the message text are left as-is without normalization.
+          schema:
+            type: boolean
+            default: false
       requestBody:
         required: true
         content:
@@ -142,7 +163,7 @@ paths:
                   message: "Build #42 failed"
                   status: error
               mentions:
-                summary: Message with mentions
+                summary: Message with raw mentions (BotX wire-format)
                 value:
                   chat_id: "1a2b3c4d-5e6f-7890-abcd-ef1234567890"
                   message: "@{mention:aaa-bbb} Deploy completed"
@@ -152,6 +173,11 @@ paths:
                       mention_data:
                         user_huid: "f16cdc5f-6366-5552-9ecd-c36290ab3d11"
                         name: "Иван"
+              inline_mention:
+                summary: Message with inline mention (auto-parsed)
+                value:
+                  chat_id: "1a2b3c4d-5e6f-7890-abcd-ef1234567890"
+                  message: "Привет, @mention[email:user@company.ru]!"
               file:
                 summary: Message with file
                 value:

@@ -18,6 +18,7 @@ import (
 	"github.com/lavr/express-botx/internal/botapi"
 	"github.com/lavr/express-botx/internal/config"
 	vlog "github.com/lavr/express-botx/internal/log"
+	"github.com/lavr/express-botx/internal/mentions"
 	"github.com/lavr/express-botx/internal/queue"
 )
 
@@ -250,6 +251,20 @@ func (w *workerRunner) handleMessage(ctx context.Context, msg *queue.WorkMessage
 
 	// Get or create bot client
 	bc := w.getOrCreateClient(botName, botCfg)
+
+	// Parse inline mentions using the resolved bot's host for email lookups.
+	if !msg.Payload.Opts.NoParse {
+		resolver := &refreshableClientResolver{
+			client: botapi.NewClient(bc.cfg.Host, bc.client.Token, bc.cfg.HTTPTimeout()),
+			cfg:    bc.cfg,
+		}
+		parseResult := mentions.Parse(ctx, msg.Payload.Message, msg.Payload.Mentions, true, resolver)
+		msg.Payload.Message = parseResult.Message
+		msg.Payload.Mentions = parseResult.Mentions
+		for _, e := range parseResult.Errors {
+			vlog.V2("worker: request_id=%s mentions parse: %s: %s", msg.RequestID, e.Kind, e.Cause)
+		}
+	}
 
 	// Build send request from work message
 	sr := buildSendRequestFromWork(msg)

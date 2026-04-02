@@ -3,6 +3,9 @@ package cmd
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"strings"
 	"testing"
@@ -843,6 +846,206 @@ queue:
 	}
 	if !strings.Contains(err.Error(), "--mentions must be a JSON array") {
 		t.Errorf("expected '--mentions must be a JSON array' error, got: %v", err)
+	}
+}
+
+// mockLookupServer creates a test HTTP server that responds to user-by-email lookups.
+func mockLookupServer(users map[string]struct{ huid, name string }) *httptest.Server {
+	mux := http.NewServeMux()
+	mux.HandleFunc("GET /api/v3/botx/users/by_email", func(w http.ResponseWriter, r *http.Request) {
+		auth := r.Header.Get("Authorization")
+		if auth != "Bearer test-token" {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		email := r.URL.Query().Get("email")
+		u, ok := users[email]
+		if !ok {
+			w.WriteHeader(http.StatusNotFound)
+			fmt.Fprintf(w, `{"status":"error","reason":"not_found"}`)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprintf(w, `{"status":"ok","result":{"user_huid":%q,"name":%q,"emails":[%q],"active":true}}`, u.huid, u.name, email)
+	})
+	return httptest.NewServer(mux)
+}
+
+func TestEnqueue_InlineMentionEmail_DeferredToWorker(t *testing.T) {
+	testFakeQueue.Reset()
+
+	cfgPath := writeTestConfig(t, `
+queue:
+  driver: testfake
+  url: fake://localhost
+  name: test-work
+`)
+	deps, stdout, _ := testDeps()
+	deps.IsTerminal = true
+
+	err := runEnqueue([]string{
+		"--config", cfgPath,
+		"--host", "http://unused.local",
+		"--token", "test-token",
+		"--bot-id", "00000000-0000-0000-0000-000000000b01",
+		"--chat-id", "00000000-0000-0000-0000-000000000c01",
+		"--routing-mode", "direct",
+		"Hello @mention[email:user@example.com]!",
+	}, deps)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	out := strings.TrimSpace(stdout.String())
+	if len(out) != 36 {
+		t.Errorf("expected UUID request_id, got %q", out)
+	}
+
+	msgs := testFakeQueue.WorkMessages()
+	if len(msgs) != 1 {
+		t.Fatalf("expected 1 work message, got %d", len(msgs))
+	}
+	msg := msgs[0]
+
+	// Message should be passed through unchanged — parsing is deferred to the worker
+	if msg.Payload.Message != "Hello @mention[email:user@example.com]!" {
+		t.Errorf("Message = %q, want raw passthrough", msg.Payload.Message)
+	}
+
+	// No mentions should be generated at enqueue time
+	if len(msg.Payload.Mentions) > 0 {
+		t.Errorf("expected no mentions at enqueue time, got %s", string(msg.Payload.Mentions))
+	}
+
+	// NoParse should be false (parsing will happen on worker)
+	if msg.Payload.Opts.NoParse {
+		t.Error("NoParse should be false")
+	}
+}
+
+func TestEnqueue_RawAndInlineMentionsDeferredToWorker(t *testing.T) {
+	testFakeQueue.Reset()
+
+	cfgPath := writeTestConfig(t, `
+queue:
+  driver: testfake
+  url: fake://localhost
+  name: test-work
+`)
+	deps, _, _ := testDeps()
+	deps.IsTerminal = true
+
+	rawMentions := `[{"mention_id":"raw-1","mention_type":"user","mention_data":{"user_huid":"aaaa","name":"Raw User"}}]`
+	err := runEnqueue([]string{
+		"--config", cfgPath,
+		"--host", "http://unused.local",
+		"--token", "test-token",
+		"--bot-id", "00000000-0000-0000-0000-000000000b01",
+		"--chat-id", "00000000-0000-0000-0000-000000000c01",
+		"--routing-mode", "direct",
+		"--mentions", rawMentions,
+		"@{mention:raw-1} and @mention[email:user@example.com]",
+	}, deps)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	msgs := testFakeQueue.WorkMessages()
+	if len(msgs) != 1 {
+		t.Fatalf("expected 1 work message, got %d", len(msgs))
+	}
+
+	msg := msgs[0]
+	if msg.Payload.Message != "@{mention:raw-1} and @mention[email:user@example.com]" {
+		t.Errorf("Message = %q, want raw passthrough", msg.Payload.Message)
+	}
+	if string(msg.Payload.Mentions) != rawMentions {
+		t.Errorf("Mentions = %s, want %s", string(msg.Payload.Mentions), rawMentions)
+	}
+	if msg.Payload.Opts.NoParse {
+		t.Error("NoParse should be false so worker can parse inline mentions")
+	}
+}
+
+func TestEnqueue_NoParse(t *testing.T) {
+	testFakeQueue.Reset()
+
+	cfgPath := writeTestConfig(t, `
+queue:
+  driver: testfake
+  url: fake://localhost
+  name: test-work
+`)
+	deps, _, _ := testDeps()
+	deps.IsTerminal = true
+
+	err := runEnqueue([]string{
+		"--config", cfgPath,
+		"--bot-id", "00000000-0000-0000-0000-000000000b01",
+		"--chat-id", "00000000-0000-0000-0000-000000000c01",
+		"--routing-mode", "direct",
+		"--no-parse",
+		"Hello @mention[email:user@example.com]!",
+	}, deps)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	msgs := testFakeQueue.WorkMessages()
+	if len(msgs) != 1 {
+		t.Fatalf("expected 1 work message, got %d", len(msgs))
+	}
+
+	// With --no-parse, the token should remain as-is
+	if !strings.Contains(msgs[0].Payload.Message, "@mention[email:user@example.com]") {
+		t.Errorf("Message should contain original token with --no-parse: %q", msgs[0].Payload.Message)
+	}
+	// No mentions should be generated
+	if len(msgs[0].Payload.Mentions) > 0 {
+		t.Errorf("expected no mentions with --no-parse, got: %s", string(msgs[0].Payload.Mentions))
+	}
+}
+
+func TestEnqueue_ParseErrorDoesNotFail(t *testing.T) {
+	testFakeQueue.Reset()
+
+	srv := mockLookupServer(nil) // no users -> lookup will fail
+	defer srv.Close()
+
+	cfgPath := writeTestConfig(t, `
+queue:
+  driver: testfake
+  url: fake://localhost
+  name: test-work
+`)
+	deps, _, _ := testDeps()
+	deps.IsTerminal = true
+
+	// Use an email that won't resolve and a malformed token
+	err := runEnqueue([]string{
+		"--config", cfgPath,
+		"--host", srv.URL,
+		"--token", "test-token",
+		"--bot-id", "00000000-0000-0000-0000-000000000b01",
+		"--chat-id", "00000000-0000-0000-0000-000000000c01",
+		"--routing-mode", "direct",
+		"Hello @mention[email:nobody@example.com] and @mention[bad syntax",
+	}, deps)
+	if err != nil {
+		t.Fatalf("parse/lookup error should not fail the command, got: %v", err)
+	}
+
+	msgs := testFakeQueue.WorkMessages()
+	if len(msgs) != 1 {
+		t.Fatalf("expected 1 work message, got %d", len(msgs))
+	}
+
+	// Tokens with errors should remain as literal text
+	if !strings.Contains(msgs[0].Payload.Message, "@mention[email:nobody@example.com]") {
+		t.Errorf("failed lookup token should stay as literal text: %q", msgs[0].Payload.Message)
+	}
+	if !strings.Contains(msgs[0].Payload.Message, "@mention[bad syntax") {
+		t.Errorf("parse error token should stay as literal text: %q", msgs[0].Payload.Message)
 	}
 }
 

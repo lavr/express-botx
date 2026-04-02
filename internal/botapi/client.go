@@ -9,6 +9,7 @@ import (
 	"io"
 	"mime"
 	"net/http"
+	"net/url"
 	"path/filepath"
 	"strings"
 	"time"
@@ -126,17 +127,17 @@ type userByHUIDResponse struct {
 
 // GetUserByHUID fetches user info by HUID.
 func (c *Client) GetUserByHUID(ctx context.Context, huid string) (*UserInfo, error) {
-	return c.getUser(ctx, "/api/v3/botx/users/by_huid?user_huid="+huid)
+	return c.getUser(ctx, "/api/v3/botx/users/by_huid?user_huid="+url.QueryEscape(huid))
 }
 
 // GetUserByEmail fetches user info by email.
 func (c *Client) GetUserByEmail(ctx context.Context, email string) (*UserInfo, error) {
-	return c.getUser(ctx, "/api/v3/botx/users/by_email?email="+email)
+	return c.getUser(ctx, "/api/v3/botx/users/by_email?email="+url.QueryEscape(email))
 }
 
 // GetUserByADLogin fetches user info by AD login and domain.
 func (c *Client) GetUserByADLogin(ctx context.Context, login, domain string) (*UserInfo, error) {
-	return c.getUser(ctx, "/api/v3/botx/users/by_login?ad_login="+login+"&ad_domain="+domain)
+	return c.getUser(ctx, "/api/v3/botx/users/by_login?ad_login="+url.QueryEscape(login)+"&ad_domain="+url.QueryEscape(domain))
 }
 
 func (c *Client) getUser(ctx context.Context, path string) (*UserInfo, error) {
@@ -157,6 +158,10 @@ func (c *Client) getUser(ctx context.Context, path string) (*UserInfo, error) {
 	defer resp.Body.Close() //nolint:errcheck // best-effort close
 	elapsed := time.Since(start)
 
+	if resp.StatusCode == http.StatusUnauthorized {
+		vlog.V1("user: <- 401 Unauthorized (%dms)", elapsed.Milliseconds())
+		return nil, ErrUnauthorized
+	}
 	if resp.StatusCode != http.StatusOK {
 		respBody, _ := io.ReadAll(resp.Body)
 		vlog.V1("user: <- %d (%dms)", resp.StatusCode, elapsed.Milliseconds())

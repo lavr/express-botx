@@ -16,6 +16,7 @@ import (
 	"github.com/lavr/express-botx/internal/config"
 	"github.com/lavr/express-botx/internal/errtrack"
 	vlog "github.com/lavr/express-botx/internal/log"
+	"github.com/lavr/express-botx/internal/mentions"
 )
 
 // ResolvedKey is an API key with its secret resolved.
@@ -55,6 +56,8 @@ type Server struct {
 	chatEntries          []config.ChatEntry // for GET /chats/alias/list
 	amCfg                *AlertmanagerConfig
 	grCfg                *GrafanaConfig
+	mentionsResolver     mentions.UserResolver
+	botMentionsResolvers map[string]mentions.UserResolver // per-bot resolvers for multi-host setups
 	callbackRouter       *CallbackRouter
 	callbacksCfg         *config.CallbacksConfig
 	callbackSecretLookup func(botID string) (string, error)
@@ -104,6 +107,24 @@ func WithAPM(p apm.Provider) Option {
 func WithErrTracker(t errtrack.Tracker) Option {
 	return func(s *Server) {
 		s.errTracker = t
+	}
+}
+
+// WithMentionsResolver sets the user resolver used by the inline mentions
+// parser. When nil, email mentions will produce lookup errors but the message
+// will still be sent.
+func WithMentionsResolver(r mentions.UserResolver) Option {
+	return func(s *Server) {
+		s.mentionsResolver = r
+	}
+}
+
+// WithBotMentionsResolvers sets per-bot user resolvers for multi-bot setups
+// where bots may reside on different eXpress hosts. When the request specifies
+// a bot name, the corresponding resolver is used instead of the default one.
+func WithBotMentionsResolvers(m map[string]mentions.UserResolver) Option {
+	return func(s *Server) {
+		s.botMentionsResolvers = m
 	}
 }
 
