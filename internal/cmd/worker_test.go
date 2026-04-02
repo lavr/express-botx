@@ -656,6 +656,87 @@ func TestWorker_HandleMessage_WithFileAttachment(t *testing.T) {
 	}
 }
 
+func TestWorker_HandleMessage_WithMentions(t *testing.T) {
+	mock := newMockBotxAPI()
+	botxSrv := httptest.NewServer(mock.handler())
+	defer botxSrv.Close()
+
+	fakeQ := queue.NewFake()
+
+	cfg := &config.Config{
+		Bots: map[string]config.BotConfig{
+			"alerts": {
+				Host:   botxSrv.URL,
+				ID:     "bot-uuid-mentions",
+				Secret: "test-secret",
+			},
+		},
+		Cache: config.CacheConfig{Type: "none"},
+	}
+
+	w, err := newWorkerRunner(cfg, fakeQ, apm.New(), false)
+	if err != nil {
+		t.Fatalf("newWorkerRunner: %v", err)
+	}
+
+	mentions := json.RawMessage(`[{"mention_id":"aaa-bbb","mention_type":"user","mention_data":{"user_huid":"xxx","name":"Иван"}}]`)
+
+	msg := &queue.WorkMessage{
+		RequestID: "req-mentions",
+		Routing: queue.Routing{
+			BotID:  "bot-uuid-mentions",
+			ChatID: "chat-uuid-001",
+		},
+		Payload: queue.Payload{
+			Message:  "@{mention:aaa-bbb} Привет!",
+			Status:   "ok",
+			Mentions: mentions,
+		},
+		ReplyTo:    "test-replies",
+		EnqueuedAt: time.Now().UTC(),
+	}
+
+	err = w.handleMessage(context.Background(), msg)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// Verify BotX API was called with mentions
+	calls := mock.getCalls()
+	if len(calls) != 1 {
+		t.Fatalf("expected 1 BotX API call, got %d", len(calls))
+	}
+	if calls[0].Notification == nil {
+		t.Fatal("expected notification to be set")
+	}
+	if calls[0].Notification.Body != "@{mention:aaa-bbb} Привет!" {
+		t.Errorf("Body = %q, want %q", calls[0].Notification.Body, "@{mention:aaa-bbb} Привет!")
+	}
+	if calls[0].Notification.Mentions == nil {
+		t.Fatal("expected mentions in BotX API request")
+	}
+
+	var gotMentions []map[string]interface{}
+	if err := json.Unmarshal(calls[0].Notification.Mentions, &gotMentions); err != nil {
+		t.Fatalf("failed to unmarshal mentions: %v", err)
+	}
+	if len(gotMentions) != 1 {
+		t.Fatalf("expected 1 mention, got %d", len(gotMentions))
+	}
+	if gotMentions[0]["mention_id"] != "aaa-bbb" {
+		t.Errorf("mention_id = %v, want %q", gotMentions[0]["mention_id"], "aaa-bbb")
+	}
+
+	// Verify result was published
+	results := fakeQ.Results("test-replies")
+	if len(results) != 1 {
+		t.Fatalf("expected 1 result, got %d", len(results))
+	}
+	if results[0].Status != "sent" {
+		t.Errorf("Status = %q, want %q", results[0].Status, "sent")
+	}
+}
+
 func TestWorker_HandleMessage_DryRun(t *testing.T) {
 	mock := newMockBotxAPI()
 	botxSrv := httptest.NewServer(mock.handler())

@@ -15,6 +15,7 @@ import (
 
 	"github.com/lavr/express-botx/internal/botapi"
 	"github.com/lavr/express-botx/internal/config"
+	"github.com/lavr/express-botx/internal/queue"
 	"github.com/lavr/express-botx/internal/server"
 )
 
@@ -32,6 +33,7 @@ type capturedSend struct {
 		Status   string          `json:"status"`
 		Body     string          `json:"body"`
 		Metadata json.RawMessage `json:"metadata,omitempty"`
+		Mentions json.RawMessage `json:"mentions,omitempty"`
 	} `json:"notification,omitempty"`
 	File *struct {
 		FileName string `json:"file_name"`
@@ -821,6 +823,61 @@ func TestBotSender_NilCache(t *testing.T) {
 	}
 	if calls[0].Notification == nil || calls[0].Notification.Body != "nil cache test" {
 		t.Errorf("unexpected notification: %+v", calls[0].Notification)
+	}
+}
+
+// TestBuildSendRequest_SyncPathMentions verifies that mentions from
+// server.SendPayload are preserved in the BotX SendRequest (sync path).
+func TestBuildSendRequest_SyncPathMentions(t *testing.T) {
+	mentions := json.RawMessage(`[{"mention_id":"aaa","mention_type":"user","mention_data":{"user_huid":"xxx"}}]`)
+	payload := &server.SendPayload{
+		ChatID:   "chat-001",
+		Message:  "@{mention:aaa} hello",
+		Mentions: mentions,
+	}
+
+	sr := buildSendRequest(payload)
+
+	if sr.Notification == nil {
+		t.Fatal("expected notification to be set")
+	}
+	if string(sr.Notification.Mentions) != string(mentions) {
+		t.Errorf("Mentions = %s, want %s", sr.Notification.Mentions, mentions)
+	}
+	if sr.Notification.Body != "@{mention:aaa} hello" {
+		t.Errorf("Body = %q, want %q", sr.Notification.Body, "@{mention:aaa} hello")
+	}
+}
+
+// TestBuildSendRequest_AsyncPathMentions verifies that mentions survive
+// the full async pipeline: SendPayload -> queue.WorkMessage -> buildSendRequestFromWork.
+func TestBuildSendRequest_AsyncPathMentions(t *testing.T) {
+	mentions := json.RawMessage(`[{"mention_id":"bbb","mention_type":"contact","mention_data":{"user_huid":"yyy"}}]`)
+
+	// Simulate what runServeEnqueue does: build WorkMessage from SendPayload
+	msg := &queue.WorkMessage{
+		RequestID: "req-async-mentions",
+		Routing: queue.Routing{
+			BotID:  "bot-001",
+			ChatID: "chat-001",
+		},
+		Payload: queue.Payload{
+			Message:  "@{mention:bbb} привет",
+			Status:   "ok",
+			Mentions: mentions,
+		},
+	}
+
+	sr := buildSendRequestFromWork(msg)
+
+	if sr.Notification == nil {
+		t.Fatal("expected notification to be set")
+	}
+	if string(sr.Notification.Mentions) != string(mentions) {
+		t.Errorf("Mentions = %s, want %s", sr.Notification.Mentions, mentions)
+	}
+	if sr.Notification.Body != "@{mention:bbb} привет" {
+		t.Errorf("Body = %q, want %q", sr.Notification.Body, "@{mention:bbb} привет")
 	}
 }
 

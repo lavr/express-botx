@@ -746,6 +746,106 @@ catalog:
 	}
 }
 
+func TestEnqueue_WithMentions(t *testing.T) {
+	testFakeQueue.Reset()
+
+	cfgPath := writeTestConfig(t, `
+queue:
+  driver: testfake
+  url: fake://localhost
+  name: test-work
+`)
+	deps, stdout, _ := testDeps()
+	deps.IsTerminal = true
+
+	mentions := `[{"mention_id":"aaa-bbb","mention_type":"user","mention_data":{"user_huid":"xxx","name":"Ivan"}}]`
+	err := runEnqueue([]string{
+		"--config", cfgPath,
+		"--bot-id", "00000000-0000-0000-0000-000000000b01",
+		"--chat-id", "00000000-0000-0000-0000-000000000c01",
+		"--routing-mode", "direct",
+		"--mentions", mentions,
+		"@{mention:aaa-bbb} hello",
+	}, deps)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	out := strings.TrimSpace(stdout.String())
+	if len(out) != 36 {
+		t.Errorf("expected UUID request_id, got %q", out)
+	}
+
+	msgs := testFakeQueue.WorkMessages()
+	if len(msgs) != 1 {
+		t.Fatalf("expected 1 work message, got %d", len(msgs))
+	}
+
+	msg := msgs[0]
+	if msg.Payload.Message != "@{mention:aaa-bbb} hello" {
+		t.Errorf("Message = %q, want %q", msg.Payload.Message, "@{mention:aaa-bbb} hello")
+	}
+	if string(msg.Payload.Mentions) != mentions {
+		t.Errorf("Mentions = %s, want %s", string(msg.Payload.Mentions), mentions)
+	}
+}
+
+func TestEnqueue_MentionsInvalidJSON(t *testing.T) {
+	testFakeQueue.Reset()
+
+	cfgPath := writeTestConfig(t, `
+queue:
+  driver: testfake
+  url: fake://localhost
+  name: test-work
+`)
+	deps, _, _ := testDeps()
+	deps.IsTerminal = true
+
+	err := runEnqueue([]string{
+		"--config", cfgPath,
+		"--bot-id", "00000000-0000-0000-0000-000000000b01",
+		"--chat-id", "00000000-0000-0000-0000-000000000c01",
+		"--routing-mode", "direct",
+		"--mentions", `{not valid json`,
+		"hello",
+	}, deps)
+	if err == nil {
+		t.Fatal("expected error for invalid JSON")
+	}
+	if !strings.Contains(err.Error(), "--mentions is not valid JSON") {
+		t.Errorf("expected '--mentions is not valid JSON' error, got: %v", err)
+	}
+}
+
+func TestEnqueue_MentionsNotArray(t *testing.T) {
+	testFakeQueue.Reset()
+
+	cfgPath := writeTestConfig(t, `
+queue:
+  driver: testfake
+  url: fake://localhost
+  name: test-work
+`)
+	deps, _, _ := testDeps()
+	deps.IsTerminal = true
+
+	err := runEnqueue([]string{
+		"--config", cfgPath,
+		"--bot-id", "00000000-0000-0000-0000-000000000b01",
+		"--chat-id", "00000000-0000-0000-0000-000000000c01",
+		"--routing-mode", "direct",
+		"--mentions", `{"mention_id":"aaa"}`,
+		"hello",
+	}, deps)
+	if err == nil {
+		t.Fatal("expected error for non-array JSON")
+	}
+	if !strings.Contains(err.Error(), "--mentions must be a JSON array") {
+		t.Errorf("expected '--mentions must be a JSON array' error, got: %v", err)
+	}
+}
+
 func TestEnqueue_NoMessage_Error(t *testing.T) {
 	cfgPath := writeTestConfig(t, `
 queue:

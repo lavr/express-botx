@@ -141,6 +141,17 @@ paths:
                   chat_id: ops-alerts
                   message: "Build #42 failed"
                   status: error
+              mentions:
+                summary: Message with mentions
+                value:
+                  chat_id: "1a2b3c4d-5e6f-7890-abcd-ef1234567890"
+                  message: "@{mention:aaa-bbb} Deploy completed"
+                  mentions:
+                    - mention_id: aaa-bbb
+                      mention_type: user
+                      mention_data:
+                        user_huid: "f16cdc5f-6366-5552-9ecd-c36290ab3d11"
+                        name: "Иван"
               file:
                 summary: Message with file
                 value:
@@ -172,6 +183,9 @@ paths:
                 metadata:
                   type: string
                   description: Arbitrary JSON string
+                mentions:
+                  type: string
+                  description: JSON string containing an array of mentions in BotX API wire format
       responses:
         "200":
           description: Message sent
@@ -555,6 +569,24 @@ components:
         metadata:
           type: object
           description: Arbitrary JSON passed to notification.metadata
+        mentions:
+          type: array
+          description: |
+            Array of mentions in BotX API wire format. The message text must already contain
+            the correct placeholders (@{mention:...}, @@{mention:...}, ##{mention:...}).
+            Passed through to BotX API without modification.
+          items:
+            type: object
+            properties:
+              mention_id:
+                type: string
+                description: Unique mention identifier referenced in message placeholders
+              mention_type:
+                type: string
+                description: "Type of mention: user, contact, chat, channel, all"
+              mention_data:
+                type: object
+                description: Mention-specific data (user_huid, name, etc.)
 
     FilePayload:
       type: object

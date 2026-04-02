@@ -11,3 +11,7 @@ examples/**/.env
 
 # ralphex progress logs
 .ralphex/worktrees/
+
+docs/express-api/
+docs/rfc/
+docs/plans/

@@ -1,6 +1,7 @@
 package server
 
 import (
+	"bytes"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
@@ -27,6 +28,7 @@ type SendPayload struct {
 	Status      string          `json:"status"`
 	Opts        *OptsPayload    `json:"opts,omitempty"`
 	Metadata    json.RawMessage `json:"metadata,omitempty"`
+	Mentions    json.RawMessage `json:"mentions,omitempty"`
 	RoutingMode string          `json:"routing_mode,omitempty"` // async mode: direct, catalog, mixed
 	BotID       string          `json:"bot_id,omitempty"`       // async mode: bot UUID for direct routing
 }
@@ -71,6 +73,14 @@ func (s *Server) handleSend(w http.ResponseWriter, r *http.Request) {
 	}
 	if err != nil {
 		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	if string(payload.Mentions) == "null" {
+		payload.Mentions = nil
+	}
+	if len(payload.Mentions) > 0 && payload.Mentions[0] != '[' {
+		writeError(w, http.StatusBadRequest, "mentions must be a JSON array")
 		return
 	}
 
@@ -238,6 +248,18 @@ func parseMultipart(r *http.Request, p *SendPayload) error {
 			return fmt.Errorf("invalid metadata JSON")
 		}
 		p.Metadata = raw
+	}
+
+	if mentionsStr := r.FormValue("mentions"); mentionsStr != "" {
+		raw := json.RawMessage(mentionsStr)
+		if !json.Valid(raw) {
+			return fmt.Errorf("invalid mentions JSON")
+		}
+		trimmed := bytes.TrimSpace(raw)
+		if len(trimmed) == 0 || trimmed[0] != '[' {
+			return fmt.Errorf("mentions must be a JSON array")
+		}
+		p.Mentions = raw
 	}
 
 	file, header, err := r.FormFile("file")

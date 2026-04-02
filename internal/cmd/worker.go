@@ -388,6 +388,7 @@ func buildSendRequestFromWork(msg *queue.WorkMessage) *botapi.SendRequest {
 		Message:  msg.Payload.Message,
 		Status:   msg.Payload.Status,
 		Metadata: msg.Payload.Metadata,
+		Mentions: msg.Payload.Mentions,
 		Silent:   msg.Payload.Opts.Silent,
 		Stealth:  msg.Payload.Opts.Stealth,
 		ForceDND: msg.Payload.Opts.ForceDND,

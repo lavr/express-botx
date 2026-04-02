@@ -74,7 +74,7 @@ func (c *Client) ListChats(ctx context.Context) ([]ChatInfo, error) {
 	if err != nil {
 		return nil, fmt.Errorf("listing chats: %w", err)
 	}
-	defer resp.Body.Close()
+	defer resp.Body.Close() //nolint:errcheck // best-effort close
 	elapsed := time.Since(start)
 
 	if resp.StatusCode != http.StatusOK {
@@ -154,7 +154,7 @@ func (c *Client) getUser(ctx context.Context, path string) (*UserInfo, error) {
 	if err != nil {
 		return nil, fmt.Errorf("getting user: %w", err)
 	}
-	defer resp.Body.Close()
+	defer resp.Body.Close() //nolint:errcheck // best-effort close
 	elapsed := time.Since(start)
 
 	if resp.StatusCode != http.StatusOK {
@@ -185,6 +185,7 @@ type SendNotification struct {
 	Status   string               `json:"status"`
 	Body     string               `json:"body"`
 	Metadata json.RawMessage      `json:"metadata,omitempty"`
+	Mentions json.RawMessage      `json:"mentions,omitempty"`
 	Opts     *NotificationMsgOpts `json:"opts,omitempty"`
 }
 
@@ -220,6 +221,7 @@ type SendParams struct {
 	Status   string // "ok" or "error"
 	File     *SendFile
 	Metadata json.RawMessage
+	Mentions json.RawMessage
 	Silent   bool
 	Stealth  bool
 	ForceDND bool
@@ -237,6 +239,7 @@ func BuildSendRequest(p *SendParams) *SendRequest {
 			Status:   p.Status,
 			Body:     p.Message,
 			Metadata: p.Metadata,
+			Mentions: p.Mentions,
 		}
 		if p.Silent {
 			sr.Notification.Opts = &NotificationMsgOpts{
@@ -262,11 +265,17 @@ func BuildSendRequest(p *SendParams) *SendRequest {
 		}
 	}
 
-	// File-only with metadata: still need a notification for metadata
-	if sr.Notification == nil && len(p.Metadata) > 0 {
+	// File-only with metadata/mentions: still need a notification to carry them
+	if sr.Notification == nil && (len(p.Metadata) > 0 || len(p.Mentions) > 0) {
 		sr.Notification = &SendNotification{
 			Status:   p.Status,
 			Metadata: p.Metadata,
+			Mentions: p.Mentions,
+		}
+		if p.Silent {
+			sr.Notification.Opts = &NotificationMsgOpts{
+				SilentResponse: true,
+			}
 		}
 	}
 
@@ -313,7 +322,7 @@ func (c *Client) SendWithSyncID(ctx context.Context, sr *SendRequest) (string, e
 	if err != nil {
 		return "", fmt.Errorf("sending: %w", err)
 	}
-	defer resp.Body.Close()
+	defer resp.Body.Close() //nolint:errcheck // best-effort close
 	elapsed := time.Since(start)
 
 	if resp.StatusCode == http.StatusUnauthorized {
