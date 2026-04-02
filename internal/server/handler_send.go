@@ -13,6 +13,7 @@ import (
 	"time"
 
 	vlog "github.com/lavr/express-botx/internal/log"
+	"github.com/lavr/express-botx/internal/mentions"
 )
 
 var uuidRe = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$`)
@@ -31,6 +32,7 @@ type SendPayload struct {
 	Mentions    json.RawMessage `json:"mentions,omitempty"`
 	RoutingMode string          `json:"routing_mode,omitempty"` // async mode: direct, catalog, mixed
 	BotID       string          `json:"bot_id,omitempty"`       // async mode: bot UUID for direct routing
+	NoParse     bool            `json:"-"`                      // internal: skip mentions parsing (set by handler for async mode)
 }
 
 // FilePayload represents a file attachment in the JSON request.
@@ -104,7 +106,14 @@ func (s *Server) handleSend(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Inline mentions parsing: enabled by default, disabled with ?no_parse=true.
+	noParse := r.URL.Query().Get("no_parse") == "true"
+
 	if s.cfg.AsyncMode {
+		// Async mode: defer mentions parsing to the send function, which runs
+		// after catalog routing resolves the actual target bot. This ensures
+		// email lookups hit the correct eXpress host in multi-bot setups.
+		payload.NoParse = noParse
 		// Async mode: for direct routing, bot_id is required.
 		// For catalog/mixed modes, bot_id or bot alias can be used.
 		rm := payload.RoutingMode
@@ -196,6 +205,21 @@ func (s *Server) handleSend(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	payload.Bot = resolvedBot
+
+	// Parse mentions after bot resolution so the correct per-bot resolver is used
+	// when the bot was derived from chat binding rather than the request payload.
+	resolver := s.mentionsResolver
+	if payload.Bot != "" && s.botMentionsResolvers != nil {
+		if br, ok := s.botMentionsResolvers[payload.Bot]; ok {
+			resolver = br
+		}
+	}
+	parseResult := mentions.Parse(r.Context(), payload.Message, payload.Mentions, !noParse, resolver)
+	payload.Message = parseResult.Message
+	payload.Mentions = parseResult.Mentions
+	if len(parseResult.Errors) > 0 {
+		vlog.V2("server: mentions parse: %d error(s)", len(parseResult.Errors))
+	}
 
 	start := time.Now()
 	syncID, err := s.send(r.Context(), &payload)

@@ -34,7 +34,8 @@ func runEnqueue(args []string, deps Deps) error {
 	var forceDND bool
 	var noNotify bool
 	var metadata string
-	var mentions string
+	var mentionsFlag string
+	var noParse bool
 
 	globalFlags(fs, &flags)
 	fs.StringVar(&flags.ChatID, "chat-id", "", "target chat UUID or alias")
@@ -48,7 +49,8 @@ func runEnqueue(args []string, deps Deps) error {
 	fs.BoolVar(&forceDND, "force-dnd", false, "deliver even if recipient has DND")
 	fs.BoolVar(&noNotify, "no-notify", false, "do not send notification at all")
 	fs.StringVar(&metadata, "metadata", "", "arbitrary JSON for notification.metadata")
-	fs.StringVar(&mentions, "mentions", "", "JSON array of mentions in BotX API wire format")
+	fs.StringVar(&mentionsFlag, "mentions", "", "JSON array of mentions in BotX API wire format")
+	fs.BoolVar(&noParse, "no-parse", false, "disable inline @mention[...] parsing")
 	fs.Usage = func() {
 		fmt.Fprintf(deps.Stderr, `Usage: express-botx enqueue [options] [message]
 
@@ -236,8 +238,8 @@ Options:
 
 	// Validate mentions
 	var ment json.RawMessage
-	if mentions != "" {
-		raw := json.RawMessage(mentions)
+	if mentionsFlag != "" {
+		raw := json.RawMessage(mentionsFlag)
 		if !json.Valid(raw) {
 			return fmt.Errorf("--mentions is not valid JSON")
 		}
@@ -278,6 +280,7 @@ Options:
 				Stealth:  stealth,
 				ForceDND: forceDND,
 				NoNotify: noNotify,
+				NoParse:  noParse,
 			},
 		},
 		ReplyTo:    cfg.Queue.ReplyQueue,

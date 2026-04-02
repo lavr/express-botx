@@ -15,6 +15,7 @@ import (
 
 	"github.com/lavr/express-botx/internal/botapi"
 	"github.com/lavr/express-botx/internal/config"
+	"github.com/lavr/express-botx/internal/mentions"
 	"github.com/lavr/express-botx/internal/queue"
 	"github.com/lavr/express-botx/internal/server"
 )
@@ -25,6 +26,7 @@ type mockBotxAPI struct {
 	mu       sync.Mutex
 	calls    []capturedSend // captured /notifications/direct calls
 	tokenVal string         // token to return
+	users    map[string]struct{ huid, name string } // email -> user info for lookup
 }
 
 type capturedSend struct {
@@ -55,6 +57,29 @@ func (m *mockBotxAPI) handler() http.Handler {
 			"status": "ok",
 			"result": m.tokenVal,
 		})
+	})
+
+	// User lookup endpoint: GET /api/v3/botx/users/by_email
+	mux.HandleFunc("GET /api/v3/botx/users/by_email", func(w http.ResponseWriter, r *http.Request) {
+		auth := r.Header.Get("Authorization")
+		if auth != "Bearer "+m.tokenVal {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		email := r.URL.Query().Get("email")
+		if m.users == nil {
+			w.WriteHeader(http.StatusNotFound)
+			fmt.Fprintf(w, `{"status":"error","reason":"not_found"}`)
+			return
+		}
+		u, ok := m.users[email]
+		if !ok {
+			w.WriteHeader(http.StatusNotFound)
+			fmt.Fprintf(w, `{"status":"error","reason":"not_found"}`)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprintf(w, `{"status":"ok","result":{"user_huid":%q,"name":%q,"emails":[%q],"active":true}}`, u.huid, u.name, email)
 	})
 
 	// Send endpoint: POST /api/v4/botx/notifications/direct
@@ -878,6 +903,155 @@ func TestBuildSendRequest_AsyncPathMentions(t *testing.T) {
 	}
 	if sr.Notification.Body != "@{mention:bbb} привет" {
 		t.Errorf("Body = %q, want %q", sr.Notification.Body, "@{mention:bbb} привет")
+	}
+}
+
+// testUserResolver is a simple mentions.UserResolver for tests.
+type testUserResolver struct {
+	users map[string]struct{ huid, name string }
+}
+
+func (r *testUserResolver) GetUserByEmail(_ context.Context, email string) (string, string, error) {
+	u, ok := r.users[email]
+	if !ok {
+		return "", "", fmt.Errorf("user not found: %s", email)
+	}
+	return u.huid, u.name, nil
+}
+
+func TestServeIntegration_SyncPath_InlineMentionNormalized(t *testing.T) {
+	mock := newMockBotxAPI()
+	mock.users = map[string]struct{ huid, name string }{
+		"alice@example.com": {huid: "aaaa1111-1111-1111-1111-111111111111", name: "Alice"},
+	}
+	botxSrv := httptest.NewServer(mock.handler())
+	defer botxSrv.Close()
+
+	port := freePort(t)
+	listenAddr := fmt.Sprintf("127.0.0.1:%d", port)
+
+	cfgPath := writeTestConfig(t, fmt.Sprintf(`
+bots:
+  main:
+    host: %s
+    id: bot-001
+    secret: secret-001
+server:
+  listen: "%s"
+  api_keys:
+    - name: test
+      key: test-key
+`, botxSrv.URL, listenAddr))
+
+	startServe(t, []string{"--config", cfgPath, "--listen", listenAddr, "--no-cache"})
+	baseURL := fmt.Sprintf("http://%s/api/v1", listenAddr)
+
+	code, resp := doPost(t, baseURL+"/send", "test-key",
+		`{"chat_id":"c0000000-0000-0000-0000-000000000001","message":"Hi @mention[email:alice@example.com]!"}`)
+	if code != 200 {
+		t.Fatalf("expected 200, got %d: %v", code, resp)
+	}
+
+	calls := mock.getCalls()
+	if len(calls) != 1 {
+		t.Fatalf("expected 1 BotX API call, got %d", len(calls))
+	}
+
+	call := calls[0]
+	if call.Notification == nil {
+		t.Fatal("expected notification in BotX call")
+	}
+	// Body should have BotX placeholder, not inline token
+	if strings.Contains(call.Notification.Body, "@mention[") {
+		t.Errorf("BotX body still contains inline token: %q", call.Notification.Body)
+	}
+	if !strings.Contains(call.Notification.Body, "@{mention:") {
+		t.Errorf("BotX body missing placeholder: %q", call.Notification.Body)
+	}
+	// Mentions array should contain the parsed mention with correct user_huid
+	if call.Notification.Mentions == nil {
+		t.Fatal("expected mentions in BotX call")
+	}
+	var mentions []map[string]interface{}
+	if err := json.Unmarshal(call.Notification.Mentions, &mentions); err != nil {
+		t.Fatalf("failed to unmarshal mentions: %v", err)
+	}
+	if len(mentions) != 1 {
+		t.Fatalf("expected 1 mention, got %d", len(mentions))
+	}
+	data, _ := mentions[0]["mention_data"].(map[string]interface{})
+	if data == nil || data["user_huid"] != "aaaa1111-1111-1111-1111-111111111111" {
+		t.Errorf("expected user_huid 'aaaa1111-...', got %v", data)
+	}
+}
+
+func TestAsyncPath_InlineMentionNormalized(t *testing.T) {
+	// Simulate the async pipeline: parse -> enqueue -> worker builds BotX request.
+	// This verifies normalized data survives queue serialization.
+	resolver := &testUserResolver{users: map[string]struct{ huid, name string }{
+		"bob@example.com": {huid: "bbbb2222-2222-2222-2222-222222222222", name: "Bob"},
+	}}
+
+	// Step 1: Parse inline mentions (as handler_send.go:110 does)
+	parseResult := mentions.Parse(context.Background(),
+		"Hi @mention[email:bob@example.com]!", nil, true, resolver)
+
+	// Verify parser output before enqueue
+	if strings.Contains(parseResult.Message, "@mention[") {
+		t.Fatalf("parser should have replaced inline token: %q", parseResult.Message)
+	}
+	if !strings.Contains(parseResult.Message, "@{mention:") {
+		t.Fatalf("parser should have inserted BotX placeholder: %q", parseResult.Message)
+	}
+
+	// Step 2: Build WorkMessage (as sendFn does at serve.go:824-828)
+	msg := &queue.WorkMessage{
+		RequestID: "req-async-test",
+		Routing:   queue.Routing{BotID: "bot-001", ChatID: "chat-001"},
+		Payload: queue.Payload{
+			Message:  parseResult.Message,
+			Status:   "ok",
+			Mentions: parseResult.Mentions,
+		},
+		ReplyTo:    "replies",
+		EnqueuedAt: time.Now().UTC(),
+	}
+
+	// Step 3: Simulate queue serialization round-trip
+	data, err := json.Marshal(msg)
+	if err != nil {
+		t.Fatalf("marshal WorkMessage: %v", err)
+	}
+	var restored queue.WorkMessage
+	if err := json.Unmarshal(data, &restored); err != nil {
+		t.Fatalf("unmarshal WorkMessage: %v", err)
+	}
+
+	// Step 4: Build BotX request from restored message (as worker does)
+	sr := buildSendRequestFromWork(&restored)
+
+	// Verify: body has BotX placeholder, not inline token
+	if strings.Contains(sr.Notification.Body, "@mention[") {
+		t.Errorf("BotX body still contains inline token after queue: %q", sr.Notification.Body)
+	}
+	if !strings.Contains(sr.Notification.Body, "@{mention:") {
+		t.Errorf("BotX body missing placeholder after queue: %q", sr.Notification.Body)
+	}
+
+	// Verify: mentions survived queue round-trip
+	if sr.Notification.Mentions == nil {
+		t.Fatal("expected mentions in BotX request after queue")
+	}
+	var m []map[string]interface{}
+	if err := json.Unmarshal(sr.Notification.Mentions, &m); err != nil {
+		t.Fatalf("unmarshal mentions: %v", err)
+	}
+	if len(m) != 1 {
+		t.Fatalf("expected 1 mention after queue, got %d", len(m))
+	}
+	mentionData, _ := m[0]["mention_data"].(map[string]interface{})
+	if mentionData == nil || mentionData["user_huid"] != "bbbb2222-2222-2222-2222-222222222222" {
+		t.Errorf("expected user_huid 'bbbb2222-...', got %v", mentionData)
 	}
 }
 

@@ -68,6 +68,19 @@ express-botx send --file report.pdf "Отчёт за март"
 express-botx send --mentions '[{"mention_id":"aaa-bbb","mention_type":"user","mention_data":{"user_huid":"xxx","name":"Иван"}}]' \
   "@{mention:aaa-bbb} Привет!"
 
+# С inline mentions (автоматический парсинг)
+express-botx send "Привет, @mention[email:user@company.ru]!"
+express-botx send "Задача для @mention[email:user@company.ru;Иван%20Петров]"
+express-botx send "@mention[all] Внимание!"
+express-botx send "Проверь @mention[huid:f16cdc5f-6366-5552-9ecd-c36290ab3d11;Иван]"
+
+# Inline mentions + raw mentions одновременно
+express-botx send --mentions '[{"mention_id":"aaa-bbb","mention_type":"user","mention_data":{"user_huid":"xxx","name":"Иван"}}]' \
+  "@{mention:aaa-bbb} и @mention[email:other@company.ru] — готово"
+
+# Отключить парсинг inline mentions
+express-botx send --no-parse "Текст с @mention[email:...] останется как есть"
+
 # Файл из stdin
 cat image.png | express-botx send --file - --file-name image.png
 
@@ -91,11 +104,31 @@ express-botx send --host express.company.ru --bot-id UUID --secret KEY --chat-id
 --no-notify     не отправлять уведомление вообще
 --metadata      произвольный JSON для notification.metadata
 --mentions      JSON-массив mentions в wire-формате BotX API
+--no-parse      отключить парсинг inline @mention[...] в тексте
 ```
 
 Поле `--mentions` принимает JSON-массив в формате BotX API. Текст сообщения должен уже содержать
 соответствующие placeholder'ы (`@{mention:...}`, `@@{mention:...}`, `##{mention:...}`).
 Если JSON невалиден или не является массивом, команда завершится с ошибкой.
+
+### Inline mentions
+
+По умолчанию parser включён и ищет в тексте сообщения токены `@mention[...]`.
+Поддерживаемый синтаксис:
+
+- `@mention[email:<email>]` — mention по email (выполняется lookup пользователя);
+- `@mention[email:<email>;<display_name>]` — с явным display name (URL-encoded);
+- `@mention[huid:<uuid>]` — mention по HUID (без lookup);
+- `@mention[huid:<uuid>;<display_name>]` — с явным display name;
+- `@mention[all]` — broadcast mention на весь чат.
+
+Parser заменяет найденные токены на BotX placeholder'ы (`@{mention:<id>}`) и добавляет
+соответствующие записи в массив mentions. Если указаны и `--mentions`, и inline токены,
+массивы объединяются: raw mentions остаются без изменений, parsed mentions дописываются в конец.
+
+При ошибке парсинга или lookup токен остаётся в тексте как есть, сообщение всё равно отправляется.
+
+Флаг `--no-parse` отключает парсинг: токены `@mention[...]` остаются в тексте без изменений.
 
 ---
 
@@ -193,6 +226,12 @@ express-botx enqueue --file report.pdf --bot-id UUID --chat-id UUID "Отчёт"
 # С mentions (BotX wire-формат)
 express-botx enqueue --mentions '[{"mention_id":"aaa-bbb","mention_type":"user","mention_data":{"user_huid":"xxx","name":"Иван"}}]' \
   --bot-id UUID --chat-id UUID "@{mention:aaa-bbb} Привет!"
+
+# С inline mentions
+express-botx enqueue --bot-id UUID --chat-id UUID "Привет, @mention[email:user@company.ru]!"
+
+# Отключить парсинг inline mentions
+express-botx enqueue --no-parse --bot-id UUID --chat-id UUID "Текст с @mention[email:...] как есть"
 ```
 
 При успехе выводит `request_id` (text) или `{"ok":true,"queued":true,"request_id":"..."}` (json).
@@ -214,11 +253,16 @@ express-botx enqueue --mentions '[{"mention_id":"aaa-bbb","mention_type":"user",
 --no-notify      без уведомления
 --metadata       JSON для notification.metadata
 --mentions       JSON-массив mentions в wire-формате BotX API
+--no-parse       отключить парсинг inline @mention[...] в тексте
 ```
 
 Поле `--mentions` принимает JSON-массив в формате BotX API. Текст сообщения должен уже содержать
 соответствующие placeholder'ы (`@{mention:...}`, `@@{mention:...}`, `##{mention:...}`).
 Если JSON невалиден или не является массивом, команда завершится с ошибкой.
+
+Inline mentions (`@mention[...]`) поддерживаются аналогично команде `send`. Парсинг включён
+по умолчанию, отключается через `--no-parse`. В очередь публикуются уже нормализованные
+`message` и merged `mentions`.
 
 ### Режимы маршрутизации (routing modes)
 
@@ -303,6 +347,37 @@ curl -X POST http://localhost:8080/api/v1/send \
 Поле `mentions` принимает JSON-массив в формате BotX API. Текст сообщения должен уже содержать
 соответствующие placeholder'ы (`@{mention:...}`, `@@{mention:...}`, `##{mention:...}`).
 При multipart-запросе `mentions` передаётся как строковое JSON-поле формы.
+
+### Inline mentions в HTTP API
+
+По умолчанию parser включён для HTTP-запросов. Токены `@mention[...]` в поле `message`
+автоматически парсятся и нормализуются в BotX wire-format. Синтаксис аналогичен CLI (см. `send`).
+
+Пример с inline mention:
+
+```bash
+curl -X POST http://localhost:8080/api/v1/send \
+    -H "Authorization: Bearer <api-key>" \
+    -H "Content-Type: application/json" \
+    -d '{
+      "chat_id": "CHAT-UUID",
+      "message": "Привет, @mention[email:user@company.ru]!"
+    }'
+```
+
+Отключение парсинга через query parameter `?no_parse=true`:
+
+```bash
+curl -X POST 'http://localhost:8080/api/v1/send?no_parse=true' \
+    -H "Authorization: Bearer <api-key>" \
+    -H "Content-Type: application/json" \
+    -d '{
+      "chat_id": "CHAT-UUID",
+      "message": "Текст с @mention[email:...] останется как есть"
+    }'
+```
+
+При ошибке парсинга или lookup сообщение всё равно отправляется (HTTP 200), токен остаётся в тексте.
 
 ---
 

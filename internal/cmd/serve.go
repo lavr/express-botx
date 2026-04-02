@@ -19,6 +19,7 @@ import (
 	"github.com/lavr/express-botx/internal/config"
 	"github.com/lavr/express-botx/internal/errtrack"
 	vlog "github.com/lavr/express-botx/internal/log"
+	"github.com/lavr/express-botx/internal/mentions"
 	"github.com/lavr/express-botx/internal/queue"
 	"github.com/lavr/express-botx/internal/secret"
 	"github.com/lavr/express-botx/internal/server"
@@ -179,6 +180,8 @@ Options:
 	// bots that failed auth are retried in the background every 10 seconds.
 	// Requests to unavailable bots return 503 until auth succeeds.
 	var sendFn server.SendFunc
+	var mentionsResolver mentions.UserResolver
+	var botMentionsResolvers map[string]mentions.UserResolver
 
 	if cfg.IsMultiBot() {
 		senders := make(map[string]*botSender, len(cfg.Bots))
@@ -203,6 +206,20 @@ Options:
 		sendFn = func(ctx context.Context, p *server.SendPayload) (string, error) {
 			return senders[p.Bot].Send(ctx, p)
 		}
+		// Create per-bot resolvers so that email lookups target the correct
+		// eXpress host when bots reside on different instances. The first
+		// bot's resolver is used as the default fallback for requests where
+		// the bot is not yet known (e.g. resolved from a chat binding).
+		botMentionsResolvers = make(map[string]mentions.UserResolver, len(botNames))
+		for _, name := range botNames {
+			s := senders[name]
+			botMentionsResolvers[name] = &refreshableClientResolver{
+				client: botapi.NewClient(s.cfg.Host, s.client.Token, s.cfg.HTTPTimeout()),
+				cfg:    s.cfg,
+				cache:  s.cache,
+			}
+		}
+		mentionsResolver = botMentionsResolvers[botNames[0]]
 	} else {
 		sender, err := newBotSender(cfg, failFast)
 		if err != nil {
@@ -210,6 +227,13 @@ Options:
 		}
 		sendFn = sender.Send
 		srvCfg.SingleBotName = cfg.BotName
+		// Use a separate client so the resolver can refresh the token
+		// independently of botSender, avoiding races on the shared token.
+		mentionsResolver = &refreshableClientResolver{
+			client: botapi.NewClient(cfg.Host, sender.client.Token, cfg.HTTPTimeout()),
+			cfg:    cfg,
+			cache:  sender.cache,
+		}
 	}
 
 	// Validate chat-bot bindings
@@ -240,6 +264,10 @@ Options:
 	srvOpts = append(srvOpts, server.WithAPM(provider))
 	srvOpts = append(srvOpts, server.WithErrTracker(tracker))
 	srvOpts = append(srvOpts, server.WithConfigInfo(runtimeBotEntries(cfg), runtimeChatEntries(cfg)))
+	srvOpts = append(srvOpts, server.WithMentionsResolver(mentionsResolver))
+	if len(botMentionsResolvers) > 0 {
+		srvOpts = append(srvOpts, server.WithBotMentionsResolvers(botMentionsResolvers))
+	}
 
 	// Alertmanager endpoint (always enabled)
 	am := cfg.Server.Alertmanager
@@ -508,12 +536,6 @@ func generateAPIKey() (string, error) {
 		return "", err
 	}
 	return hex.EncodeToString(b), nil
-}
-
-// sendResponseJSON is used for encoding sync_id from the BotX API response.
-type sendResponseJSON struct {
-	OK     bool   `json:"ok"`
-	SyncID string `json:"sync_id,omitempty"`
 }
 
 // buildBotSecretLookup resolves bot secrets at startup and returns a lookup function.
@@ -824,13 +846,12 @@ func runServeEnqueue(flags config.Flags, listenFlag, apiKeyFlag string, deps Dep
 			EnqueuedAt: time.Now().UTC(),
 		}
 
+		msg.Payload.Opts.NoParse = p.NoParse
 		if p.Opts != nil {
-			msg.Payload.Opts = queue.DeliveryOpts{
-				Silent:   p.Opts.Silent,
-				Stealth:  p.Opts.Stealth,
-				ForceDND: p.Opts.ForceDND,
-				NoNotify: p.Opts.NoNotify,
-			}
+			msg.Payload.Opts.Silent = p.Opts.Silent
+			msg.Payload.Opts.Stealth = p.Opts.Stealth
+			msg.Payload.Opts.ForceDND = p.Opts.ForceDND
+			msg.Payload.Opts.NoNotify = p.Opts.NoNotify
 		}
 
 		if p.File != nil {

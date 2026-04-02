@@ -50,6 +50,7 @@ type DeliveryOpts struct {
 	Stealth  bool `json:"stealth,omitempty"`
 	ForceDND bool `json:"force_dnd,omitempty"`
 	NoNotify bool `json:"no_notify,omitempty"`
+	NoParse  bool `json:"no_parse,omitempty"`
 }
 
 // WorkResult is the outcome of processing a work message, published to the reply queue.

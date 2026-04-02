@@ -8,13 +8,59 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"sync"
 	"os"
 	"path/filepath"
 
 	"github.com/lavr/express-botx/internal/botapi"
 	"github.com/lavr/express-botx/internal/config"
 	"github.com/lavr/express-botx/internal/input"
+	"github.com/lavr/express-botx/internal/mentions"
+	"github.com/lavr/express-botx/internal/token"
 )
+
+// refreshableClientResolver wraps a botapi.Client and automatically refreshes
+// the token on 401 errors. Used in long-running processes (serve, serve --enqueue)
+// where the token may expire between requests. A mutex serializes access to the
+// shared client to prevent data races under concurrent HTTP requests.
+type refreshableClientResolver struct {
+	mu     sync.Mutex
+	client *botapi.Client
+	cfg    *config.Config
+	cache  token.Cache
+}
+
+func (r *refreshableClientResolver) GetUserByEmail(ctx context.Context, email string) (string, string, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+
+	// Lazy auth: if token is empty, authenticate now.
+	if r.client.Token == "" {
+		tok, err := refreshToken(r.cfg, r.cache)
+		if err != nil {
+			return "", "", fmt.Errorf("authenticating for email lookup: %w", err)
+		}
+		r.client.Token = tok
+	}
+
+	info, err := r.client.GetUserByEmail(ctx, email)
+	if err != nil {
+		// If the token expired, refresh and retry once.
+		if errors.Is(err, botapi.ErrUnauthorized) && r.cfg.BotSecret != "" {
+			tok, refreshErr := refreshToken(r.cfg, r.cache)
+			if refreshErr == nil {
+				r.client.Token = tok
+				info, retryErr := r.client.GetUserByEmail(ctx, email)
+				if retryErr == nil {
+					return info.HUID, info.Name, nil
+				}
+				return "", "", retryErr
+			}
+		}
+		return "", "", err
+	}
+	return info.HUID, info.Name, nil
+}
 
 func runSend(args []string, deps Deps) error {
 	fs := flag.NewFlagSet("send", flag.ContinueOnError)
@@ -28,8 +74,9 @@ func runSend(args []string, deps Deps) error {
 	var stealth bool
 	var forceDND bool
 	var noNotify bool
+	var noParse bool
 	var metadata string
-	var mentions string
+	var mentionsFlag string
 
 	globalFlags(fs, &flags)
 	fs.StringVar(&flags.ChatID, "chat-id", "", "target chat UUID or alias")
@@ -42,7 +89,8 @@ func runSend(args []string, deps Deps) error {
 	fs.BoolVar(&forceDND, "force-dnd", false, "deliver even if recipient has DND")
 	fs.BoolVar(&noNotify, "no-notify", false, "do not send notification at all")
 	fs.StringVar(&metadata, "metadata", "", "arbitrary JSON for notification.metadata")
-	fs.StringVar(&mentions, "mentions", "", "JSON array of mentions in BotX API wire format")
+	fs.StringVar(&mentionsFlag, "mentions", "", "JSON array of mentions in BotX API wire format")
+	fs.BoolVar(&noParse, "no-parse", false, "disable inline @mention[...] parsing")
 	fs.Usage = func() {
 		fmt.Fprintf(deps.Stderr, `Usage: express-botx send [options] [message]
 
@@ -157,8 +205,8 @@ Options:
 
 	// Validate mentions
 	var ment json.RawMessage
-	if mentions != "" {
-		raw := json.RawMessage(mentions)
+	if mentionsFlag != "" {
+		raw := json.RawMessage(mentionsFlag)
 		if !json.Valid(raw) {
 			return fmt.Errorf("--mentions is not valid JSON")
 		}
@@ -170,27 +218,43 @@ Options:
 		ment = raw
 	}
 
-	// Build SendRequest
-	sr := botapi.BuildSendRequest(&botapi.SendParams{
-		ChatID:   cfg.ChatID,
-		Message:  message,
-		Status:   status,
-		File:     fileAttachment,
-		Metadata: meta,
-		Mentions: ment,
-		Silent:   silent,
-		Stealth:  stealth,
-		ForceDND: forceDND,
-		NoNotify: noNotify,
-	})
-
-	// Authenticate and send
+	// Authenticate
 	tok, cache, err := authenticate(cfg)
 	if err != nil {
 		return err
 	}
 
 	client := botapi.NewClient(cfg.Host, tok, cfg.HTTPTimeout())
+
+	// Run inline mentions parser.
+	// Use refreshableClientResolver so the token is refreshed on 401 — the
+	// cached token may have expired since it was stored.
+	parseResult := mentions.Parse(
+		context.Background(),
+		message,
+		ment,
+		!noParse,
+		&refreshableClientResolver{client: client, cfg: cfg, cache: cache},
+	)
+	for _, e := range parseResult.Errors {
+		fmt.Fprintf(deps.Stderr, "warning: mention %s: %s\n", e.Kind, e.Cause)
+	}
+
+	// Build SendRequest
+	sr := botapi.BuildSendRequest(&botapi.SendParams{
+		ChatID:   cfg.ChatID,
+		Message:  parseResult.Message,
+		Status:   status,
+		File:     fileAttachment,
+		Metadata: meta,
+		Mentions: parseResult.Mentions,
+		Silent:   silent,
+		Stealth:  stealth,
+		ForceDND: forceDND,
+		NoNotify: noNotify,
+	})
+
+	// Send
 	err = client.Send(context.Background(), sr)
 	if err != nil {
 		if errors.Is(err, botapi.ErrUnauthorized) {
