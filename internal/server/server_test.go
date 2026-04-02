@@ -463,6 +463,168 @@ func TestSend_Multipart_WithFile(t *testing.T) {
 	}
 }
 
+// --- send handler: mentions ---
+
+func TestSend_JSON_WithMentions(t *testing.T) {
+	var capturedPayload *SendPayload
+	cfg := Config{
+		Listen:   ":0",
+		BasePath: "/api/v1",
+		Keys:     []ResolvedKey{{Name: "t", Key: "k"}},
+	}
+	sendFn := func(ctx context.Context, p *SendPayload) (string, error) {
+		capturedPayload = p
+		return "test-sync-id", nil
+	}
+	chatResolver := func(chatID string) (ChatResolveResult, error) {
+		return ChatResolveResult{ChatID: chatID}, nil
+	}
+	srv := New(cfg, sendFn, chatResolver)
+
+	body := `{"chat_id":"chat-1","message":"@{mention:aaa-bbb} hello","mentions":[{"mention_id":"aaa-bbb","mention_type":"user","mention_data":{"user_huid":"xxx"}}]}`
+	w := doRequest(srv, "POST", "/api/v1/send", strings.NewReader(body), map[string]string{
+		"X-API-Key":    "k",
+		"Content-Type": "application/json",
+	})
+	if w.Code != 200 {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	if capturedPayload == nil {
+		t.Fatal("send function was not called")
+	}
+	if capturedPayload.Mentions == nil {
+		t.Fatal("expected mentions to be set")
+	}
+	var mentions []json.RawMessage
+	if err := json.Unmarshal(capturedPayload.Mentions, &mentions); err != nil {
+		t.Fatalf("failed to unmarshal mentions: %v", err)
+	}
+	if len(mentions) != 1 {
+		t.Fatalf("expected 1 mention, got %d", len(mentions))
+	}
+}
+
+func TestSend_Multipart_WithMentions(t *testing.T) {
+	var capturedPayload *SendPayload
+	cfg := Config{
+		Listen:   ":0",
+		BasePath: "/api/v1",
+		Keys:     []ResolvedKey{{Name: "t", Key: "k"}},
+	}
+	sendFn := func(ctx context.Context, p *SendPayload) (string, error) {
+		capturedPayload = p
+		return "test-sync-id", nil
+	}
+	chatResolver := func(chatID string) (ChatResolveResult, error) {
+		return ChatResolveResult{ChatID: chatID}, nil
+	}
+	srv := New(cfg, sendFn, chatResolver)
+
+	var buf bytes.Buffer
+	mw := multipart.NewWriter(&buf)
+	mw.WriteField("chat_id", "chat-1")
+	mw.WriteField("message", "@{mention:aaa-bbb} hello")
+	mw.WriteField("mentions", `[{"mention_id":"aaa-bbb","mention_type":"user","mention_data":{"user_huid":"xxx"}}]`)
+	mw.Close()
+
+	w := doRequest(srv, "POST", "/api/v1/send", &buf, map[string]string{
+		"X-API-Key":    "k",
+		"Content-Type": mw.FormDataContentType(),
+	})
+	if w.Code != 200 {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	if capturedPayload == nil {
+		t.Fatal("send function was not called")
+	}
+	if capturedPayload.Mentions == nil {
+		t.Fatal("expected mentions to be set")
+	}
+	var mentions []json.RawMessage
+	if err := json.Unmarshal(capturedPayload.Mentions, &mentions); err != nil {
+		t.Fatalf("failed to unmarshal mentions: %v", err)
+	}
+	if len(mentions) != 1 {
+		t.Fatalf("expected 1 mention, got %d", len(mentions))
+	}
+}
+
+func TestSend_Multipart_MentionsInvalidJSON(t *testing.T) {
+	srv := newTestServer([]ResolvedKey{{Name: "t", Key: "k"}})
+
+	var buf bytes.Buffer
+	mw := multipart.NewWriter(&buf)
+	mw.WriteField("chat_id", "chat-1")
+	mw.WriteField("message", "hello")
+	mw.WriteField("mentions", `not valid json`)
+	mw.Close()
+
+	w := doRequest(srv, "POST", "/api/v1/send", &buf, map[string]string{
+		"X-API-Key":    "k",
+		"Content-Type": mw.FormDataContentType(),
+	})
+	if w.Code != 400 {
+		t.Fatalf("expected 400, got %d: %s", w.Code, w.Body.String())
+	}
+	resp := parseResponse(t, w)
+	if !strings.Contains(resp.Error, "invalid mentions JSON") {
+		t.Fatalf("expected 'invalid mentions JSON' error, got: %s", resp.Error)
+	}
+}
+
+func TestSend_Multipart_MentionsNotArray(t *testing.T) {
+	srv := newTestServer([]ResolvedKey{{Name: "t", Key: "k"}})
+
+	var buf bytes.Buffer
+	mw := multipart.NewWriter(&buf)
+	mw.WriteField("chat_id", "chat-1")
+	mw.WriteField("message", "hello")
+	mw.WriteField("mentions", `{"not":"an array"}`)
+	mw.Close()
+
+	w := doRequest(srv, "POST", "/api/v1/send", &buf, map[string]string{
+		"X-API-Key":    "k",
+		"Content-Type": mw.FormDataContentType(),
+	})
+	if w.Code != 400 {
+		t.Fatalf("expected 400, got %d: %s", w.Code, w.Body.String())
+	}
+	resp := parseResponse(t, w)
+	if !strings.Contains(resp.Error, "mentions must be a JSON array") {
+		t.Fatalf("expected 'mentions must be a JSON array' error, got: %s", resp.Error)
+	}
+}
+
+func TestSend_JSON_MentionsNotArray(t *testing.T) {
+	srv := newTestServer([]ResolvedKey{{Name: "t", Key: "k"}})
+
+	body := `{"chat_id":"chat-1","message":"hello","mentions":{"not":"an array"}}`
+	w := doRequest(srv, "POST", "/api/v1/send", strings.NewReader(body), map[string]string{
+		"X-API-Key":    "k",
+		"Content-Type": "application/json",
+	})
+	if w.Code != 400 {
+		t.Fatalf("expected 400, got %d: %s", w.Code, w.Body.String())
+	}
+	resp := parseResponse(t, w)
+	if !strings.Contains(resp.Error, "mentions must be a JSON array") {
+		t.Fatalf("expected 'mentions must be a JSON array' error, got: %s", resp.Error)
+	}
+}
+
+func TestSend_JSON_MentionsNull(t *testing.T) {
+	srv := newTestServer([]ResolvedKey{{Name: "t", Key: "k"}})
+
+	body := `{"chat_id":"chat-1","message":"hello","mentions":null}`
+	w := doRequest(srv, "POST", "/api/v1/send", strings.NewReader(body), map[string]string{
+		"X-API-Key":    "k",
+		"Content-Type": "application/json",
+	})
+	if w.Code != 200 {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
 // --- send handler: upstream error ---
 
 func TestSend_UpstreamError(t *testing.T) {

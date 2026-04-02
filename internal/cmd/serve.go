@@ -345,6 +345,7 @@ func buildSendRequest(p *server.SendPayload) *botapi.SendRequest {
 		Message:  p.Message,
 		Status:   p.Status,
 		Metadata: p.Metadata,
+		Mentions: p.Mentions,
 	}
 	if p.File != nil {
 		params.File = botapi.BuildFileAttachmentFromBase64(p.File.Name, p.File.Data)
@@ -814,8 +815,10 @@ func runServeEnqueue(flags config.Flags, listenFlag, apiKeyFlag string, deps Dep
 				CatalogRevision: routeCatalogRevision,
 			},
 			Payload: queue.Payload{
-				Message: p.Message,
-				Status:  p.Status,
+				Message:  p.Message,
+				Status:   p.Status,
+				Metadata: p.Metadata,
+				Mentions: p.Mentions,
 			},
 			ReplyTo:    cfg.Queue.ReplyQueue,
 			EnqueuedAt: time.Now().UTC(),
@@ -828,10 +831,6 @@ func runServeEnqueue(flags config.Flags, listenFlag, apiKeyFlag string, deps Dep
 				ForceDND: p.Opts.ForceDND,
 				NoNotify: p.Opts.NoNotify,
 			}
-		}
-
-		if p.Metadata != nil {
-			msg.Payload.Metadata = p.Metadata
 		}
 
 		if p.File != nil {

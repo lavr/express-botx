@@ -64,6 +64,10 @@ echo "Deploy OK" | express-botx send
 # С файлом-вложением
 express-botx send --file report.pdf "Отчёт за март"
 
+# С mentions (BotX wire-формат)
+express-botx send --mentions '[{"mention_id":"aaa-bbb","mention_type":"user","mention_data":{"user_huid":"xxx","name":"Иван"}}]' \
+  "@{mention:aaa-bbb} Привет!"
+
 # Файл из stdin
 cat image.png | express-botx send --file - --file-name image.png
 
@@ -86,7 +90,12 @@ express-botx send --host express.company.ru --bot-id UUID --secret KEY --chat-id
 --force-dnd     доставить даже при DND
 --no-notify     не отправлять уведомление вообще
 --metadata      произвольный JSON для notification.metadata
+--mentions      JSON-массив mentions в wire-формате BotX API
 ```
+
+Поле `--mentions` принимает JSON-массив в формате BotX API. Текст сообщения должен уже содержать
+соответствующие placeholder'ы (`@{mention:...}`, `@@{mention:...}`, `##{mention:...}`).
+Если JSON невалиден или не является массивом, команда завершится с ошибкой.
 
 ---
 
@@ -180,6 +189,10 @@ echo "OK" | express-botx enqueue --bot-id UUID --chat-id UUID
 
 # С файлом-вложением
 express-botx enqueue --file report.pdf --bot-id UUID --chat-id UUID "Отчёт"
+
+# С mentions (BotX wire-формат)
+express-botx enqueue --mentions '[{"mention_id":"aaa-bbb","mention_type":"user","mention_data":{"user_huid":"xxx","name":"Иван"}}]' \
+  --bot-id UUID --chat-id UUID "@{mention:aaa-bbb} Привет!"
 ```
 
 При успехе выводит `request_id` (text) или `{"ok":true,"queued":true,"request_id":"..."}` (json).
@@ -200,7 +213,12 @@ express-botx enqueue --file report.pdf --bot-id UUID --chat-id UUID "Отчёт"
 --force-dnd      доставить при DND
 --no-notify      без уведомления
 --metadata       JSON для notification.metadata
+--mentions       JSON-массив mentions в wire-формате BotX API
 ```
+
+Поле `--mentions` принимает JSON-массив в формате BotX API. Текст сообщения должен уже содержать
+соответствующие placeholder'ы (`@{mention:...}`, `@@{mention:...}`, `##{mention:...}`).
+Если JSON невалиден или не является массивом, команда завершится с ошибкой.
 
 ### Режимы маршрутизации (routing modes)
 
@@ -254,6 +272,37 @@ HTTP payload расширяется полями `routing_mode` и `bot_id` дл
 ```json
 {"routing_mode": "direct", "bot_id": "bot-uuid", "chat_id": "chat-uuid", "message": "deploy ok"}
 ```
+
+### Поля HTTP payload
+
+Эндпоинт `/send` принимает `application/json` и `multipart/form-data`. Основные поля:
+
+| Поле | Тип | Описание |
+|------|-----|----------|
+| `chat_id` | string | UUID или алиас чата (обязательно) |
+| `message` | string | Текст сообщения |
+| `file` | object | Вложение: `{"name": "...", "data": "base64..."}` |
+| `status` | string | `ok` или `error` (по умолчанию: `ok`) |
+| `metadata` | JSON | Произвольный JSON для `notification.metadata` |
+| `mentions` | JSON array | Массив mentions в wire-формате BotX API |
+| `opts` | object | Опции доставки: `silent`, `stealth`, `force_dnd`, `no_notify` |
+
+Пример с mentions через HTTP API:
+
+```bash
+curl -X POST http://localhost:8080/api/v1/send \
+    -H "Authorization: Bearer <api-key>" \
+    -H "Content-Type: application/json" \
+    -d '{
+      "chat_id": "CHAT-UUID",
+      "message": "@{mention:aaa-bbb} Deploy completed",
+      "mentions": [{"mention_id":"aaa-bbb","mention_type":"user","mention_data":{"user_huid":"xxx","name":"Иван"}}]
+    }'
+```
+
+Поле `mentions` принимает JSON-массив в формате BotX API. Текст сообщения должен уже содержать
+соответствующие placeholder'ы (`@{mention:...}`, `@@{mention:...}`, `##{mention:...}`).
+При multipart-запросе `mentions` передаётся как строковое JSON-поле формы.
 
 ---
 

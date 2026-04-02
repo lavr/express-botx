@@ -35,6 +35,7 @@ type Payload struct {
 	File     *FileAttachment `json:"file,omitempty"`
 	Opts     DeliveryOpts    `json:"opts"`
 	Metadata json.RawMessage `json:"metadata,omitempty"`
+	Mentions json.RawMessage `json:"mentions,omitempty"`
 }
 
 // FileAttachment is a base64-encoded file for async delivery.

@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/hex"
@@ -33,6 +34,7 @@ func runEnqueue(args []string, deps Deps) error {
 	var forceDND bool
 	var noNotify bool
 	var metadata string
+	var mentions string
 
 	globalFlags(fs, &flags)
 	fs.StringVar(&flags.ChatID, "chat-id", "", "target chat UUID or alias")
@@ -46,6 +48,7 @@ func runEnqueue(args []string, deps Deps) error {
 	fs.BoolVar(&forceDND, "force-dnd", false, "deliver even if recipient has DND")
 	fs.BoolVar(&noNotify, "no-notify", false, "do not send notification at all")
 	fs.StringVar(&metadata, "metadata", "", "arbitrary JSON for notification.metadata")
+	fs.StringVar(&mentions, "mentions", "", "JSON array of mentions in BotX API wire format")
 	fs.Usage = func() {
 		fmt.Fprintf(deps.Stderr, `Usage: express-botx enqueue [options] [message]
 
@@ -231,6 +234,20 @@ Options:
 		meta = raw
 	}
 
+	// Validate mentions
+	var ment json.RawMessage
+	if mentions != "" {
+		raw := json.RawMessage(mentions)
+		if !json.Valid(raw) {
+			return fmt.Errorf("--mentions is not valid JSON")
+		}
+		trimmed := bytes.TrimSpace(raw)
+		if len(trimmed) == 0 || trimmed[0] != '[' {
+			return fmt.Errorf("--mentions must be a JSON array, got %s", string(trimmed[:1]))
+		}
+		ment = raw
+	}
+
 	// Create publisher
 	pub, err := queue.NewPublisher(cfg.Queue.Driver, cfg.Queue.URL, cfg.Queue.Name)
 	if err != nil {
@@ -255,6 +272,7 @@ Options:
 			Message:  message,
 			Status:   status,
 			Metadata: meta,
+			Mentions: ment,
 			Opts: queue.DeliveryOpts{
 				Silent:   silent,
 				Stealth:  stealth,
