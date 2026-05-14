@@ -404,6 +404,8 @@ func buildSendRequestFromWork(msg *queue.WorkMessage) *botapi.SendRequest {
 		Status:   msg.Payload.Status,
 		Metadata: msg.Payload.Metadata,
 		Mentions: msg.Payload.Mentions,
+		Bubble:   msg.Payload.Bubble,
+		Keyboard: msg.Payload.Keyboard,
 		Silent:   msg.Payload.Opts.Silent,
 		Stealth:  msg.Payload.Opts.Stealth,
 		ForceDND: msg.Payload.Opts.ForceDND,

@@ -191,7 +191,33 @@ type SendNotification struct {
 	Body     string               `json:"body"`
 	Metadata json.RawMessage      `json:"metadata,omitempty"`
 	Mentions json.RawMessage      `json:"mentions,omitempty"`
+	Bubble   ButtonMarkup         `json:"bubble,omitempty"`
+	Keyboard ButtonMarkup         `json:"keyboard,omitempty"`
 	Opts     *NotificationMsgOpts `json:"opts,omitempty"`
+}
+
+// ButtonMarkup is a matrix of BotX UI buttons.
+type ButtonMarkup [][]Button
+
+// Button is a BotX bubble/keyboard button.
+type Button struct {
+	Command string          `json:"command,omitempty"`
+	Label   string          `json:"label,omitempty"`
+	Data    json.RawMessage `json:"data,omitempty"`
+	Opts    *ButtonOpts     `json:"opts,omitempty"`
+}
+
+// ButtonOpts controls BotX button behavior.
+type ButtonOpts struct {
+	Silent          *bool  `json:"silent,omitempty"`
+	FontColor       string `json:"font_color,omitempty"`
+	BackgroundColor string `json:"background_color,omitempty"`
+	Align           string `json:"align,omitempty"`
+	HSize           int    `json:"h_size,omitempty"`
+	ShowAlert       bool   `json:"show_alert,omitempty"`
+	AlertText       string `json:"alert_text,omitempty"`
+	Handler         string `json:"handler,omitempty"`
+	Link            string `json:"link,omitempty"`
 }
 
 // NotificationMsgOpts controls per-message notification behavior.
@@ -227,6 +253,8 @@ type SendParams struct {
 	File     *SendFile
 	Metadata json.RawMessage
 	Mentions json.RawMessage
+	Bubble   ButtonMarkup
+	Keyboard ButtonMarkup
 	Silent   bool
 	Stealth  bool
 	ForceDND bool
@@ -245,6 +273,8 @@ func BuildSendRequest(p *SendParams) *SendRequest {
 			Body:     p.Message,
 			Metadata: p.Metadata,
 			Mentions: p.Mentions,
+			Bubble:   p.Bubble,
+			Keyboard: p.Keyboard,
 		}
 		if p.Silent {
 			sr.Notification.Opts = &NotificationMsgOpts{
@@ -271,11 +301,13 @@ func BuildSendRequest(p *SendParams) *SendRequest {
 	}
 
 	// File-only with metadata/mentions: still need a notification to carry them
-	if sr.Notification == nil && (len(p.Metadata) > 0 || len(p.Mentions) > 0) {
+	if sr.Notification == nil && (len(p.Metadata) > 0 || len(p.Mentions) > 0 || len(p.Bubble) > 0 || len(p.Keyboard) > 0) {
 		sr.Notification = &SendNotification{
 			Status:   p.Status,
 			Metadata: p.Metadata,
 			Mentions: p.Mentions,
+			Bubble:   p.Bubble,
+			Keyboard: p.Keyboard,
 		}
 		if p.Silent {
 			sr.Notification.Opts = &NotificationMsgOpts{

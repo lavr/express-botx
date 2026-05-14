@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"time"
 
+	"github.com/lavr/express-botx/internal/botapi"
 	"github.com/lavr/express-botx/internal/config"
 )
 
@@ -30,12 +31,14 @@ type Routing struct {
 
 // Payload carries the message content and delivery options.
 type Payload struct {
-	Message  string          `json:"message"`
-	Status   string          `json:"status,omitempty"`
-	File     *FileAttachment `json:"file,omitempty"`
-	Opts     DeliveryOpts    `json:"opts"`
-	Metadata json.RawMessage `json:"metadata,omitempty"`
-	Mentions json.RawMessage `json:"mentions,omitempty"`
+	Message  string              `json:"message"`
+	Status   string              `json:"status,omitempty"`
+	File     *FileAttachment     `json:"file,omitempty"`
+	Opts     DeliveryOpts        `json:"opts"`
+	Metadata json.RawMessage     `json:"metadata,omitempty"`
+	Mentions json.RawMessage     `json:"mentions,omitempty"`
+	Bubble   botapi.ButtonMarkup `json:"bubble,omitempty"`
+	Keyboard botapi.ButtonMarkup `json:"keyboard,omitempty"`
 }
 
 // FileAttachment is a base64-encoded file for async delivery.

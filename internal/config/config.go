@@ -128,10 +128,18 @@ type CallbackHandlerConfig struct {
 
 // AlertmanagerYAMLConfig holds YAML settings for the alertmanager webhook endpoint.
 type AlertmanagerYAMLConfig struct {
-	DefaultChatID   string   `yaml:"default_chat_id,omitempty"`
-	ErrorSeverities []string `yaml:"error_severities,omitempty"`
-	Template        string   `yaml:"template,omitempty"`
-	TemplateFile    string   `yaml:"template_file,omitempty"`
+	DefaultChatID   string                        `yaml:"default_chat_id,omitempty"`
+	ErrorSeverities []string                      `yaml:"error_severities,omitempty"`
+	Template        string                        `yaml:"template,omitempty"`
+	TemplateFile    string                        `yaml:"template_file,omitempty"`
+	Button          *AlertmanagerButtonYAMLConfig `yaml:"button,omitempty"`
+}
+
+// AlertmanagerButtonYAMLConfig holds BotX bubble button settings for alertmanager.
+type AlertmanagerButtonYAMLConfig struct {
+	Enabled     bool   `yaml:"enabled,omitempty"`
+	Label       string `yaml:"label,omitempty"`
+	URLTemplate string `yaml:"url_template,omitempty"`
 }
 
 // GrafanaYAMLConfig holds YAML settings for the Grafana webhook endpoint.
@@ -995,7 +1003,10 @@ var knownKeys = map[string]map[string]bool{
 		"alertmanager": true, "grafana": true, "callbacks": true, "docs": true, "external_url": true,
 	},
 	"server.alertmanager": {
-		"default_chat_id": true, "error_severities": true, "template": true, "template_file": true,
+		"default_chat_id": true, "error_severities": true, "template": true, "template_file": true, "button": true,
+	},
+	"server.alertmanager.button": {
+		"enabled": true, "label": true, "url_template": true,
 	},
 	"server.grafana": {
 		"default_chat_id": true, "error_states": true, "template": true, "template_file": true,
