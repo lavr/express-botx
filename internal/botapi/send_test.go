@@ -89,6 +89,42 @@ func TestBuildSendRequest_FileOnlyWithMetadata(t *testing.T) {
 	}
 }
 
+func TestBuildSendRequest_Bubble(t *testing.T) {
+	silent := true
+	sr := BuildSendRequest(&SendParams{
+		ChatID:  "chat-1",
+		Status:  "ok",
+		Message: "hello",
+		Bubble: ButtonMarkup{{
+			{
+				Label: "Open alert",
+				Opts: &ButtonOpts{
+					Silent:  &silent,
+					Align:   "center",
+					Handler: "client",
+					Link:    "https://alertmanager.example.com",
+				},
+			},
+		}},
+	})
+	if sr.Notification == nil {
+		t.Fatal("expected Notification")
+	}
+	if len(sr.Notification.Bubble) != 1 || len(sr.Notification.Bubble[0]) != 1 {
+		t.Fatalf("unexpected bubble markup: %#v", sr.Notification.Bubble)
+	}
+	btn := sr.Notification.Bubble[0][0]
+	if btn.Label != "Open alert" {
+		t.Errorf("Label = %q", btn.Label)
+	}
+	if btn.Command != "" {
+		t.Errorf("Command = %q, want empty", btn.Command)
+	}
+	if btn.Opts == nil || btn.Opts.Silent == nil || !*btn.Opts.Silent || btn.Opts.Handler != "client" || btn.Opts.Link != "https://alertmanager.example.com" || btn.Opts.Align != "center" {
+		t.Errorf("Opts = %#v", btn.Opts)
+	}
+}
+
 func TestBuildSendRequest_AllOpts(t *testing.T) {
 	sr := BuildSendRequest(&SendParams{
 		ChatID:   "chat-1",

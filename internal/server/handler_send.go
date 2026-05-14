@@ -12,6 +12,7 @@ import (
 	"regexp"
 	"time"
 
+	"github.com/lavr/express-botx/internal/botapi"
 	vlog "github.com/lavr/express-botx/internal/log"
 	"github.com/lavr/express-botx/internal/mentions"
 )
@@ -22,17 +23,19 @@ func isUUID(s string) bool { return uuidRe.MatchString(s) }
 
 // SendPayload is the parsed request for sending a message.
 type SendPayload struct {
-	Bot         string          `json:"bot,omitempty"`
-	ChatID      string          `json:"chat_id"`
-	Message     string          `json:"message"`
-	File        *FilePayload    `json:"file,omitempty"`
-	Status      string          `json:"status"`
-	Opts        *OptsPayload    `json:"opts,omitempty"`
-	Metadata    json.RawMessage `json:"metadata,omitempty"`
-	Mentions    json.RawMessage `json:"mentions,omitempty"`
-	RoutingMode string          `json:"routing_mode,omitempty"` // async mode: direct, catalog, mixed
-	BotID       string          `json:"bot_id,omitempty"`       // async mode: bot UUID for direct routing
-	NoParse     bool            `json:"-"`                      // internal: skip mentions parsing (set by handler for async mode)
+	Bot         string              `json:"bot,omitempty"`
+	ChatID      string              `json:"chat_id"`
+	Message     string              `json:"message"`
+	File        *FilePayload        `json:"file,omitempty"`
+	Status      string              `json:"status"`
+	Opts        *OptsPayload        `json:"opts,omitempty"`
+	Metadata    json.RawMessage     `json:"metadata,omitempty"`
+	Mentions    json.RawMessage     `json:"mentions,omitempty"`
+	Bubble      botapi.ButtonMarkup `json:"bubble,omitempty"`
+	Keyboard    botapi.ButtonMarkup `json:"keyboard,omitempty"`
+	RoutingMode string              `json:"routing_mode,omitempty"` // async mode: direct, catalog, mixed
+	BotID       string              `json:"bot_id,omitempty"`       // async mode: bot UUID for direct routing
+	NoParse     bool                `json:"-"`                      // internal: skip mentions parsing (set by handler for async mode)
 }
 
 // FilePayload represents a file attachment in the JSON request.

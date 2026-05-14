@@ -905,6 +905,160 @@ func TestAlertmanager_ChatIDQueryParam(t *testing.T) {
 	}
 }
 
+func TestAlertmanager_Button(t *testing.T) {
+	tmpl, _ := ParseAlertmanagerTemplate(`test`)
+	buttonURLTemplate, err := ParseAlertmanagerButtonURLTemplate(`{{ .ExternalURL }}/#/alerts?receiver={{ .Receiver | urlquery }}&alertname={{ index .CommonLabels "alertname" | urlquery }}`)
+	if err != nil {
+		t.Fatalf("parse button template: %v", err)
+	}
+	amCfg := &AlertmanagerConfig{
+		DefaultChatID:   "default-chat",
+		ErrorSeverities: []string{"critical"},
+		Template:        tmpl,
+		Button: &AlertmanagerButtonConfig{
+			Label:       "Open alert",
+			URLTemplate: buttonURLTemplate,
+		},
+	}
+
+	var captured *SendPayload
+	cfg := Config{
+		Listen:   ":0",
+		BasePath: "/api/v1",
+		Keys:     []ResolvedKey{{Name: "t", Key: "k"}},
+	}
+	sendFn := func(ctx context.Context, p *SendPayload) (string, error) {
+		captured = p
+		return "id", nil
+	}
+	chatResolver := func(chatID string) (ChatResolveResult, error) { return ChatResolveResult{ChatID: chatID}, nil }
+	srv := New(cfg, sendFn, chatResolver, WithAlertmanager(amCfg))
+
+	webhook := AlertmanagerWebhook{
+		Version:      "4",
+		Status:       "firing",
+		Receiver:     "team-express",
+		GroupLabels:  map[string]string{"alertname": "TestAlert"},
+		CommonLabels: map[string]string{"alertname": "TestAlert"},
+		ExternalURL:  "https://alertmanager.example.com",
+		Alerts: []AlertItem{{
+			Status: "firing",
+			Labels: map[string]string{"alertname": "TestAlert", "severity": "critical"},
+		}},
+	}
+	body, _ := json.Marshal(webhook)
+
+	w := doRequest(srv, "POST", "/api/v1/alertmanager", bytes.NewReader(body), map[string]string{
+		"X-API-Key":    "k",
+		"Content-Type": "application/json",
+	})
+	if w.Code != 200 {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	if captured == nil {
+		t.Fatal("expected captured payload")
+	}
+	if len(captured.Bubble) != 1 || len(captured.Bubble[0]) != 1 {
+		t.Fatalf("unexpected bubble markup: %#v", captured.Bubble)
+	}
+	btn := captured.Bubble[0][0]
+	if btn.Label != "Open alert" {
+		t.Errorf("Label = %q", btn.Label)
+	}
+	wantURL := "https://alertmanager.example.com/#/alerts?receiver=team-express&alertname=TestAlert"
+	if btn.Command != "" {
+		t.Errorf("Command = %q, want empty", btn.Command)
+	}
+	if btn.Opts == nil || btn.Opts.Handler != "client" || btn.Opts.Silent == nil || !*btn.Opts.Silent || btn.Opts.Link != wantURL || btn.Opts.Align != "center" {
+		t.Errorf("Opts = %#v", btn.Opts)
+	}
+}
+
+func TestAlertmanager_Buttons(t *testing.T) {
+	tmpl, _ := ParseAlertmanagerTemplate(`test`)
+	alertmanagerURLTemplate, err := ParseAlertmanagerButtonURLTemplate(`{{ .ExternalURL }}`)
+	if err != nil {
+		t.Fatalf("parse alertmanager button template: %v", err)
+	}
+	prometheusURLTemplate, err := ParseAlertmanagerButtonURLTemplate(`https://prometheus.example.com`)
+	if err != nil {
+		t.Fatalf("parse prometheus button template: %v", err)
+	}
+	grafanaURLTemplate, err := ParseAlertmanagerButtonURLTemplate(`https://grafana.example.com`)
+	if err != nil {
+		t.Fatalf("parse grafana button template: %v", err)
+	}
+	amCfg := &AlertmanagerConfig{
+		DefaultChatID:   "default-chat",
+		ErrorSeverities: []string{"critical"},
+		Template:        tmpl,
+		Buttons: []AlertmanagerButtonConfig{
+			{Label: "Alertmanager", URLTemplate: alertmanagerURLTemplate},
+			{Label: "Prometheus", URLTemplate: prometheusURLTemplate},
+			{Label: "Grafana", URLTemplate: grafanaURLTemplate},
+		},
+	}
+
+	var captured *SendPayload
+	cfg := Config{
+		Listen:   ":0",
+		BasePath: "/api/v1",
+		Keys:     []ResolvedKey{{Name: "t", Key: "k"}},
+	}
+	sendFn := func(ctx context.Context, p *SendPayload) (string, error) {
+		captured = p
+		return "id", nil
+	}
+	chatResolver := func(chatID string) (ChatResolveResult, error) { return ChatResolveResult{ChatID: chatID}, nil }
+	srv := New(cfg, sendFn, chatResolver, WithAlertmanager(amCfg))
+
+	webhook := AlertmanagerWebhook{
+		Version:     "4",
+		Status:      "firing",
+		Receiver:    "team-express",
+		ExternalURL: "https://alertmanager.example.com",
+		Alerts: []AlertItem{{
+			Status: "firing",
+			Labels: map[string]string{"severity": "critical"},
+		}},
+	}
+	body, _ := json.Marshal(webhook)
+
+	w := doRequest(srv, "POST", "/api/v1/alertmanager", bytes.NewReader(body), map[string]string{
+		"X-API-Key":    "k",
+		"Content-Type": "application/json",
+	})
+	if w.Code != 200 {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+	if captured == nil {
+		t.Fatal("expected captured payload")
+	}
+	if len(captured.Bubble) != 1 || len(captured.Bubble[0]) != 3 {
+		t.Fatalf("unexpected bubble markup: %#v", captured.Bubble)
+	}
+	want := []struct {
+		label string
+		link  string
+	}{
+		{"Alertmanager", "https://alertmanager.example.com"},
+		{"Prometheus", "https://prometheus.example.com"},
+		{"Grafana", "https://grafana.example.com"},
+	}
+	for i, wantButton := range want {
+		btn := captured.Bubble[0][i]
+		if btn.Label != wantButton.label {
+			t.Errorf("button %d Label = %q, want %q", i, btn.Label, wantButton.label)
+		}
+		if btn.Command != "" {
+			t.Errorf("button %d Command = %q, want empty", i, btn.Command)
+		}
+		if btn.Opts == nil || btn.Opts.Handler != "client" || btn.Opts.Silent == nil || !*btn.Opts.Silent || btn.Opts.Link != wantButton.link || btn.Opts.Align != "center" {
+			t.Errorf("button %d Opts = %#v", i, btn.Opts)
+		}
+	}
+}
+
 func TestAlertmanager_NoChatID(t *testing.T) {
 	tmpl, _ := ParseAlertmanagerTemplate(`test`)
 	amCfg := &AlertmanagerConfig{

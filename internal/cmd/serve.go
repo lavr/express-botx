@@ -374,6 +374,8 @@ func buildSendRequest(p *server.SendPayload) *botapi.SendRequest {
 		Status:   p.Status,
 		Metadata: p.Metadata,
 		Mentions: p.Mentions,
+		Bubble:   p.Bubble,
+		Keyboard: p.Keyboard,
 	}
 	if p.File != nil {
 		params.File = botapi.BuildFileAttachmentFromBase64(p.File.Name, p.File.Data)
@@ -420,10 +422,58 @@ func buildAlertmanagerConfig(am *config.AlertmanagerYAMLConfig, configPath strin
 		return nil, err
 	}
 
+	var button *server.AlertmanagerButtonConfig
+	var buttons []server.AlertmanagerButtonConfig
+	if am.Button != nil && am.Button.Enabled {
+		label := am.Button.Label
+		if label == "" {
+			label = "Open Alertmanager"
+		}
+		urlTemplate := am.Button.URLTemplate
+		if urlTemplate == "" {
+			urlTemplate = `{{- if .ExternalURL -}}{{ .ExternalURL }}/#/alerts?receiver={{ .Receiver | urlquery }}{{- with index .CommonLabels "alertname" }}&alertname={{ . | urlquery }}{{- end }}{{- end -}}`
+		}
+		urlTemplate, err := secret.Resolve(urlTemplate)
+		if err != nil {
+			return nil, err
+		}
+		buttonURLTemplate, err := server.ParseAlertmanagerButtonURLTemplate(urlTemplate)
+		if err != nil {
+			return nil, err
+		}
+		button = &server.AlertmanagerButtonConfig{
+			Label:       label,
+			URLTemplate: buttonURLTemplate,
+		}
+	}
+	for _, buttonConfig := range am.Buttons {
+		if !buttonConfig.Enabled || buttonConfig.URLTemplate == "" {
+			continue
+		}
+		label := buttonConfig.Label
+		if label == "" {
+			label = "Open Alertmanager"
+		}
+		urlTemplate, err := secret.Resolve(buttonConfig.URLTemplate)
+		if err != nil {
+			return nil, err
+		}
+		buttonURLTemplate, err := server.ParseAlertmanagerButtonURLTemplate(urlTemplate)
+		if err != nil {
+			return nil, err
+		}
+		buttons = append(buttons, server.AlertmanagerButtonConfig{
+			Label:       label,
+			URLTemplate: buttonURLTemplate,
+		})
+	}
+
 	return &server.AlertmanagerConfig{
 		DefaultChatID:   am.DefaultChatID,
 		ErrorSeverities: severities,
 		Template:        tmpl,
+		Button:          button,
+		Buttons:         buttons,
 	}, nil
 }
 
@@ -841,6 +891,8 @@ func runServeEnqueue(flags config.Flags, listenFlag, apiKeyFlag string, deps Dep
 				Status:   p.Status,
 				Metadata: p.Metadata,
 				Mentions: p.Mentions,
+				Bubble:   p.Bubble,
+				Keyboard: p.Keyboard,
 			},
 			ReplyTo:    cfg.Queue.ReplyQueue,
 			EnqueuedAt: time.Now().UTC(),

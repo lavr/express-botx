@@ -8,6 +8,7 @@ import (
 	"text/template"
 	"time"
 
+	"github.com/lavr/express-botx/internal/botapi"
 	vlog "github.com/lavr/express-botx/internal/log"
 )
 
@@ -16,9 +17,17 @@ type AlertmanagerConfig struct {
 	DefaultChatID   string   // default target chat UUID or alias (may be empty)
 	ErrorSeverities []string // severities that map to status "error"
 	Template        *template.Template
+	Button          *AlertmanagerButtonConfig
+	Buttons         []AlertmanagerButtonConfig
 	// FallbackChatID is resolved at startup from the config's chats section
 	// when there is exactly one chat alias configured. Empty otherwise.
 	FallbackChatID string
+}
+
+// AlertmanagerButtonConfig holds settings for a BotX bubble button under alerts.
+type AlertmanagerButtonConfig struct {
+	Label       string
+	URLTemplate *template.Template
 }
 
 // AlertmanagerWebhook is the JSON payload from Alertmanager.
@@ -111,6 +120,7 @@ func (s *Server) handleAlertmanager(w http.ResponseWriter, r *http.Request) {
 		ChatID:  chatResult.ChatID,
 		Message: message,
 		Status:  status,
+		Bubble:  s.renderAlertmanagerButtons(webhook),
 	})
 	elapsed := time.Since(start)
 
@@ -142,6 +152,63 @@ func (s *Server) resolveAlertStatus(webhook AlertmanagerWebhook) string {
 	return "ok"
 }
 
+func (s *Server) renderAlertmanagerButtons(webhook AlertmanagerWebhook) botapi.ButtonMarkup {
+	if s.amCfg == nil {
+		return nil
+	}
+
+	buttons := s.amCfg.Buttons
+	if len(buttons) == 0 && s.amCfg.Button != nil {
+		buttons = []AlertmanagerButtonConfig{*s.amCfg.Button}
+	}
+	if len(buttons) == 0 {
+		return nil
+	}
+
+	row := make([]botapi.Button, 0, len(buttons))
+	for _, button := range buttons {
+		if button.URLTemplate == nil {
+			continue
+		}
+		btn := renderAlertmanagerButton(button, webhook)
+		if btn != nil {
+			row = append(row, *btn)
+		}
+	}
+	if len(row) == 0 {
+		return nil
+	}
+	return botapi.ButtonMarkup{row}
+}
+
+func renderAlertmanagerButton(button AlertmanagerButtonConfig, webhook AlertmanagerWebhook) *botapi.Button {
+	var buf bytes.Buffer
+	if err := button.URLTemplate.Execute(&buf, webhook); err != nil {
+		vlog.V1("alertmanager: button url template error: %v", err)
+		return nil
+	}
+
+	url := buf.String()
+	if url == "" {
+		return nil
+	}
+
+	label := button.Label
+	if label == "" {
+		label = "Open Alertmanager"
+	}
+	silent := true
+	return &botapi.Button{
+		Label: label,
+		Opts: &botapi.ButtonOpts{
+			Silent:  &silent,
+			Align:   "center",
+			Handler: "client",
+			Link:    url,
+		},
+	}
+}
+
 // DefaultAlertmanagerTemplate is the built-in template for formatting alerts.
 const DefaultAlertmanagerTemplate = `{{ if eq .Status "firing" }}` + "\U0001F525" + ` FIRING{{ else }}` + "\u2705" + ` RESOLVED{{ end }} [{{ index .GroupLabels "alertname" }}]
 {{ range .Alerts }}
@@ -157,6 +224,15 @@ func ParseAlertmanagerTemplate(tmplStr string) (*template.Template, error) {
 	t, err := template.New("alertmanager").Parse(tmplStr)
 	if err != nil {
 		return nil, fmt.Errorf("parsing alertmanager template: %w", err)
+	}
+	return t, nil
+}
+
+// ParseAlertmanagerButtonURLTemplate compiles a Go text/template for alertmanager button URLs.
+func ParseAlertmanagerButtonURLTemplate(tmplStr string) (*template.Template, error) {
+	t, err := template.New("alertmanager_button_url").Parse(tmplStr)
+	if err != nil {
+		return nil, fmt.Errorf("parsing alertmanager button url template: %w", err)
 	}
 	return t, nil
 }

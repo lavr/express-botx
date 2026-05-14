@@ -24,8 +24,8 @@ import (
 
 type mockBotxAPI struct {
 	mu       sync.Mutex
-	calls    []capturedSend // captured /notifications/direct calls
-	tokenVal string         // token to return
+	calls    []capturedSend                         // captured /notifications/direct calls
+	tokenVal string                                 // token to return
 	users    map[string]struct{ huid, name string } // email -> user info for lookup
 }
 
@@ -418,6 +418,35 @@ server:
 	}
 	if calls[0].GroupChatID != "d0000000-0000-0000-0000-000000000004" {
 		t.Errorf("GroupChatID = %q, want %q", calls[0].GroupChatID, "d0000000-0000-0000-0000-000000000004")
+	}
+}
+
+func TestBuildAlertmanagerConfig_ButtonURLTemplateEnv(t *testing.T) {
+	t.Setenv("TEST_ALERTMANAGER_BUTTON_URL", "https://prometheus.example.com")
+
+	amCfg, err := buildAlertmanagerConfig(&config.AlertmanagerYAMLConfig{
+		DefaultChatID: "alerts",
+		Buttons: []config.AlertmanagerButtonYAMLConfig{
+			{
+				Enabled:     true,
+				Label:       "Prometheus",
+				URLTemplate: "env:TEST_ALERTMANAGER_BUTTON_URL",
+			},
+		},
+	}, "")
+	if err != nil {
+		t.Fatalf("build alertmanager config: %v", err)
+	}
+	if len(amCfg.Buttons) != 1 {
+		t.Fatalf("Buttons len = %d, want 1", len(amCfg.Buttons))
+	}
+
+	var rendered strings.Builder
+	if err := amCfg.Buttons[0].URLTemplate.Execute(&rendered, server.AlertmanagerWebhook{}); err != nil {
+		t.Fatalf("execute button URL template: %v", err)
+	}
+	if got := rendered.String(); got != "https://prometheus.example.com" {
+		t.Fatalf("rendered URL = %q, want prometheus URL", got)
 	}
 }
 
