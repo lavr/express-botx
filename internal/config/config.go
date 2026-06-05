@@ -99,6 +99,7 @@ type ServerConfig struct {
 	AllowBotSecretAuth bool                    `yaml:"allow_bot_secret_auth,omitempty"`
 	Alertmanager       *AlertmanagerYAMLConfig `yaml:"alertmanager,omitempty"`
 	Grafana            *GrafanaYAMLConfig      `yaml:"grafana,omitempty"`
+	GitLab             *GitLabYAMLConfig       `yaml:"gitlab,omitempty"`
 	Callbacks          *CallbacksConfig        `yaml:"callbacks,omitempty"`
 	Docs               *bool                   `yaml:"docs,omitempty"`         // enable /docs endpoint (default: true)
 	ExternalURL        string                  `yaml:"external_url,omitempty"` // public URL for OpenAPI docs (e.g. http://express-botx.invitro-dev.k8s)
@@ -149,6 +150,14 @@ type GrafanaYAMLConfig struct {
 	ErrorStates   []string `yaml:"error_states,omitempty"`
 	Template      string   `yaml:"template,omitempty"`
 	TemplateFile  string   `yaml:"template_file,omitempty"`
+}
+
+// GitLabYAMLConfig holds YAML settings for the GitLab webhook endpoint.
+type GitLabYAMLConfig struct {
+	Token         string            `yaml:"token,omitempty"`           // literal, env:VAR, or vault:path#key
+	DefaultChatID string            `yaml:"default_chat_id,omitempty"` // default target chat UUID or alias
+	Projects      map[string]string `yaml:"projects,omitempty"`        // project path -> chat UUID or alias
+	Events        map[string]bool   `yaml:"events,omitempty"`          // push, merge_request, tag_push, pipeline, job
 }
 
 // APIKeyConfig defines a single API key for server authentication.
@@ -1001,7 +1010,7 @@ var knownKeys = map[string]map[string]bool{
 	},
 	"server": {
 		"listen": true, "base_path": true, "api_keys": true, "allow_bot_secret_auth": true,
-		"alertmanager": true, "grafana": true, "callbacks": true, "docs": true, "external_url": true,
+		"alertmanager": true, "grafana": true, "gitlab": true, "callbacks": true, "docs": true, "external_url": true,
 	},
 	"server.alertmanager": {
 		"default_chat_id": true, "error_severities": true, "template": true, "template_file": true, "button": true, "buttons": true,
@@ -1014,6 +1023,9 @@ var knownKeys = map[string]map[string]bool{
 	},
 	"server.grafana": {
 		"default_chat_id": true, "error_states": true, "template": true, "template_file": true,
+	},
+	"server.gitlab": {
+		"token": true, "default_chat_id": true, "projects": true, "events": true,
 	},
 	"server.callbacks": {
 		"base_path": true, "verify_jwt": true, "rules": true,
@@ -1435,6 +1447,55 @@ func (c *Config) validateCrossReferences() []ValidationResult {
 					Level:   ValidationError,
 					Path:    "server.grafana.default_chat_id",
 					Message: fmt.Sprintf("references unknown chat alias %q", chatID),
+				})
+			}
+		}
+	}
+
+	if c.Server.GitLab != nil {
+		if c.Server.GitLab.Token == "" {
+			results = append(results, ValidationResult{
+				Level:   ValidationError,
+				Path:    "server.gitlab.token",
+				Message: "gitlab webhook token is required",
+			})
+		}
+		if c.Server.GitLab.DefaultChatID != "" && !IsUUID(c.Server.GitLab.DefaultChatID) {
+			if _, ok := c.Chats[c.Server.GitLab.DefaultChatID]; !ok {
+				results = append(results, ValidationResult{
+					Level:   ValidationError,
+					Path:    "server.gitlab.default_chat_id",
+					Message: fmt.Sprintf("references unknown chat alias %q", c.Server.GitLab.DefaultChatID),
+				})
+			}
+		}
+		for project, chatID := range c.Server.GitLab.Projects {
+			if chatID == "" {
+				results = append(results, ValidationResult{
+					Level:   ValidationError,
+					Path:    fmt.Sprintf("server.gitlab.projects.%s", project),
+					Message: "chat alias or UUID is required",
+				})
+				continue
+			}
+			if !IsUUID(chatID) {
+				if _, ok := c.Chats[chatID]; !ok {
+					results = append(results, ValidationResult{
+						Level:   ValidationError,
+						Path:    fmt.Sprintf("server.gitlab.projects.%s", project),
+						Message: fmt.Sprintf("references unknown chat alias %q", chatID),
+					})
+				}
+			}
+		}
+		for event := range c.Server.GitLab.Events {
+			switch event {
+			case "push", "merge_request", "tag_push", "pipeline", "job":
+			default:
+				results = append(results, ValidationResult{
+					Level:   ValidationWarning,
+					Path:    fmt.Sprintf("server.gitlab.events.%s", event),
+					Message: "unknown GitLab event key",
 				})
 			}
 		}

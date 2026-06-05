@@ -56,6 +56,7 @@ type Server struct {
 	chatEntries          []config.ChatEntry // for GET /chats/alias/list
 	amCfg                *AlertmanagerConfig
 	grCfg                *GrafanaConfig
+	glCfg                *GitLabConfig
 	mentionsResolver     mentions.UserResolver
 	botMentionsResolvers map[string]mentions.UserResolver // per-bot resolvers for multi-host setups
 	callbackRouter       *CallbackRouter
@@ -93,6 +94,13 @@ func WithAlertmanager(cfg *AlertmanagerConfig) Option {
 func WithGrafana(cfg *GrafanaConfig) Option {
 	return func(s *Server) {
 		s.grCfg = cfg
+	}
+}
+
+// WithGitLab enables the GitLab webhook endpoint.
+func WithGitLab(cfg *GitLabConfig) Option {
+	return func(s *Server) {
+		s.glCfg = cfg
 	}
 }
 
@@ -279,6 +287,20 @@ func New(cfg Config, sendFn SendFunc, chatResolver ChatResolver, opts ...Option)
 			chatInfo = s.grCfg.FallbackChatID
 		}
 		vlog.Info("server: grafana endpoint enabled (chat: %s)", chatInfo)
+	}
+
+	if s.glCfg != nil {
+		full := base + "/gitlab"
+		r.Method("POST", full, s.apm.WrapHandler("POST /gitlab", http.HandlerFunc(s.handleGitLab)))
+		chatInfo := "from ?chat_id param"
+		if s.glCfg.DefaultChatID != "" {
+			chatInfo = s.glCfg.DefaultChatID
+		} else if cfg.DefaultChatAlias != "" {
+			chatInfo = cfg.DefaultChatAlias
+		} else if s.glCfg.FallbackChatID != "" {
+			chatInfo = s.glCfg.FallbackChatID
+		}
+		vlog.Info("server: gitlab endpoint enabled (chat: %s, projects: %d)", chatInfo, len(s.glCfg.Projects))
 	}
 
 	if s.callbackRouter != nil && s.callbacksCfg != nil {

@@ -294,8 +294,9 @@ express-botx serve --config config.yaml --api-key env:MY_API_KEY
 | `POST` | `{basePath}/send` | Отправка сообщения (JSON / multipart) |
 | `POST` | `{basePath}/alertmanager` | Приём вебхуков от Alertmanager |
 | `POST` | `{basePath}/grafana` | Приём вебхуков от Grafana |
+| `POST` | `{basePath}/gitlab` | Приём вебхуков от GitLab |
 
-Все `POST`-эндпоинты требуют авторизации: `Authorization: Bearer <key>` или `X-API-Key: <key>`.
+`/send`, `/alertmanager` и `/grafana` требуют авторизации: `Authorization: Bearer <key>` или `X-API-Key: <key>`. `/gitlab` проверяет GitLab Secret Token из заголовка `X-Gitlab-Token`.
 
 ### serve --enqueue (асинхронный режим)
 

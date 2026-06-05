@@ -85,7 +85,7 @@ curl -X POST http://localhost:8080/api/v1/send \
 ```
 
 
-Эндпоинты (все POST требуют `Authorization: Bearer <key>`):
+Эндпоинты:
 
 | Метод | Путь | Описание |
 |-------|------|----------|
@@ -93,6 +93,9 @@ curl -X POST http://localhost:8080/api/v1/send \
 | `POST` | `/api/v1/send` | Отправка сообщения |
 | `POST` | `/api/v1/alertmanager` | Вебхук Alertmanager |
 | `POST` | `/api/v1/grafana` | Вебхук Grafana |
+| `POST` | `/api/v1/gitlab` | Вебхук GitLab |
+
+`/send`, `/alertmanager` и `/grafana` требуют `Authorization: Bearer <key>` или `X-API-Key`. `/gitlab` проверяет GitLab Secret Token из заголовка `X-Gitlab-Token`.
 
 Сервер автоматически добавляет заголовок `X-Request-ID` к каждому ответу (если клиент не передал свой, генерируется уникальный). Все HTTP-запросы логируются в stderr (метод, путь, статус, время выполнения).
 

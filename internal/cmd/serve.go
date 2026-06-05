@@ -303,6 +303,21 @@ Options:
 	}
 	srvOpts = append(srvOpts, server.WithGrafana(grCfg))
 
+	// GitLab endpoint (enabled when configured)
+	if cfg.Server.GitLab != nil {
+		glCfg, err := buildGitLabConfig(cfg.Server.GitLab)
+		if err != nil {
+			return err
+		}
+		if glCfg.DefaultChatID == "" && len(cfg.Chats) == 1 {
+			for alias := range cfg.Chats {
+				glCfg.FallbackChatID = alias
+				vlog.V1("gitlab: using single chat alias %q as fallback", alias)
+			}
+		}
+		srvOpts = append(srvOpts, server.WithGitLab(glCfg))
+	}
+
 	// Callback endpoints
 	if cb := cfg.Server.Callbacks; cb != nil && len(cb.Rules) > 0 {
 		if err := cb.Validate(); err != nil {
@@ -513,6 +528,33 @@ func buildGrafanaConfig(gr *config.GrafanaYAMLConfig, configPath string) (*serve
 		DefaultChatID: gr.DefaultChatID,
 		ErrorStates:   states,
 		Template:      tmpl,
+	}, nil
+}
+
+func buildGitLabConfig(gl *config.GitLabYAMLConfig) (*server.GitLabConfig, error) {
+	if gl.Token == "" {
+		return nil, fmt.Errorf("gitlab: token is required")
+	}
+	token, err := secret.Resolve(gl.Token)
+	if err != nil {
+		return nil, fmt.Errorf("resolving gitlab token: %w", err)
+	}
+	if token == "" {
+		return nil, fmt.Errorf("gitlab: token is empty")
+	}
+	projects := make(map[string]string, len(gl.Projects))
+	for project, chatID := range gl.Projects {
+		projects[project] = chatID
+	}
+	events := make(map[string]bool, len(gl.Events))
+	for event, enabled := range gl.Events {
+		events[event] = enabled
+	}
+	return &server.GitLabConfig{
+		Token:         token,
+		DefaultChatID: gl.DefaultChatID,
+		Projects:      projects,
+		Events:        events,
 	}, nil
 }
 

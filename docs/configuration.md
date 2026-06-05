@@ -64,6 +64,18 @@ server:
   grafana:                                  # опционально — endpoint включён по умолчанию
     default_chat_id: alerts
     error_states: [alerting]              # по умолчанию
+  gitlab:                                  # опционально — endpoint включается этой секцией
+    token: env:GITLAB_WEBHOOK_TOKEN        # проверяется по X-Gitlab-Token
+    default_chat_id: deploy
+    projects:
+      group/service-a: deploy              # project path -> UUID или алиас чата
+      group/service-b: alerts
+    events:
+      push: true
+      merge_request: true
+      tag_push: true
+      pipeline: true
+      job: false
 ```
 
 ## Переменные окружения
@@ -185,6 +197,28 @@ express-botx config chat list                             # покажет (defa
 Приоритет выбора чата в HTTP-сервере:
 - `/send`: `chat_id` из запроса → чат по умолчанию → ошибка
 - `/alertmanager`, `/grafana`: `?chat_id=` → `default_chat_id` из конфига вебхука → чат по умолчанию → единственный чат → ошибка
+- `/gitlab`: `?chat_id=` → `server.gitlab.projects[project_path]` → `server.gitlab.default_chat_id` → чат по умолчанию → единственный чат → ошибка
+
+## GitLab webhooks
+
+Endpoint `POST /api/v1/gitlab` принимает встроенные webhooks GitLab. Он не использует общий `X-API-Key`; защита делается через GitLab Secret Token:
+
+```yaml
+server:
+  gitlab:
+    token: env:GITLAB_WEBHOOK_TOKEN
+    default_chat_id: deploy
+    projects:
+      group/service-a: service-a-chat
+```
+
+В GitLab настройте webhook:
+
+- URL: `https://express-botx.example.com/api/v1/gitlab`
+- Secret token: значение из `GITLAB_WEBHOOK_TOKEN`
+- Events: Push events, Merge request events, Tag push events, Pipeline events, Job events
+
+Поддержанные ключи `events`: `push`, `merge_request`, `tag_push`, `pipeline`, `job`. Если `events` не задан, принимаются все поддержанные события. Pipeline/job со статусами `failed`, `canceled`, `cancelled`, `skipped` отправляются как `status: error`.
 
 ## Формат host
 
