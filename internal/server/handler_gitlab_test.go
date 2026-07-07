@@ -380,6 +380,16 @@ func TestGitlab_TokenValidation(t *testing.T) {
 	}
 }
 
+func TestGitlab_EndpointNotRegisteredWithoutConfig(t *testing.T) {
+	// Without WithGitlab, the /gitlab route must not exist: a request to it
+	// returns 404 (chi's default) rather than reaching the handler.
+	srv := newTestServer([]ResolvedKey{{Name: "t", Key: "k"}})
+	w := doRequest(srv, "POST", "/api/v1/gitlab", strings.NewReader(mrOpenPayload), gitlabHeaders("secret"))
+	if w.Code != 404 {
+		t.Fatalf("status = %d, want 404 (route should be unregistered)", w.Code)
+	}
+}
+
 func TestGitlab_ChatOverride(t *testing.T) {
 	srv, cap := newGitlabTestServer(t, &GitlabConfig{DefaultChatID: "chat1", SecretToken: "secret"})
 	w := doRequest(srv, "POST", "/api/v1/gitlab?chat_id=chat2", strings.NewReader(mrOpenPayload), gitlabHeaders("secret"))

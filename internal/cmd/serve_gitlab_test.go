@@ -3,6 +3,7 @@ package cmd
 import (
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -118,6 +119,30 @@ func TestBuildGitlabConfig_MissingSecret(t *testing.T) {
 	}
 	if _, err := buildGitlabConfig(gl, ""); err == nil {
 		t.Fatal("expected error for missing secret token")
+	}
+}
+
+func TestBuildGitlabConfig_FiltersAndErrorEvents(t *testing.T) {
+	gl := &config.GitlabYAMLConfig{
+		Secret: "tok",
+		Events: config.GitlabEventsConfig{
+			Only:    []string{"merge_request.*", "pipeline.failed", "push"},
+			Exclude: []string{"merge_request.update"},
+		},
+		ErrorEvents: []string{"pipeline.failed", "build.failed"},
+	}
+	cfg, err := buildGitlabConfig(gl, "")
+	if err != nil {
+		t.Fatalf("buildGitlabConfig: %v", err)
+	}
+	if !reflect.DeepEqual(cfg.Only, []string{"merge_request.*", "pipeline.failed", "push"}) {
+		t.Errorf("Only = %v", cfg.Only)
+	}
+	if !reflect.DeepEqual(cfg.Exclude, []string{"merge_request.update"}) {
+		t.Errorf("Exclude = %v", cfg.Exclude)
+	}
+	if !reflect.DeepEqual(cfg.ErrorEvents, []string{"pipeline.failed", "build.failed"}) {
+		t.Errorf("ErrorEvents = %v", cfg.ErrorEvents)
 	}
 }
 

@@ -303,7 +303,12 @@ func New(cfg Config, sendFn SendFunc, chatResolver ChatResolver, opts ...Option)
 		} else if s.gitCfg.FallbackChatID != "" {
 			chatInfo = s.gitCfg.FallbackChatID
 		}
-		vlog.Info("server: gitlab endpoint enabled (chat: %s, token auth)", chatInfo)
+		nTemplates := 0
+		if s.gitCfg.Templates != nil {
+			nTemplates = len(s.gitCfg.Templates.byKey)
+		}
+		vlog.Info("server: gitlab endpoint enabled (chat: %s, token auth, %d templates, only=%d exclude=%d error_events=%d)",
+			chatInfo, nTemplates, len(s.gitCfg.Only), len(s.gitCfg.Exclude), len(s.gitCfg.ErrorEvents))
 	}
 
 	if s.callbackRouter != nil && s.callbacksCfg != nil {
