@@ -430,13 +430,18 @@ func ParseGitlabTemplates(inline map[string]string) (*gitlabTemplates, error) {
 }
 
 // selectTemplate picks the template for an event: exact event key, then the bare
-// kind, then the guaranteed generic default.
+// kind, then the kind.* wildcard, then the guaranteed generic default. The bare
+// kind and kind.* forms are equivalent "all subtypes" catch-alls, matched here
+// the same way the filter and error_events matchers treat them.
 func (gt *gitlabTemplates) selectTemplate(kind, eventKey string) *template.Template {
 	if t, ok := gt.byKey[eventKey]; ok {
 		return t
 	}
 	if kind != "" {
 		if t, ok := gt.byKey[kind]; ok {
+			return t
+		}
+		if t, ok := gt.byKey[kind+".*"]; ok {
 			return t
 		}
 	}

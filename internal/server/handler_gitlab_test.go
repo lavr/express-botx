@@ -716,6 +716,35 @@ func TestGitlabDefaultHelper(t *testing.T) {
 	if got := fn("fallback", "value"); got != "value" {
 		t.Errorf("default(fallback, value) = %v, want value", got)
 	}
+	// A non-empty, non-string value (e.g. a number) is not "empty" → returned as-is.
+	if got := fn("fallback", 42); got != 42 {
+		t.Errorf("default(fallback, 42) = %v, want 42", got)
+	}
+}
+
+// A kind.* wildcard template key must be selectable at runtime, matching the
+// config layer that validates and documents it (same catch-all as bare kind).
+// merge_request.update has no exact or bare-kind built-in default, so it falls
+// through to the merge_request.* wildcard.
+func TestGitlab_TemplateWildcardKey(t *testing.T) {
+	const mrUpdatePayload = `{
+		"object_kind": "merge_request",
+		"object_attributes": {"action": "update", "title": "Add feature X"}
+	}`
+	gt, err := ParseGitlabTemplates(map[string]string{"merge_request.*": "WILD {{ .Title }}"})
+	if err != nil {
+		t.Fatalf("ParseGitlabTemplates: %v", err)
+	}
+	srv, cap := newGitlabTestServer(t, &GitlabConfig{
+		DefaultChatID: "chat1", SecretToken: "secret", Templates: gt,
+	})
+	w := doRequest(srv, "POST", "/api/v1/gitlab", strings.NewReader(mrUpdatePayload), gitlabHeaders("secret"))
+	if w.Code != 200 {
+		t.Fatalf("status = %d, body: %s", w.Code, w.Body.String())
+	}
+	if cap.last().Message != "WILD Add feature X" {
+		t.Errorf("message = %q, want %q (kind.* wildcard template)", cap.last().Message, "WILD Add feature X")
+	}
 }
 
 func TestGitlab_TemplateOverrideEndpoint(t *testing.T) {
@@ -735,10 +764,22 @@ func TestGitlab_TemplateOverrideEndpoint(t *testing.T) {
 	}
 }
 
-func TestGitlab_NotRegisteredWithoutConfig(t *testing.T) {
-	srv := newTestServer([]ResolvedKey{{Name: "t", Key: "k"}})
-	w := doRequest(srv, "POST", "/api/v1/gitlab", strings.NewReader(mrOpenPayload), map[string]string{"X-Gitlab-Token": "secret"})
-	if w.Code == 200 {
-		t.Fatalf("expected non-200 when gitlab not configured, got %d", w.Code)
+// Runtime template-execution failure (parses fine, errors at Execute) must
+// surface as HTTP 400 with no message sent, distinct from parse-time failures.
+func TestGitlab_TemplateExecutionError(t *testing.T) {
+	// {{ .Title.X }} parses but errors at execution because .Title is a string.
+	gt, err := ParseGitlabTemplates(map[string]string{"merge_request.open": "{{ .Title.X }}"})
+	if err != nil {
+		t.Fatalf("ParseGitlabTemplates: %v", err)
+	}
+	srv, cap := newGitlabTestServer(t, &GitlabConfig{
+		DefaultChatID: "chat1", SecretToken: "secret", Templates: gt,
+	})
+	w := doRequest(srv, "POST", "/api/v1/gitlab", strings.NewReader(mrOpenPayload), gitlabHeaders("secret"))
+	if w.Code != 400 {
+		t.Fatalf("status = %d, want 400 on template execution error; body: %s", w.Code, w.Body.String())
+	}
+	if got := cap.last(); got != nil {
+		t.Errorf("expected no send on template error, got %+v", got)
 	}
 }

@@ -122,6 +122,17 @@ func TestBuildGitlabConfig_MissingSecret(t *testing.T) {
 	}
 }
 
+// A secret reference that fails to resolve (e.g. an unset env var) must abort
+// startup rather than register an endpoint with a broken token.
+func TestBuildGitlabConfig_SecretResolveError(t *testing.T) {
+	gl := &config.GitlabYAMLConfig{
+		Secret: "env:GITLAB_DEFINITELY_UNSET_TOKEN_XYZ",
+	}
+	if _, err := buildGitlabConfig(gl, ""); err == nil {
+		t.Fatal("expected error when secret reference cannot be resolved")
+	}
+}
+
 func TestBuildGitlabConfig_FiltersAndErrorEvents(t *testing.T) {
 	gl := &config.GitlabYAMLConfig{
 		Secret: "tok",
