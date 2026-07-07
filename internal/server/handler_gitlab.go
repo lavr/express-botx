@@ -1,5 +1,23 @@
 package server
 
+// The GitLab handler implements a reusable "generic webhook" pattern that other
+// event-source handlers (any provider that emits many, evolving event types) can
+// follow instead of hardcoding a struct per event:
+//
+//  1. Generic decode: unmarshal the body into map[string]any rather than a typed
+//     struct, so new/unknown event shapes never require Go changes.
+//  2. Event key: reduce the payload to a stable "kind" or "kind.subtype" string
+//     (deriveEventKey) and a best-effort normalized view (normalizeGitlab) with a
+//     `get "a.b.c"` template helper for arbitrary nested access into .Raw.
+//  3. Config filter: allow/deny events by key with wildcard matching
+//     (eventMatches / passesFilter) — only + exclude, exclude wins.
+//  4. Template registry: select a template by exact key, then bare kind, then a
+//     guaranteed generic default (gitlabTemplates) so every event always renders.
+//  5. Status mapping: reuse the same key matcher against error_events to set the
+//     BotX notification status (ok/error).
+//
+// See docs/integrations.md ("GitLab") for the user-facing description.
+
 import (
 	"bytes"
 	"crypto/subtle"
