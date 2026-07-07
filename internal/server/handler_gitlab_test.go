@@ -7,6 +7,8 @@ import (
 	"strings"
 	"sync"
 	"testing"
+
+	"github.com/lavr/express-botx/internal/config"
 )
 
 // newGitlabTestServer builds a server with the gitlab endpoint enabled and a
@@ -850,5 +852,239 @@ func TestGitlab_TemplateExecutionError(t *testing.T) {
 	}
 	if got := cap.last(); got != nil {
 		t.Errorf("expected no send on template error, got %+v", got)
+	}
+}
+
+// --- Task 6: routing fan-out and multi-send ---
+
+// mustCompileRoutes compiles YAML routing rules for the handler fan-out tests.
+func mustCompileRoutes(t *testing.T, in []config.GitlabRouteYAMLConfig) []compiledRoute {
+	t.Helper()
+	routes, err := CompileGitlabRoutes(in)
+	if err != nil {
+		t.Fatalf("CompileGitlabRoutes: %v", err)
+	}
+	return routes
+}
+
+// newGitlabFanoutServer builds a gitlab server with caller-supplied send and
+// chat resolvers so fan-out tests can simulate per-chat success and failure. A
+// nil chatFn resolves every alias to itself (ChatID == alias).
+func newGitlabFanoutServer(t *testing.T, cfg *GitlabConfig, sendFn SendFunc, chatFn ChatResolver) (*Server, *captureSend) {
+	t.Helper()
+	if cfg.Templates == nil {
+		tmpls, err := ParseGitlabTemplates(nil)
+		if err != nil {
+			t.Fatalf("parse default templates: %v", err)
+		}
+		cfg.Templates = tmpls
+	}
+	cap := &captureSend{}
+	send := func(ctx context.Context, p *SendPayload) (string, error) {
+		cap.record(p)
+		return sendFn(ctx, p)
+	}
+	if chatFn == nil {
+		chatFn = func(chatID string) (ChatResolveResult, error) {
+			return ChatResolveResult{ChatID: chatID}, nil
+		}
+	}
+	srv := New(Config{Listen: ":0", BasePath: "/api/v1"}, send, chatFn, WithGitlab(cfg))
+	return srv, cap
+}
+
+// okSend is a SendFunc that always succeeds with a fixed sync id.
+func okSend(context.Context, *SendPayload) (string, error) { return "sync-1", nil }
+
+// TestGitlab_QueryChatBypassesRoutes: an explicit ?chat_id overrides the routing
+// engine entirely, delivering to that single chat with the original response.
+func TestGitlab_QueryChatBypassesRoutes(t *testing.T) {
+	routes := mustCompileRoutes(t, []config.GitlabRouteYAMLConfig{
+		{Match: map[string][]string{"project": {"myproj"}}, Chats: []string{"chatA", "chatB"}},
+	})
+	srv, cap := newGitlabFanoutServer(t, &GitlabConfig{SecretToken: "secret", Routes: routes}, okSend, nil)
+	w := doRequest(srv, "POST", "/api/v1/gitlab?chat_id=override", strings.NewReader(mrOpenPayload), gitlabHeaders("secret"))
+	if w.Code != 200 {
+		t.Fatalf("status = %d, body: %s", w.Code, w.Body.String())
+	}
+	if cap.count() != 1 {
+		t.Fatalf("send count = %d, want 1 (routes bypassed)", cap.count())
+	}
+	if cap.last().ChatID != "override" {
+		t.Errorf("chat = %q, want override", cap.last().ChatID)
+	}
+	// Single-chat path keeps the plain sendResponse shape (sync_id, no results).
+	var resp sendResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode: %v (body: %s)", err, w.Body.String())
+	}
+	if !resp.OK || resp.SyncID != "sync-1" {
+		t.Errorf("response = %+v, want ok/sync-1", resp)
+	}
+}
+
+// TestGitlab_FanoutTwoChats: a matching rule fans the event out to both chats.
+func TestGitlab_FanoutTwoChats(t *testing.T) {
+	routes := mustCompileRoutes(t, []config.GitlabRouteYAMLConfig{
+		{Match: map[string][]string{"project": {"myproj"}}, Chats: []string{"chatA", "chatB"}},
+	})
+	srv, cap := newGitlabFanoutServer(t, &GitlabConfig{SecretToken: "secret", Routes: routes}, okSend, nil)
+	w := doRequest(srv, "POST", "/api/v1/gitlab", strings.NewReader(mrOpenPayload), gitlabHeaders("secret"))
+	if w.Code != 200 {
+		t.Fatalf("status = %d, body: %s", w.Code, w.Body.String())
+	}
+	if cap.count() != 2 {
+		t.Fatalf("send count = %d, want 2", cap.count())
+	}
+	var resp gitlabFanoutResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode: %v (body: %s)", err, w.Body.String())
+	}
+	if !resp.OK || len(resp.Results) != 2 || len(resp.Errors) != 0 {
+		t.Fatalf("response = %+v, want ok with 2 results, 0 errors", resp)
+	}
+	got := map[string]string{}
+	for _, r := range resp.Results {
+		got[r.Chat] = r.SyncID
+	}
+	if got["chatA"] != "sync-1" || got["chatB"] != "sync-1" {
+		t.Errorf("results = %+v, want chatA/chatB -> sync-1", resp.Results)
+	}
+}
+
+// TestGitlab_FanoutPartialFailure: one chat fails; the response is 200 with the
+// surviving result and the failure listed in errors.
+func TestGitlab_FanoutPartialFailure(t *testing.T) {
+	routes := mustCompileRoutes(t, []config.GitlabRouteYAMLConfig{
+		{Match: map[string][]string{"project": {"myproj"}}, Chats: []string{"chatA", "chatB"}},
+	})
+	sendFn := func(_ context.Context, p *SendPayload) (string, error) {
+		if p.ChatID == "chatB" {
+			return "", fmt.Errorf("botx unavailable")
+		}
+		return "sync-1", nil
+	}
+	srv, cap := newGitlabFanoutServer(t, &GitlabConfig{SecretToken: "secret", Routes: routes}, sendFn, nil)
+	w := doRequest(srv, "POST", "/api/v1/gitlab", strings.NewReader(mrOpenPayload), gitlabHeaders("secret"))
+	if w.Code != 200 {
+		t.Fatalf("status = %d, want 200 (partial success); body: %s", w.Code, w.Body.String())
+	}
+	if cap.count() != 2 {
+		t.Fatalf("send count = %d, want 2 (both attempted)", cap.count())
+	}
+	var resp gitlabFanoutResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode: %v (body: %s)", err, w.Body.String())
+	}
+	if !resp.OK || len(resp.Results) != 1 || len(resp.Errors) != 1 {
+		t.Fatalf("response = %+v, want ok with 1 result, 1 error", resp)
+	}
+	if resp.Results[0].Chat != "chatA" || resp.Errors[0].Chat != "chatB" {
+		t.Errorf("result/error chats = %q/%q, want chatA/chatB", resp.Results[0].Chat, resp.Errors[0].Chat)
+	}
+}
+
+// TestGitlab_FanoutAllFail: every delivery fails -> 502 with all errors listed.
+func TestGitlab_FanoutAllFail(t *testing.T) {
+	routes := mustCompileRoutes(t, []config.GitlabRouteYAMLConfig{
+		{Match: map[string][]string{"project": {"myproj"}}, Chats: []string{"chatA", "chatB"}},
+	})
+	sendFn := func(context.Context, *SendPayload) (string, error) {
+		return "", fmt.Errorf("botx unavailable")
+	}
+	srv, cap := newGitlabFanoutServer(t, &GitlabConfig{SecretToken: "secret", Routes: routes}, sendFn, nil)
+	w := doRequest(srv, "POST", "/api/v1/gitlab", strings.NewReader(mrOpenPayload), gitlabHeaders("secret"))
+	if w.Code != 502 {
+		t.Fatalf("status = %d, want 502 (all failed); body: %s", w.Code, w.Body.String())
+	}
+	if cap.count() != 2 {
+		t.Fatalf("send count = %d, want 2 (both attempted)", cap.count())
+	}
+	var resp gitlabFanoutResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode: %v (body: %s)", err, w.Body.String())
+	}
+	if resp.OK || len(resp.Results) != 0 || len(resp.Errors) != 2 {
+		t.Errorf("response = %+v, want not-ok with 0 results, 2 errors", resp)
+	}
+}
+
+// TestGitlab_NoRouteMatchFallsBackToDefault: when no rule matches, the event is
+// delivered to the configured default chat rather than dropped.
+func TestGitlab_NoRouteMatchFallsBackToDefault(t *testing.T) {
+	routes := mustCompileRoutes(t, []config.GitlabRouteYAMLConfig{
+		{Match: map[string][]string{"project": {"otherproj"}}, Chats: []string{"chatA"}},
+	})
+	srv, cap := newGitlabFanoutServer(t, &GitlabConfig{SecretToken: "secret", DefaultChatID: "dflt", Routes: routes}, okSend, nil)
+	w := doRequest(srv, "POST", "/api/v1/gitlab", strings.NewReader(mrOpenPayload), gitlabHeaders("secret"))
+	if w.Code != 200 {
+		t.Fatalf("status = %d, body: %s", w.Code, w.Body.String())
+	}
+	if cap.count() != 1 || cap.last().ChatID != "dflt" {
+		t.Fatalf("send count = %d chat = %q, want 1 to dflt", cap.count(), func() string {
+			if cap.last() == nil {
+				return ""
+			}
+			return cap.last().ChatID
+		}())
+	}
+	var resp gitlabFanoutResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode: %v (body: %s)", err, w.Body.String())
+	}
+	if !resp.OK || len(resp.Results) != 1 || resp.Results[0].Chat != "dflt" {
+		t.Errorf("response = %+v, want ok with single dflt result", resp)
+	}
+}
+
+// TestGitlab_NoRouteMatchNoDefaultIgnored: no rule matches and no default chat
+// is configured -> the event is ignored (200) rather than delivered or errored.
+func TestGitlab_NoRouteMatchNoDefaultIgnored(t *testing.T) {
+	routes := mustCompileRoutes(t, []config.GitlabRouteYAMLConfig{
+		{Match: map[string][]string{"project": {"otherproj"}}, Chats: []string{"chatA"}},
+	})
+	srv, cap := newGitlabFanoutServer(t, &GitlabConfig{SecretToken: "secret", Routes: routes}, okSend, nil)
+	w := doRequest(srv, "POST", "/api/v1/gitlab", strings.NewReader(mrOpenPayload), gitlabHeaders("secret"))
+	if w.Code != 200 {
+		t.Fatalf("status = %d, body: %s", w.Code, w.Body.String())
+	}
+	if cap.count() != 0 {
+		t.Errorf("send count = %d, want 0 (no match, no default)", cap.count())
+	}
+	var resp gitlabIgnoredResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode: %v (body: %s)", err, w.Body.String())
+	}
+	if !resp.OK || !resp.Ignored || resp.Event != "merge_request.open" {
+		t.Errorf("response = %+v, want ok/ignored merge_request.open", resp)
+	}
+}
+
+// TestGitlab_FanoutChatResolveError: a chat that fails to resolve is reported as
+// a per-chat error while the other chat still delivers (best-effort fan-out).
+func TestGitlab_FanoutChatResolveError(t *testing.T) {
+	routes := mustCompileRoutes(t, []config.GitlabRouteYAMLConfig{
+		{Match: map[string][]string{"project": {"myproj"}}, Chats: []string{"chatA", "bad-alias"}},
+	})
+	chatFn := func(chatID string) (ChatResolveResult, error) {
+		if chatID == "bad-alias" {
+			return ChatResolveResult{}, fmt.Errorf("unknown chat alias %q", chatID)
+		}
+		return ChatResolveResult{ChatID: chatID}, nil
+	}
+	srv, cap := newGitlabFanoutServer(t, &GitlabConfig{SecretToken: "secret", Routes: routes}, okSend, chatFn)
+	w := doRequest(srv, "POST", "/api/v1/gitlab", strings.NewReader(mrOpenPayload), gitlabHeaders("secret"))
+	if w.Code != 200 {
+		t.Fatalf("status = %d, want 200 (one chat still delivers); body: %s", w.Code, w.Body.String())
+	}
+	if cap.count() != 1 {
+		t.Fatalf("send count = %d, want 1 (only the resolvable chat)", cap.count())
+	}
+	var resp gitlabFanoutResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode: %v (body: %s)", err, w.Body.String())
+	}
+	if !resp.OK || len(resp.Results) != 1 || resp.Results[0].Chat != "chatA" || len(resp.Errors) != 1 || resp.Errors[0].Chat != "bad-alias" {
+		t.Errorf("response = %+v, want chatA result + bad-alias error", resp)
 	}
 }
