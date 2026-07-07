@@ -56,6 +56,7 @@ type Server struct {
 	chatEntries          []config.ChatEntry // for GET /chats/alias/list
 	amCfg                *AlertmanagerConfig
 	grCfg                *GrafanaConfig
+	gitCfg               *GitlabConfig
 	mentionsResolver     mentions.UserResolver
 	botMentionsResolvers map[string]mentions.UserResolver // per-bot resolvers for multi-host setups
 	callbackRouter       *CallbackRouter
@@ -93,6 +94,14 @@ func WithAlertmanager(cfg *AlertmanagerConfig) Option {
 func WithGrafana(cfg *GrafanaConfig) Option {
 	return func(s *Server) {
 		s.grCfg = cfg
+	}
+}
+
+// WithGitlab enables the GitLab webhook endpoint. It is authenticated by the
+// X-Gitlab-Token header rather than the standard API-key middleware.
+func WithGitlab(cfg *GitlabConfig) Option {
+	return func(s *Server) {
+		s.gitCfg = cfg
 	}
 }
 
@@ -279,6 +288,22 @@ func New(cfg Config, sendFn SendFunc, chatResolver ChatResolver, opts ...Option)
 			chatInfo = s.grCfg.FallbackChatID
 		}
 		vlog.Info("server: grafana endpoint enabled (chat: %s)", chatInfo)
+	}
+
+	if s.gitCfg != nil {
+		// GitLab cannot set Authorization/X-API-Key headers, so this route
+		// authenticates via the X-Gitlab-Token header inside the handler
+		// rather than through authMiddleware.
+		r.Method("POST", base+"/gitlab", s.apm.WrapHandler("POST /gitlab", http.HandlerFunc(s.handleGitlab)))
+		chatInfo := "from ?chat_id param"
+		if s.gitCfg.DefaultChatID != "" {
+			chatInfo = s.gitCfg.DefaultChatID
+		} else if cfg.DefaultChatAlias != "" {
+			chatInfo = cfg.DefaultChatAlias
+		} else if s.gitCfg.FallbackChatID != "" {
+			chatInfo = s.gitCfg.FallbackChatID
+		}
+		vlog.Info("server: gitlab endpoint enabled (chat: %s, token auth)", chatInfo)
 	}
 
 	if s.callbackRouter != nil && s.callbacksCfg != nil {
