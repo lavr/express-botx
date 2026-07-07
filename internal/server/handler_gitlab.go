@@ -55,6 +55,11 @@ type GitlabConfig struct {
 	// (surfaced as BotX notification.status). Entries use the same matching as
 	// Only/Exclude (full key, bare kind, or "kind.*"). Everything else is "ok".
 	ErrorEvents []string
+	// Routes is the compiled, ordered routing rule list. When non-empty (and no
+	// explicit ?chat_id overrides it) an incoming event fans out to the chats of
+	// every matching rule (see gitlab_routing.go). Empty keeps the single-chat
+	// behaviour (DefaultChatID / FallbackChatID).
+	Routes []compiledRoute
 }
 
 // gitlabView is the view-model passed to the message template. It is derived

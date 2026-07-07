@@ -22,8 +22,11 @@ import (
 	"fmt"
 	"path"
 	"regexp"
+	"sort"
 	"strconv"
 	"strings"
+
+	"github.com/lavr/express-botx/internal/config"
 )
 
 // patternMatcher tests a single string value against a compiled pattern. glob
@@ -289,6 +292,54 @@ func routeMatches(view gitlabView, route compiledRoute) bool {
 		}
 	}
 	return true
+}
+
+// CompileGitlabRoutes turns the YAML routing rules into the compiled form the
+// engine evaluates, compiling every condition's patterns up front so a malformed
+// regex fails at serve startup rather than per-request. Rule order is preserved;
+// within a rule the selectors are compiled in a stable (sorted) order, which does
+// not affect matching (AND across selectors) but keeps the compiled form
+// deterministic. The "event" selector carries an eventMatcher (kind / kind.subtype
+// / kind.* semantics); every other selector compiles its patterns via
+// compilePattern (glob or "/regex/"). An empty input yields a nil slice, which
+// keeps the endpoint's single-chat behaviour.
+func CompileGitlabRoutes(routes []config.GitlabRouteYAMLConfig) ([]compiledRoute, error) {
+	if len(routes) == 0 {
+		return nil, nil
+	}
+	compiled := make([]compiledRoute, 0, len(routes))
+	for i, r := range routes {
+		cr := compiledRoute{chats: r.Chats, stop: r.Stop}
+		selectors := make([]string, 0, len(r.Match))
+		for selector := range r.Match {
+			selectors = append(selectors, selector)
+		}
+		sort.Strings(selectors)
+		for _, selector := range selectors {
+			patterns := r.Match[selector]
+			if selector == "event" {
+				cr.conds = append(cr.conds, compiledCondition{
+					selector: "event",
+					event:    eventMatcher(patterns),
+				})
+				continue
+			}
+			matchers := make([]patternMatcher, 0, len(patterns))
+			for _, p := range patterns {
+				m, err := compilePattern(p)
+				if err != nil {
+					return nil, fmt.Errorf("routes[%d].match.%s: %w", i, selector, err)
+				}
+				matchers = append(matchers, m)
+			}
+			cr.conds = append(cr.conds, compiledCondition{
+				selector: selector,
+				matchers: matchers,
+			})
+		}
+		compiled = append(compiled, cr)
+	}
+	return compiled, nil
 }
 
 // evaluateRoutes runs the ordered rule list against an event. Every matching rule

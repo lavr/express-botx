@@ -534,6 +534,16 @@ func buildGitlabConfig(gl *config.GitlabYAMLConfig, configPath string) (*server.
 		return nil, err
 	}
 
+	// Compile routing rules (glob/regex/event patterns) up front so a malformed
+	// pattern fails startup rather than every matching request.
+	routes, err := server.CompileGitlabRoutes(gl.Routes)
+	if err != nil {
+		return nil, fmt.Errorf("gitlab routes: %w", err)
+	}
+	if len(routes) > 0 {
+		vlog.V1("gitlab: compiled %d routing rule(s)", len(routes))
+	}
+
 	return &server.GitlabConfig{
 		DefaultChatID: gl.DefaultChatID,
 		SecretToken:   secretToken,
@@ -541,6 +551,7 @@ func buildGitlabConfig(gl *config.GitlabYAMLConfig, configPath string) (*server.
 		Only:          gl.Events.Only,
 		Exclude:       gl.Events.Exclude,
 		ErrorEvents:   gl.ErrorEvents,
+		Routes:        routes,
 	}, nil
 }
 

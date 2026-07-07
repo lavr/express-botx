@@ -3,6 +3,8 @@ package server
 import (
 	"reflect"
 	"testing"
+
+	"github.com/lavr/express-botx/internal/config"
 )
 
 func TestCompilePatternGlob(t *testing.T) {
@@ -490,5 +492,106 @@ func TestConditionMatches(t *testing.T) {
 				t.Errorf("conditionMatches(%v) = %v, want %v", tt.values, got, tt.want)
 			}
 		})
+	}
+}
+
+func TestCompileGitlabRoutesEmpty(t *testing.T) {
+	// No routes and empty routes both yield nil, preserving single-chat behaviour.
+	for _, in := range [][]config.GitlabRouteYAMLConfig{nil, {}} {
+		routes, err := CompileGitlabRoutes(in)
+		if err != nil {
+			t.Fatalf("CompileGitlabRoutes(%v) error: %v", in, err)
+		}
+		if routes != nil {
+			t.Errorf("CompileGitlabRoutes(%v) = %v, want nil", in, routes)
+		}
+	}
+}
+
+func TestCompileGitlabRoutesGlobRegexEvent(t *testing.T) {
+	in := []config.GitlabRouteYAMLConfig{
+		{
+			Match: map[string][]string{
+				"project": {"group/backend/*"},
+				"branch":  {`/^release-/`},
+				"event":   {"merge_request.open", "push"},
+			},
+			Chats: []string{"backend"},
+			Stop:  true,
+		},
+		{
+			Match: map[string][]string{},
+			Chats: []string{"catch-all"},
+		},
+	}
+
+	routes, err := CompileGitlabRoutes(in)
+	if err != nil {
+		t.Fatalf("CompileGitlabRoutes error: %v", err)
+	}
+	if len(routes) != 2 {
+		t.Fatalf("compiled %d routes, want 2", len(routes))
+	}
+
+	// First route: chats/stop preserved, conditions sorted deterministically
+	// (branch, event, project), with the right matcher type per selector.
+	r0 := routes[0]
+	if !reflect.DeepEqual(r0.chats, []string{"backend"}) || !r0.stop {
+		t.Fatalf("route0 chats=%v stop=%v, want [backend] true", r0.chats, r0.stop)
+	}
+	if len(r0.conds) != 3 {
+		t.Fatalf("route0 has %d conds, want 3", len(r0.conds))
+	}
+	wantSelectors := []string{"branch", "event", "project"}
+	for i, want := range wantSelectors {
+		if r0.conds[i].selector != want {
+			t.Errorf("route0 cond[%d].selector = %q, want %q", i, r0.conds[i].selector, want)
+		}
+	}
+	// branch -> regex, event -> eventMatcher, project -> glob.
+	if _, ok := r0.conds[0].matchers[0].(regexMatcher); !ok {
+		t.Errorf("branch matcher = %T, want regexMatcher", r0.conds[0].matchers[0])
+	}
+	if !reflect.DeepEqual([]string(r0.conds[1].event), []string{"merge_request.open", "push"}) {
+		t.Errorf("event matcher = %v, want [merge_request.open push]", r0.conds[1].event)
+	}
+	if r0.conds[1].matchers != nil {
+		t.Errorf("event condition should carry no value matchers, got %v", r0.conds[1].matchers)
+	}
+	if _, ok := r0.conds[2].matchers[0].(globMatcher); !ok {
+		t.Errorf("project matcher = %T, want globMatcher", r0.conds[2].matchers[0])
+	}
+
+	// Second route: empty match -> catch-all with no conditions.
+	if len(routes[1].conds) != 0 {
+		t.Errorf("route1 has %d conds, want 0 (catch-all)", len(routes[1].conds))
+	}
+
+	// End-to-end: the compiled rules route as expected.
+	view := gitlabView{
+		Kind:     "merge_request",
+		EventKey: "merge_request.open",
+		Project:  "group/backend/api",
+		Raw:      map[string]any{"object_attributes": map[string]any{"target_branch": "release-2"}},
+	}
+	chats, matched := evaluateRoutes(routes, view)
+	if !matched {
+		t.Fatal("expected a match")
+	}
+	// stop:true on route0 halts the scan before the catch-all contributes.
+	if !reflect.DeepEqual(chats, []string{"backend"}) {
+		t.Errorf("chats = %v, want [backend]", chats)
+	}
+}
+
+func TestCompileGitlabRoutesBadRegex(t *testing.T) {
+	in := []config.GitlabRouteYAMLConfig{
+		{
+			Match: map[string][]string{"branch": {`/[unterminated/`}},
+			Chats: []string{"c"},
+		},
+	}
+	if _, err := CompileGitlabRoutes(in); err == nil {
+		t.Fatal("expected error for malformed regex, got nil")
 	}
 }
