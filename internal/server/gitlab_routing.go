@@ -20,7 +20,9 @@ package server
 
 import (
 	"fmt"
+	"path"
 	"regexp"
+	"strconv"
 	"strings"
 )
 
@@ -104,4 +106,143 @@ type eventMatcher []string
 
 func (m eventMatcher) matchesEvent(kind, eventKey string) bool {
 	return eventMatches(kind, eventKey, []string(m))
+}
+
+// --- Task 2: match context (reserved keys, raw dotted paths, branch) ---
+
+// gitlabBranch derives a normalized branch name for an event, straight from the
+// raw payload so gitlabView does not need a Branch field (keeping this engine
+// decoupled from the shared view model). The source depends on the kind:
+//
+//	merge_request, note -> object_attributes.target_branch
+//	                       (fallback merge_request.target_branch)
+//	push, tag_push      -> the branch of ref ("refs/heads/main" -> "main")
+//	pipeline            -> object_attributes.ref
+//	otherwise           -> "" (issue, wiki, deployment, ... have no branch)
+//
+// Non-MR notes (on a commit/issue/snippet) carry no target_branch, so they
+// resolve to "" as well.
+func gitlabBranch(kind string, raw map[string]any) string {
+	switch kind {
+	case "merge_request", "note":
+		if b := gitlabStringAt(raw, "object_attributes.target_branch"); b != "" {
+			return b
+		}
+		return gitlabStringAt(raw, "merge_request.target_branch")
+	case "push", "tag_push":
+		return refBranch(gitlabStringAt(raw, "ref"))
+	case "pipeline":
+		return gitlabStringAt(raw, "object_attributes.ref")
+	default:
+		return ""
+	}
+}
+
+// refBranch reduces a Git ref to its branch/tag name. The conventional
+// "refs/heads/" and "refs/tags/" prefixes are stripped while preserving any
+// interior slashes (so "refs/heads/release/2.0" -> "release/2.0", which still
+// matches a "release/*" glob); an unrecognised ref falls back to its basename.
+func refBranch(ref string) string {
+	if ref == "" {
+		return ""
+	}
+	for _, prefix := range []string{"refs/heads/", "refs/tags/"} {
+		if s, ok := strings.CutPrefix(ref, prefix); ok {
+			return s
+		}
+	}
+	return path.Base(ref)
+}
+
+// resolveSelector maps a match selector to the candidate string values it should
+// be tested against for this event. A reserved selector name yields the
+// corresponding normalized field (empty -> no values); any other selector is a
+// dotted path into the raw payload (scalar -> one value, array -> one value per
+// scalar element, missing -> no values). The "event" selector resolves to the
+// event key here for completeness, but rule evaluation matches it through the
+// dedicated event matcher rather than value patterns.
+func resolveSelector(view gitlabView, selector string) []string {
+	switch selector {
+	case "kind":
+		return nonEmpty(view.Kind)
+	case "event":
+		return nonEmpty(view.EventKey)
+	case "action":
+		return nonEmpty(view.Action)
+	case "project":
+		return nonEmpty(view.Project)
+	case "branch":
+		return nonEmpty(gitlabBranch(view.Kind, view.Raw))
+	case "user":
+		return nonEmpty(view.User)
+	case "title":
+		return nonEmpty(view.Title)
+	case "url":
+		return nonEmpty(view.URL)
+	default:
+		return gitlabSelectorStrings(gitlabNestedGet(view.Raw, selector))
+	}
+}
+
+// nonEmpty wraps a single reserved-field value: one value when non-empty, none
+// when empty (an absent field must not match any pattern).
+func nonEmpty(v string) []string {
+	if v == "" {
+		return nil
+	}
+	return []string{v}
+}
+
+// gitlabSelectorStrings flattens a raw payload value into matchable strings. A
+// scalar (string/number/bool) yields a single string; an array yields one string
+// per scalar element (non-scalar elements, e.g. label objects, are skipped);
+// anything else (nil, a nested object) yields no values.
+func gitlabSelectorStrings(v any) []string {
+	switch x := v.(type) {
+	case nil:
+		return nil
+	case []any:
+		out := make([]string, 0, len(x))
+		for _, e := range x {
+			if s, ok := gitlabScalarString(e); ok {
+				out = append(out, s)
+			}
+		}
+		return out
+	default:
+		if s, ok := gitlabScalarString(v); ok {
+			return []string{s}
+		}
+		return nil
+	}
+}
+
+// gitlabScalarString renders a JSON scalar as a string for pattern matching.
+// Numbers decode as float64 and are formatted without a trailing ".0"; objects
+// and arrays are not scalars and report false.
+func gitlabScalarString(v any) (string, bool) {
+	switch x := v.(type) {
+	case string:
+		return x, true
+	case bool:
+		return strconv.FormatBool(x), true
+	case float64:
+		return strconv.FormatFloat(x, 'f', -1, 64), true
+	default:
+		return "", false
+	}
+}
+
+// conditionMatches reports whether any candidate value matches any matcher
+// (OR within a condition, both across values and across patterns). The "event"
+// selector does not use this path; rule evaluation matches it separately.
+func conditionMatches(values []string, matchers []patternMatcher) bool {
+	for _, v := range values {
+		for _, m := range matchers {
+			if m.matches(v) {
+				return true
+			}
+		}
+	}
+	return false
 }
