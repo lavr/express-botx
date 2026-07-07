@@ -502,13 +502,16 @@ func buildGitlabConfig(gl *config.GitlabYAMLConfig, configPath string) (*server.
 		return nil, fmt.Errorf("gitlab: resolved secret token is empty")
 	}
 
-	// Build the template registry. Start from the built-in defaults (added by
-	// ParseGitlabTemplates) and override the generic "default" from the
-	// template_file > template source, if provided.
+	// Build the template registry. Start from the inline `templates` map, then
+	// overlay `template_files` (read from disk). Config validation guarantees a
+	// given key is not present in both. Built-in defaults are added by
+	// ParseGitlabTemplates for keys not overridden here.
 	inline := map[string]string{}
-	switch {
-	case gl.TemplateFile != "":
-		path := gl.TemplateFile
+	for k, v := range gl.Templates {
+		inline[k] = v
+	}
+	for k, p := range gl.TemplateFiles {
+		path := p
 		if !filepath.IsAbs(path) && configPath != "" {
 			path = filepath.Join(filepath.Dir(configPath), path)
 		}
@@ -516,13 +519,8 @@ func buildGitlabConfig(gl *config.GitlabYAMLConfig, configPath string) (*server.
 		if err != nil {
 			return nil, fmt.Errorf("reading gitlab template %s: %w", path, err)
 		}
-		inline["default"] = string(data)
-		vlog.V1("gitlab: loaded default template from %s", path)
-	case gl.Template != "":
-		inline["default"] = gl.Template
-		vlog.V1("gitlab: using inline default template")
-	default:
-		vlog.V1("gitlab: using built-in default templates")
+		inline[k] = string(data)
+		vlog.V1("gitlab: loaded template %q from %s", k, path)
 	}
 
 	tmpls, err := server.ParseGitlabTemplates(inline)
@@ -534,6 +532,9 @@ func buildGitlabConfig(gl *config.GitlabYAMLConfig, configPath string) (*server.
 		DefaultChatID: gl.DefaultChatID,
 		SecretToken:   secretToken,
 		Templates:     tmpls,
+		Only:          gl.Events.Only,
+		Exclude:       gl.Events.Exclude,
+		ErrorEvents:   gl.ErrorEvents,
 	}, nil
 }
 

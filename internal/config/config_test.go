@@ -2752,3 +2752,200 @@ server:
 		}
 	}
 }
+
+func TestValidate_GitlabEventKeySyntax(t *testing.T) {
+	tests := []struct {
+		name      string
+		yamlBody  string
+		wantPath  string
+		wantError bool
+	}{
+		{
+			name: "bad key in events.only",
+			yamlBody: `
+    events:
+      only: ["merge_request.open", "bad..key"]`,
+			wantPath:  "server.gitlab.events.only",
+			wantError: true,
+		},
+		{
+			name: "bad key in events.exclude",
+			yamlBody: `
+    events:
+      exclude: ["push", "no spaces allowed"]`,
+			wantPath:  "server.gitlab.events.exclude",
+			wantError: true,
+		},
+		{
+			name: "bad key in error_events",
+			yamlBody: `
+    error_events: ["pipeline.failed", ".leadingdot"]`,
+			wantPath:  "server.gitlab.error_events",
+			wantError: true,
+		},
+		{
+			name: "bad key in templates",
+			yamlBody: `
+    templates:
+      "merge_request.*": "ok"
+      "bad key": "x"`,
+			wantPath:  "server.gitlab.templates.bad key",
+			wantError: true,
+		},
+		{
+			name: "valid keys of all forms",
+			yamlBody: `
+    events:
+      only: ["push", "merge_request.open", "merge_request.*"]
+      exclude: ["tag_push"]
+    error_events: ["pipeline.failed", "build.*"]
+    templates:
+      "note.MergeRequest": "x"`,
+			wantError: false,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			rawYAML := []byte(`
+bots:
+  main:
+    host: h
+    id: 00000000-0000-0000-0000-000000000001
+    secret: s
+chats:
+  alerts:
+    id: 00000000-0000-0000-0000-000000000003
+server:
+  gitlab:
+    secret: tok
+    default_chat_id: alerts` + tc.yamlBody + "\n")
+			var cfg Config
+			if err := yaml.Unmarshal(rawYAML, &cfg); err != nil {
+				t.Fatalf("unmarshal: %v", err)
+			}
+			results := cfg.Validate(rawYAML)
+
+			var gotErr bool
+			for _, r := range results {
+				if r.Level != ValidationError {
+					continue
+				}
+				if strings.Contains(r.Message, "invalid event key") {
+					gotErr = true
+					if tc.wantPath != "" && r.Path != tc.wantPath {
+						t.Errorf("event-key error path = %q, want %q (msg: %s)", r.Path, tc.wantPath, r.Message)
+					}
+				}
+			}
+			if gotErr != tc.wantError {
+				t.Errorf("event-key error present = %v, want %v; results: %+v", gotErr, tc.wantError, results)
+			}
+		})
+	}
+}
+
+func TestValidate_GitlabTemplateKeyOverlap(t *testing.T) {
+	rawYAML := []byte(`
+bots:
+  main:
+    host: h
+    id: 00000000-0000-0000-0000-000000000001
+    secret: s
+chats:
+  alerts:
+    id: 00000000-0000-0000-0000-000000000003
+server:
+  gitlab:
+    secret: tok
+    default_chat_id: alerts
+    templates:
+      "merge_request.open": "inline"
+    template_files:
+      "merge_request.open": ./tmpl/mr.tmpl
+`)
+	var cfg Config
+	if err := yaml.Unmarshal(rawYAML, &cfg); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	found := false
+	for _, r := range cfg.Validate(rawYAML) {
+		if r.Level == ValidationError && strings.Contains(r.Message, "defined in both templates and template_files") {
+			found = true
+			if r.Path != "server.gitlab.template_files.merge_request.open" {
+				t.Errorf("overlap error path = %q", r.Path)
+			}
+		}
+	}
+	if !found {
+		t.Error("expected error for key defined in both templates and template_files")
+	}
+
+	// Disjoint keys must not trigger the overlap error.
+	rawOK := []byte(`
+bots:
+  main:
+    host: h
+    id: 00000000-0000-0000-0000-000000000001
+    secret: s
+chats:
+  alerts:
+    id: 00000000-0000-0000-0000-000000000003
+server:
+  gitlab:
+    secret: tok
+    default_chat_id: alerts
+    templates:
+      "merge_request.open": "inline"
+    template_files:
+      "default": ./tmpl/default.tmpl
+`)
+	var cfgOK Config
+	if err := yaml.Unmarshal(rawOK, &cfgOK); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	for _, r := range cfgOK.Validate(rawOK) {
+		if r.Level == ValidationError && strings.Contains(r.Message, "defined in both") {
+			t.Errorf("unexpected overlap error for disjoint keys: %s", r.Message)
+		}
+	}
+}
+
+func TestValidate_GitlabFullConfigNoErrors(t *testing.T) {
+	rawYAML := []byte(`
+bots:
+  main:
+    host: h
+    id: 00000000-0000-0000-0000-000000000001
+    secret: s
+chats:
+  alerts:
+    id: 00000000-0000-0000-0000-000000000003
+server:
+  gitlab:
+    secret: env:GITLAB_TOKEN
+    default_chat_id: alerts
+    events:
+      only: ["merge_request.*", "pipeline.failed", "push"]
+      exclude: ["merge_request.update"]
+    templates:
+      "merge_request.open": "new {{.Title}}"
+      "default": "generic"
+    template_files:
+      "pipeline": ./tmpl/pipeline.tmpl
+    error_events: ["pipeline.failed", "build.*"]
+`)
+	var cfg Config
+	if err := yaml.Unmarshal(rawYAML, &cfg); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	for _, r := range cfg.Validate(rawYAML) {
+		if r.Level == ValidationError && strings.HasPrefix(r.Path, "server.gitlab") {
+			t.Errorf("unexpected error for valid gitlab config: %s: %s", r.Path, r.Message)
+		}
+		if r.Level == ValidationWarning && strings.Contains(r.Message, "unknown key") &&
+			strings.HasPrefix(r.Path, "server.gitlab") {
+			t.Errorf("unexpected unknown-key warning for %s: %s", r.Path, r.Message)
+		}
+	}
+}

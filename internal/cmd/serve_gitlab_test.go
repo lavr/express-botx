@@ -50,8 +50,8 @@ func TestBuildGitlabConfig_DefaultTemplate(t *testing.T) {
 
 func TestBuildGitlabConfig_InlineTemplate(t *testing.T) {
 	gl := &config.GitlabYAMLConfig{
-		Secret:   "tok",
-		Template: "custom {{ .Event }}",
+		Secret:    "tok",
+		Templates: map[string]string{"default": "custom {{ .Event }}"},
 	}
 	cfg, err := buildGitlabConfig(gl, "")
 	if err != nil {
@@ -72,8 +72,8 @@ func TestBuildGitlabConfig_TemplateFile(t *testing.T) {
 	configPath := filepath.Join(dir, "config.yaml")
 
 	gl := &config.GitlabYAMLConfig{
-		Secret:       "tok",
-		TemplateFile: "gitlab.tmpl", // relative to config path dir
+		Secret:        "tok",
+		TemplateFiles: map[string]string{"default": "gitlab.tmpl"}, // relative to config path dir
 	}
 	cfg, err := buildGitlabConfig(gl, configPath)
 	if err != nil {
@@ -123,8 +123,8 @@ func TestBuildGitlabConfig_MissingSecret(t *testing.T) {
 
 func TestBuildGitlabConfig_MissingTemplateFile(t *testing.T) {
 	gl := &config.GitlabYAMLConfig{
-		Secret:       "tok",
-		TemplateFile: "/nonexistent/does-not-exist.tmpl",
+		Secret:        "tok",
+		TemplateFiles: map[string]string{"default": "/nonexistent/does-not-exist.tmpl"},
 	}
 	if _, err := buildGitlabConfig(gl, ""); err == nil {
 		t.Fatal("expected error for missing template file")

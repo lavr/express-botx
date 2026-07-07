@@ -151,10 +151,27 @@ type GitlabYAMLConfig struct {
 	DefaultChatID string `yaml:"default_chat_id,omitempty"`
 	// Secret is the expected value of the X-Gitlab-Token header. Accepts a
 	// literal, env:VAR, or vault:path#key reference. SecretToken is an alias.
-	Secret       string `yaml:"secret,omitempty"`
-	SecretToken  string `yaml:"secret_token,omitempty"`
-	Template     string `yaml:"template,omitempty"`
-	TemplateFile string `yaml:"template_file,omitempty"`
+	Secret      string `yaml:"secret,omitempty"`
+	SecretToken string `yaml:"secret_token,omitempty"`
+	// Events filters which GitLab events are delivered. See GitlabEventsConfig.
+	Events GitlabEventsConfig `yaml:"events,omitempty"`
+	// Templates maps an event key (kind, kind.subtype, or kind.*) to an inline
+	// Go text/template. Overrides built-in defaults.
+	Templates map[string]string `yaml:"templates,omitempty"`
+	// TemplateFiles maps an event key to a template file path. A given key may
+	// appear in Templates or TemplateFiles, but not both.
+	TemplateFiles map[string]string `yaml:"template_files,omitempty"`
+	// ErrorEvents lists event keys that are delivered with notification
+	// status=error (instead of ok). Matched with the same rules as filters.
+	ErrorEvents []string `yaml:"error_events,omitempty"`
+}
+
+// GitlabEventsConfig configures the allow/deny filter for GitLab events.
+// Entries are event keys: a bare kind ("push"), a kind.subtype
+// ("merge_request.open"), or a wildcard ("merge_request.*").
+type GitlabEventsConfig struct {
+	Only    []string `yaml:"only,omitempty"`    // allowlist; empty means allow all
+	Exclude []string `yaml:"exclude,omitempty"` // denylist; always wins over only
 }
 
 // APIKeyConfig defines a single API key for server authentication.
@@ -1016,7 +1033,11 @@ var knownKeys = map[string]map[string]bool{
 		"default_chat_id": true, "error_states": true, "template": true, "template_file": true,
 	},
 	"server.gitlab": {
-		"default_chat_id": true, "secret": true, "secret_token": true, "template": true, "template_file": true,
+		"default_chat_id": true, "secret": true, "secret_token": true,
+		"events": true, "templates": true, "template_files": true, "error_events": true,
+	},
+	"server.gitlab.events": {
+		"only": true, "exclude": true,
 	},
 	"server.callbacks": {
 		"base_path": true, "verify_jwt": true, "rules": true,
@@ -1468,7 +1489,66 @@ func (c *Config) validateCrossReferences() []ValidationResult {
 		}
 	}
 
+	// Gitlab event-key syntax and templates/template_files key overlap
+	if g := c.Server.Gitlab; g != nil {
+		checkKeys := func(path string, entries []string) {
+			for _, e := range entries {
+				if !validGitlabEventKey(e) {
+					results = append(results, ValidationResult{
+						Level:   ValidationError,
+						Path:    path,
+						Message: fmt.Sprintf("invalid event key %q: must be \"kind\", \"kind.subtype\", or \"kind.*\"", e),
+					})
+				}
+			}
+		}
+		checkKeys("server.gitlab.events.only", g.Events.Only)
+		checkKeys("server.gitlab.events.exclude", g.Events.Exclude)
+		checkKeys("server.gitlab.error_events", g.ErrorEvents)
+
+		// Template keys must be valid event keys too.
+		for _, k := range sortedMapKeys(g.Templates) {
+			if !validGitlabEventKey(k) {
+				results = append(results, ValidationResult{
+					Level:   ValidationError,
+					Path:    "server.gitlab.templates." + k,
+					Message: fmt.Sprintf("invalid event key %q: must be \"kind\", \"kind.subtype\", or \"kind.*\"", k),
+				})
+			}
+		}
+		for _, k := range sortedMapKeys(g.TemplateFiles) {
+			if !validGitlabEventKey(k) {
+				results = append(results, ValidationResult{
+					Level:   ValidationError,
+					Path:    "server.gitlab.template_files." + k,
+					Message: fmt.Sprintf("invalid event key %q: must be \"kind\", \"kind.subtype\", or \"kind.*\"", k),
+				})
+			}
+		}
+
+		// A given key must not be defined in both templates and template_files.
+		for _, k := range sortedMapKeys(g.Templates) {
+			if _, dup := g.TemplateFiles[k]; dup {
+				results = append(results, ValidationResult{
+					Level:   ValidationError,
+					Path:    "server.gitlab.template_files." + k,
+					Message: fmt.Sprintf("event key %q is defined in both templates and template_files", k),
+				})
+			}
+		}
+	}
+
 	return results
+}
+
+// gitlabEventKeyRe matches a valid GitLab event key: a bare kind ("push"),
+// a kind.subtype ("merge_request.open"), or a wildcard ("merge_request.*").
+var gitlabEventKeyRe = regexp.MustCompile(`^[A-Za-z0-9_]+(\.([A-Za-z0-9_]+|\*))?$`)
+
+// validGitlabEventKey reports whether key is a syntactically valid GitLab event
+// filter/template key.
+func validGitlabEventKey(key string) bool {
+	return gitlabEventKeyRe.MatchString(key)
 }
 
 // looksLikeSecretRef returns true if the value looks like an env: or vault: reference.
