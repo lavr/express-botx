@@ -969,7 +969,7 @@ components:
               description: Comment text (note events)
             system:
               type: boolean
-              description: True for system-generated notes (ignored)
+              description: True for system-generated notes (forwarded like any other note)
         merge_request:
           type: object
           description: Nested merge request block present on note events about MRs
