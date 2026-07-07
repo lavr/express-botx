@@ -68,7 +68,7 @@ server:
     secret: env:GITLAB_WEBHOOK_TOKEN      # сверяется с заголовком X-Gitlab-Token (literal/env:/vault:)
     default_chat_id: dev                  # UUID или алиас (опционально)
     events:                               # фильтр событий (опционально)
-      only:    ["merge_request.*", "pipeline.failed", "push"]
+      only:    ["merge_request.*", "pipeline.failed", "build.failed", "push"]
       exclude: ["merge_request.update"]
     templates:                            # переопределение шаблонов по event-ключу (опционально)
       "merge_request.open": "🆕 {{.Title}} — {{.User}}\n{{.URL}}"

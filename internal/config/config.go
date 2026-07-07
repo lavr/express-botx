@@ -1491,54 +1491,102 @@ func (c *Config) validateCrossReferences() []ValidationResult {
 
 	// Gitlab event-key syntax and templates/template_files key overlap
 	if g := c.Server.Gitlab; g != nil {
-		checkKeys := func(path string, entries []string) {
-			for _, e := range entries {
-				if !validGitlabEventKey(e) {
-					results = append(results, ValidationResult{
-						Level:   ValidationError,
-						Path:    path,
-						Message: fmt.Sprintf("invalid event key %q: must be \"kind\", \"kind.subtype\", or \"kind.*\"", e),
-					})
-				}
-			}
-		}
-		checkKeys("server.gitlab.events.only", g.Events.Only)
-		checkKeys("server.gitlab.events.exclude", g.Events.Exclude)
-		checkKeys("server.gitlab.error_events", g.ErrorEvents)
+		results = append(results, validateGitlab(g)...)
+	}
 
-		// Template keys must be valid event keys too.
-		for _, k := range sortedMapKeys(g.Templates) {
-			if !validGitlabEventKey(k) {
-				results = append(results, ValidationResult{
-					Level:   ValidationError,
-					Path:    "server.gitlab.templates." + k,
-					Message: fmt.Sprintf("invalid event key %q: must be \"kind\", \"kind.subtype\", or \"kind.*\"", k),
-				})
-			}
-		}
-		for _, k := range sortedMapKeys(g.TemplateFiles) {
-			if !validGitlabEventKey(k) {
-				results = append(results, ValidationResult{
-					Level:   ValidationError,
-					Path:    "server.gitlab.template_files." + k,
-					Message: fmt.Sprintf("invalid event key %q: must be \"kind\", \"kind.subtype\", or \"kind.*\"", k),
-				})
-			}
-		}
+	return results
+}
 
-		// A given key must not be defined in both templates and template_files.
-		for _, k := range sortedMapKeys(g.Templates) {
-			if _, dup := g.TemplateFiles[k]; dup {
+// validateGitlab checks GitLab event-key syntax, templates/template_files key
+// overlap, and catch-all ambiguity. It is shared by the offline Config.Validate
+// and by the serve startup path (see GitlabYAMLConfig.ValidateForServe), which
+// does not run the full Config.Validate.
+func validateGitlab(g *GitlabYAMLConfig) []ValidationResult {
+	var results []ValidationResult
+
+	checkKeys := func(path string, entries []string) {
+		for _, e := range entries {
+			if !validGitlabEventKey(e) {
 				results = append(results, ValidationResult{
 					Level:   ValidationError,
-					Path:    "server.gitlab.template_files." + k,
-					Message: fmt.Sprintf("event key %q is defined in both templates and template_files", k),
+					Path:    path,
+					Message: fmt.Sprintf("invalid event key %q: must be \"kind\", \"kind.subtype\", or \"kind.*\"", e),
 				})
+			}
+		}
+	}
+	checkKeys("server.gitlab.events.only", g.Events.Only)
+	checkKeys("server.gitlab.events.exclude", g.Events.Exclude)
+	checkKeys("server.gitlab.error_events", g.ErrorEvents)
+
+	// Template keys must be valid event keys too.
+	for _, k := range sortedMapKeys(g.Templates) {
+		if !validGitlabEventKey(k) {
+			results = append(results, ValidationResult{
+				Level:   ValidationError,
+				Path:    "server.gitlab.templates." + k,
+				Message: fmt.Sprintf("invalid event key %q: must be \"kind\", \"kind.subtype\", or \"kind.*\"", k),
+			})
+		}
+	}
+	for _, k := range sortedMapKeys(g.TemplateFiles) {
+		if !validGitlabEventKey(k) {
+			results = append(results, ValidationResult{
+				Level:   ValidationError,
+				Path:    "server.gitlab.template_files." + k,
+				Message: fmt.Sprintf("invalid event key %q: must be \"kind\", \"kind.subtype\", or \"kind.*\"", k),
+			})
+		}
+	}
+
+	// A given key must not be defined in both templates and template_files.
+	for _, k := range sortedMapKeys(g.Templates) {
+		if _, dup := g.TemplateFiles[k]; dup {
+			results = append(results, ValidationResult{
+				Level:   ValidationError,
+				Path:    "server.gitlab.template_files." + k,
+				Message: fmt.Sprintf("event key %q is defined in both templates and template_files", k),
+			})
+		}
+	}
+
+	// A kind's catch-all template must be given in exactly one form: the bare
+	// "kind" and "kind.*" are equivalent all-subtypes catch-alls that share a
+	// single registry slot (see canonGitlabTemplateKey), so defining both is
+	// ambiguous. Checked across the union of templates and template_files.
+	catchAllForm := map[string]string{}
+	for _, m := range []map[string]string{g.Templates, g.TemplateFiles} {
+		for _, k := range sortedMapKeys(m) {
+			canon, isCatchAll := gitlabCatchAllKind(k)
+			if !isCatchAll {
+				continue
+			}
+			if prev, ok := catchAllForm[canon]; ok && prev != k {
+				results = append(results, ValidationResult{
+					Level:   ValidationError,
+					Path:    "server.gitlab.templates",
+					Message: fmt.Sprintf("event keys %q and %q are equivalent catch-alls; define only one", prev, k),
+				})
+			} else {
+				catchAllForm[canon] = k
 			}
 		}
 	}
 
 	return results
+}
+
+// ValidateForServe returns the first blocking GitLab config error, or nil. The
+// serve startup path resolves config via LoadForServe, which does not run the
+// full Config.Validate, so buildGitlabConfig calls this to reject invalid event
+// keys and templates/template_files overlaps that offline validation would flag.
+func (g *GitlabYAMLConfig) ValidateForServe() error {
+	for _, r := range validateGitlab(g) {
+		if r.Level == ValidationError {
+			return fmt.Errorf("%s: %s", r.Path, r.Message)
+		}
+	}
+	return nil
 }
 
 // gitlabEventKeyRe matches a valid GitLab event key: a bare kind ("push"),
@@ -1549,6 +1597,19 @@ var gitlabEventKeyRe = regexp.MustCompile(`^[A-Za-z0-9_]+(\.([A-Za-z0-9_]+|\*))?
 // filter/template key.
 func validGitlabEventKey(key string) bool {
 	return gitlabEventKeyRe.MatchString(key)
+}
+
+// gitlabCatchAllKind reports whether a template key is an all-subtypes catch-all
+// (a bare "kind" or a "kind.*" wildcard) and, if so, the bare kind it targets.
+// A specific "kind.subtype" key is not a catch-all.
+func gitlabCatchAllKind(key string) (string, bool) {
+	if k, ok := strings.CutSuffix(key, ".*"); ok {
+		return k, true
+	}
+	if !strings.Contains(key, ".") {
+		return key, true
+	}
+	return "", false
 }
 
 // looksLikeSecretRef returns true if the value looks like an env: or vault: reference.

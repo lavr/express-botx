@@ -2911,6 +2911,70 @@ server:
 	}
 }
 
+func TestValidate_GitlabTemplateCatchAllAmbiguity(t *testing.T) {
+	// "pipeline" and "pipeline.*" are equivalent catch-alls; defining both
+	// (across the union of templates and template_files) is ambiguous.
+	rawYAML := []byte(`
+bots:
+  main:
+    host: h
+    id: 00000000-0000-0000-0000-000000000001
+    secret: s
+chats:
+  alerts:
+    id: 00000000-0000-0000-0000-000000000003
+server:
+  gitlab:
+    secret: tok
+    default_chat_id: alerts
+    templates:
+      "pipeline": "bare"
+    template_files:
+      "pipeline.*": ./tmpl/pipe.tmpl
+`)
+	var cfg Config
+	if err := yaml.Unmarshal(rawYAML, &cfg); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	found := false
+	for _, r := range cfg.Validate(rawYAML) {
+		if r.Level == ValidationError && strings.Contains(r.Message, "equivalent catch-alls") {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("expected error for equivalent catch-all keys pipeline and pipeline.*")
+	}
+
+	// A bare kind plus a specific subtype of the same kind is NOT ambiguous.
+	rawOK := []byte(`
+bots:
+  main:
+    host: h
+    id: 00000000-0000-0000-0000-000000000001
+    secret: s
+chats:
+  alerts:
+    id: 00000000-0000-0000-0000-000000000003
+server:
+  gitlab:
+    secret: tok
+    default_chat_id: alerts
+    templates:
+      "pipeline.*": "catch-all"
+      "pipeline.failed": "specific"
+`)
+	var cfgOK Config
+	if err := yaml.Unmarshal(rawOK, &cfgOK); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	for _, r := range cfgOK.Validate(rawOK) {
+		if r.Level == ValidationError && strings.Contains(r.Message, "equivalent catch-alls") {
+			t.Errorf("unexpected catch-all ambiguity error: %s", r.Message)
+		}
+	}
+}
+
 func TestValidate_GitlabFullConfigNoErrors(t *testing.T) {
 	rawYAML := []byte(`
 bots:

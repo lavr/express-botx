@@ -482,6 +482,12 @@ func buildGrafanaConfig(gr *config.GrafanaYAMLConfig, configPath string) (*serve
 }
 
 func buildGitlabConfig(gl *config.GitlabYAMLConfig, configPath string) (*server.GitlabConfig, error) {
+	// Reject invalid event-key syntax and templates/template_files overlaps that
+	// offline `validate` would catch but LoadForServe does not run.
+	if err := gl.ValidateForServe(); err != nil {
+		return nil, fmt.Errorf("gitlab: %w", err)
+	}
+
 	// Resolve the shared secret token (accepts literal, env:, vault:). The
 	// `secret` key takes precedence over the `secret_token` alias.
 	tokenRef := gl.Secret

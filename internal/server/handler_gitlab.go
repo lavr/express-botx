@@ -24,6 +24,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"sort"
 	"strings"
 	"text/template"
 	"time"
@@ -416,12 +417,31 @@ func gitlabIsEmpty(v any) bool {
 // compiled with the GitLab helper funcmap; a parse error aborts startup. The
 // "default" key is always present and becomes the generic fallback.
 func ParseGitlabTemplates(inline map[string]string) (*gitlabTemplates, error) {
+	// Reject ambiguous catch-alls up front: the bare "kind" and "kind.*" forms
+	// canonicalise to the same registry slot, so supplying both leaves the winner
+	// to nondeterministic map iteration below. Config.Validate flags this too, but
+	// that check does not run on serve startup, so enforce it here on the shared
+	// code path. Iterate in sorted order for a stable error message.
+	seen := make(map[string]string, len(inline))
+	inlineKeys := make([]string, 0, len(inline))
+	for k := range inline {
+		inlineKeys = append(inlineKeys, k)
+	}
+	sort.Strings(inlineKeys)
+	for _, k := range inlineKeys {
+		canon := canonGitlabTemplateKey(k)
+		if prev, ok := seen[canon]; ok && prev != k {
+			return nil, fmt.Errorf("gitlab templates: keys %q and %q are equivalent catch-alls; define only one", prev, k)
+		}
+		seen[canon] = k
+	}
+
 	merged := make(map[string]string, len(DefaultGitlabTemplates)+len(inline))
 	for k, v := range DefaultGitlabTemplates {
-		merged[k] = v
+		merged[canonGitlabTemplateKey(k)] = v
 	}
 	for k, v := range inline {
-		merged[k] = v
+		merged[canonGitlabTemplateKey(k)] = v
 	}
 
 	gt := &gitlabTemplates{byKey: make(map[string]*template.Template)}
@@ -444,19 +464,28 @@ func ParseGitlabTemplates(inline map[string]string) (*gitlabTemplates, error) {
 	return gt, nil
 }
 
+// canonGitlabTemplateKey collapses the wildcard catch-all form "kind.*" to the
+// bare kind "kind". The two are equivalent "all subtypes" catch-alls (the same
+// way the filter and error_events matchers treat them), so they must share a
+// single registry slot: this lets a user template keyed "pipeline.*" override
+// the built-in bare "pipeline" default instead of being shadowed by it.
+// Ambiguity — a user supplying both forms — is rejected by config validation.
+func canonGitlabTemplateKey(key string) string {
+	if k, ok := strings.CutSuffix(key, ".*"); ok {
+		return k
+	}
+	return key
+}
+
 // selectTemplate picks the template for an event: exact event key, then the bare
-// kind, then the kind.* wildcard, then the guaranteed generic default. The bare
-// kind and kind.* forms are equivalent "all subtypes" catch-alls, matched here
-// the same way the filter and error_events matchers treat them.
+// kind catch-all (which subsumes the equivalent kind.* form, canonicalised at
+// registration by canonGitlabTemplateKey), then the guaranteed generic default.
 func (gt *gitlabTemplates) selectTemplate(kind, eventKey string) *template.Template {
 	if t, ok := gt.byKey[eventKey]; ok {
 		return t
 	}
 	if kind != "" {
 		if t, ok := gt.byKey[kind]; ok {
-			return t
-		}
-		if t, ok := gt.byKey[kind+".*"]; ok {
 			return t
 		}
 	}

@@ -133,6 +133,34 @@ func TestBuildGitlabConfig_SecretResolveError(t *testing.T) {
 	}
 }
 
+// The serve path does not run the full Config.Validate, so buildGitlabConfig must
+// reject the config errors that offline validation catches: invalid event-key
+// syntax and a key present in both templates and template_files.
+func TestBuildGitlabConfig_RejectsInvalidConfig(t *testing.T) {
+	cases := map[string]*config.GitlabYAMLConfig{
+		"invalid event key in only": {
+			Secret: "tok",
+			Events: config.GitlabEventsConfig{Only: []string{"merge_request..open"}},
+		},
+		"invalid template key": {
+			Secret:    "tok",
+			Templates: map[string]string{"bad key!": "x"},
+		},
+		"duplicate templates/template_files key": {
+			Secret:        "tok",
+			Templates:     map[string]string{"push": "inline"},
+			TemplateFiles: map[string]string{"push": "push.tmpl"},
+		},
+	}
+	for name, gl := range cases {
+		t.Run(name, func(t *testing.T) {
+			if _, err := buildGitlabConfig(gl, ""); err == nil {
+				t.Fatalf("expected validation error for %s", name)
+			}
+		})
+	}
+}
+
 func TestBuildGitlabConfig_FiltersAndErrorEvents(t *testing.T) {
 	gl := &config.GitlabYAMLConfig{
 		Secret: "tok",

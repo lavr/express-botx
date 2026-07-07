@@ -557,7 +557,8 @@ paths:
         - `pipeline` → `object_attributes.status`
         - `build` (job) → `build_status` (a flat top-level field)
         - `push`, `tag_push` → no subtype (bare kind)
-        - otherwise → `object_attributes.action`, then `object_attributes.status`
+        - otherwise → `object_attributes.action`, then `object_attributes.status`,
+          then a flat top-level `status` (e.g. deployment events)
 
         Delivery is controlled by application config:
         - **Filter** (`server.gitlab.events.only` / `.exclude`): each entry matches

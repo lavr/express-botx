@@ -705,6 +705,23 @@ func TestGitlabTemplates_ParseError(t *testing.T) {
 	}
 }
 
+func TestGitlabTemplates_AmbiguousCatchAllRejected(t *testing.T) {
+	// The bare "pipeline" and "pipeline.*" forms canonicalise to the same slot;
+	// supplying both must be rejected deterministically at parse time rather than
+	// letting nondeterministic map iteration pick a winner.
+	_, err := ParseGitlabTemplates(map[string]string{
+		"pipeline":   "bare",
+		"pipeline.*": "wildcard",
+	})
+	if err == nil {
+		t.Fatal("expected error for equivalent catch-all keys, got nil")
+	}
+	// A wildcard alone (overriding the built-in bare default) stays valid.
+	if _, err := ParseGitlabTemplates(map[string]string{"pipeline.*": "wildcard"}); err != nil {
+		t.Fatalf("wildcard-only should be valid: %v", err)
+	}
+}
+
 func TestGitlabTemplates_DefaultAlwaysPresent(t *testing.T) {
 	gt, err := ParseGitlabTemplates(nil)
 	if err != nil {
@@ -775,6 +792,27 @@ func TestGitlab_TemplateWildcardKey(t *testing.T) {
 	}
 	if cap.last().Message != "WILD Add feature X" {
 		t.Errorf("message = %q, want %q (kind.* wildcard template)", cap.last().Message, "WILD Add feature X")
+	}
+}
+
+// A user "kind.*" wildcard template must override the built-in bare-kind default
+// (e.g. the built-in "pipeline"), not be shadowed by it. pipeline.failed has no
+// exact user or built-in template, so the user's pipeline.* catch-all must win
+// over the built-in bare "pipeline".
+func TestGitlab_UserWildcardOverridesBuiltinBareKind(t *testing.T) {
+	gt, err := ParseGitlabTemplates(map[string]string{"pipeline.*": "CUSTOM {{ .Action }}"})
+	if err != nil {
+		t.Fatalf("ParseGitlabTemplates: %v", err)
+	}
+	srv, cap := newGitlabTestServer(t, &GitlabConfig{
+		DefaultChatID: "chat1", SecretToken: "secret", Templates: gt,
+	})
+	w := doRequest(srv, "POST", "/api/v1/gitlab", strings.NewReader(pipelinePayload), gitlabHeaders("secret"))
+	if w.Code != 200 {
+		t.Fatalf("status = %d, body: %s", w.Code, w.Body.String())
+	}
+	if got := cap.last().Message; got != "CUSTOM failed" {
+		t.Errorf("message = %q, want %q (user pipeline.* must override built-in bare pipeline)", got, "CUSTOM failed")
 	}
 }
 
