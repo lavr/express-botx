@@ -141,6 +141,19 @@ func gitlabBranch(kind string, raw map[string]any) string {
 	}
 }
 
+// gitlabProject resolves the routing value for the reserved "project" selector.
+// It prefers the namespaced path (project.path_with_namespace) so namespaced
+// globs like "group/backend/*" match, falling back to the short project.name.
+// This is intentionally decoupled from gitlabView.Project (which prefers the
+// short name for compact display in message templates): routing needs the
+// namespace, templates want brevity.
+func gitlabProject(raw map[string]any) string {
+	if p := gitlabStringAt(raw, "project.path_with_namespace"); p != "" {
+		return p
+	}
+	return gitlabStringAt(raw, "project.name")
+}
+
 // refBranch reduces a Git ref to its branch/tag name. The conventional
 // "refs/heads/" and "refs/tags/" prefixes are stripped while preserving any
 // interior slashes (so "refs/heads/release/2.0" -> "release/2.0", which still
@@ -173,7 +186,7 @@ func resolveSelector(view gitlabView, selector string) []string {
 	case "action":
 		return nonEmpty(view.Action)
 	case "project":
-		return nonEmpty(view.Project)
+		return nonEmpty(gitlabProject(view.Raw))
 	case "branch":
 		return nonEmpty(gitlabBranch(view.Kind, view.Raw))
 	case "user":

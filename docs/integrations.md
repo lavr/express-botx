@@ -214,7 +214,9 @@ events:
 (`merge_request.open/merge/close`, `note.MergeRequest`, `push`, `tag_push`,
 `pipeline`, `issue`) и `default`; любой ключ переопределяется в конфиге через
 `templates` (inline) или `template_files` (путь к файлу). Один и тот же ключ
-нельзя задать в обоих сразу.
+нельзя задать в обоих сразу. Ключи `kind` и `kind.*` эквивалентны (оба — catch-all
+для всех субтипов) и занимают один слот реестра: задать оба сразу — ошибка
+валидации; конкретный `kind.subtype` при этом можно задавать рядом с `kind`.
 
 Доступные переменные шаблона (view-модель):
 
@@ -322,7 +324,7 @@ server:
 | `kind` | `object_kind` |
 | `event` | event-ключ (`kind` или `kind.subtype`) — матчится **event-матчером**, не паттернами |
 | `action` | `object_attributes.action` или производный субтип |
-| `project` | `project.name` (fallback `project.path_with_namespace`) |
+| `project` | `project.path_with_namespace` (fallback `project.name`) — в шаблонах `.Project` остаётся коротким `project.name` |
 | `branch` | нормализованная ветка (см. ниже) |
 | `user` | `user.name` / `user.username` (fallback `user_name`) |
 | `title` | `object_attributes.title` |

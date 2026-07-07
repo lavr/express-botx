@@ -62,9 +62,10 @@ server:
     # Within a selector patterns are OR; across selectors they are AND; an omitted
     # selector places no constraint; an empty `match` is a catch-all.
     routes:
-      # MRs into main/release of any backend project -> two chats; stop here.
+      # MRs into main/release of any project in the "team" namespace (matched on
+      # project.path_with_namespace, e.g. "team/backend") -> two chats; stop here.
       - match:
-          project: ["group/backend/*"]
+          project: ["team/*"]
           event:   ["merge_request"]
           branch:  ["main", "release/*"]
         chats: [backend-mrs, releases]

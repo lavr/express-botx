@@ -185,6 +185,55 @@ func TestBuildGitlabConfig_FiltersAndErrorEvents(t *testing.T) {
 	}
 }
 
+// The config->server integration seam: YAML routes must be compiled and wired
+// into GitlabConfig.Routes so the handler's fan-out path activates. Without this
+// the routing engine and handler are each tested in isolation but never
+// connected, so a dropped assignment would ship a silently inert feature.
+func TestBuildGitlabConfig_CompilesRoutes(t *testing.T) {
+	gl := &config.GitlabYAMLConfig{
+		Secret: "tok",
+		Routes: []config.GitlabRouteYAMLConfig{
+			{
+				Match: map[string][]string{
+					"project": {"team/*"},
+					"event":   {"merge_request"},
+				},
+				Chats: []string{"backend-mrs", "releases"},
+				Stop:  true,
+			},
+			{
+				Match: map[string][]string{"branch": {"/^(main|release\\/.*)$/"}},
+				Chats: []string{"oncall"},
+			},
+		},
+	}
+	cfg, err := buildGitlabConfig(gl, "")
+	if err != nil {
+		t.Fatalf("buildGitlabConfig: %v", err)
+	}
+	if len(cfg.Routes) != 2 {
+		t.Fatalf("cfg.Routes length = %d, want 2", len(cfg.Routes))
+	}
+}
+
+// A route with an invalid /regex/ pattern must abort startup. (ValidateForServe
+// guards this upstream, so buildGitlabConfig's own compile-error return is
+// defensive, but it must still surface rather than silently drop the route.)
+func TestBuildGitlabConfig_RejectsInvalidRouteRegex(t *testing.T) {
+	gl := &config.GitlabYAMLConfig{
+		Secret: "tok",
+		Routes: []config.GitlabRouteYAMLConfig{
+			{
+				Match: map[string][]string{"branch": {"/[unterminated/"}},
+				Chats: []string{"oncall"},
+			},
+		},
+	}
+	if _, err := buildGitlabConfig(gl, ""); err == nil {
+		t.Fatal("expected error for invalid route regex")
+	}
+}
+
 func TestBuildGitlabConfig_MissingTemplateFile(t *testing.T) {
 	gl := &config.GitlabYAMLConfig{
 		Secret:        "tok",

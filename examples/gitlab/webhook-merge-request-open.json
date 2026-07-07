@@ -6,6 +6,7 @@
   },
   "project": {
     "name": "backend",
+    "path_with_namespace": "team/backend",
     "web_url": "https://gitlab.company.ru/team/backend"
   },
   "object_attributes": {

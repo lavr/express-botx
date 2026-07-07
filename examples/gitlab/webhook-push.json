@@ -5,6 +5,7 @@
   "ref": "refs/heads/feature/rate-limit",
   "project": {
     "name": "backend",
+    "path_with_namespace": "team/backend",
     "web_url": "https://gitlab.company.ru/team/backend"
   },
   "commits": [

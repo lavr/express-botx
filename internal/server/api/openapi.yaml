@@ -1022,7 +1022,10 @@ components:
 
     GitlabIgnoredResponse:
       type: object
-      description: Returned by /gitlab when an event is filtered out by only/exclude.
+      description: >-
+        Returned by /gitlab when an event is not delivered: filtered out by
+        only/exclude, rendered to an empty message, or matched no route and has
+        no default chat configured.
       properties:
         ok:
           type: boolean

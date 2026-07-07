@@ -199,6 +199,7 @@ func TestResolveSelectorReserved(t *testing.T) {
 		Title:    "Add feature",
 		URL:      "https://example.com/mr/1",
 		Raw: map[string]any{
+			"project":           map[string]any{"path_with_namespace": "group/backend"},
 			"object_attributes": map[string]any{"target_branch": "main"},
 		},
 	}
@@ -303,6 +304,7 @@ func TestRouteMatches(t *testing.T) {
 		EventKey: "merge_request.open",
 		Project:  "group/backend",
 		Raw: map[string]any{
+			"project":           map[string]any{"path_with_namespace": "group/backend"},
 			"object_attributes": map[string]any{"target_branch": "main"},
 		},
 	}
@@ -383,6 +385,7 @@ func TestEvaluateRoutes(t *testing.T) {
 		EventKey: "merge_request.open",
 		Project:  "group/backend",
 		Raw: map[string]any{
+			"project":           map[string]any{"path_with_namespace": "group/backend"},
 			"object_attributes": map[string]any{"target_branch": "main"},
 		},
 	}
@@ -572,7 +575,10 @@ func TestCompileGitlabRoutesGlobRegexEvent(t *testing.T) {
 		Kind:     "merge_request",
 		EventKey: "merge_request.open",
 		Project:  "group/backend/api",
-		Raw:      map[string]any{"object_attributes": map[string]any{"target_branch": "release-2"}},
+		Raw: map[string]any{
+			"project":           map[string]any{"path_with_namespace": "group/backend/api"},
+			"object_attributes": map[string]any{"target_branch": "release-2"},
+		},
 	}
 	chats, matched := evaluateRoutes(routes, view)
 	if !matched {

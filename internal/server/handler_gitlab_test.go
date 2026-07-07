@@ -952,6 +952,70 @@ func TestGitlab_FanoutTwoChats(t *testing.T) {
 	}
 }
 
+// TestGitlab_FanoutNamespacedProject: the reserved `project` selector must match
+// against project.path_with_namespace (real GitLab sends a namespaced path), so a
+// namespaced glob like "group/backend/*" routes correctly end-to-end through
+// normalizeGitlab. This guards the decoupling between routing (namespace) and the
+// template `.Project` field (short name for display).
+func TestGitlab_FanoutNamespacedProject(t *testing.T) {
+	const payload = `{
+		"object_kind": "merge_request",
+		"user": {"name": "Alice", "username": "alice"},
+		"project": {"name": "api", "path_with_namespace": "group/backend/api", "web_url": "https://gl/group/backend/api"},
+		"object_attributes": {
+			"action": "open",
+			"title": "Add feature X",
+			"url": "https://gl/group/backend/api/-/merge_requests/1",
+			"source_branch": "feature-x",
+			"target_branch": "main"
+		}
+	}`
+	routes := mustCompileRoutes(t, []config.GitlabRouteYAMLConfig{
+		// Short-name glob must NOT match a namespaced path (belt-and-braces).
+		{Match: map[string][]string{"project": {"api"}}, Chats: []string{"wrong"}},
+		{Match: map[string][]string{"project": {"group/backend/*"}}, Chats: []string{"backend-mrs"}},
+	})
+	srv, cap := newGitlabFanoutServer(t, &GitlabConfig{SecretToken: "secret", Routes: routes}, okSend, nil)
+	w := doRequest(srv, "POST", "/api/v1/gitlab", strings.NewReader(payload), gitlabHeaders("secret"))
+	if w.Code != 200 {
+		t.Fatalf("status = %d, body: %s", w.Code, w.Body.String())
+	}
+	if cap.count() != 1 {
+		t.Fatalf("send count = %d, want 1 (only the namespaced rule matches)", cap.count())
+	}
+	if got := cap.last().ChatID; got != "backend-mrs" {
+		t.Errorf("chat = %q, want backend-mrs (namespaced glob matched path_with_namespace)", got)
+	}
+	// Template .Project stays the short name even though routing used the path.
+	if got := cap.last().Message; !strings.Contains(got, "[api]") {
+		t.Errorf("message = %q, want it to render the short project name [api]", got)
+	}
+}
+
+// TestGitlab_FanoutErrorStatus: the error_events status mapping must apply on the
+// multi-send path too, not only the single-chat path — every fanned-out delivery
+// of a matching event carries status "error".
+func TestGitlab_FanoutErrorStatus(t *testing.T) {
+	routes := mustCompileRoutes(t, []config.GitlabRouteYAMLConfig{
+		{Match: map[string][]string{"kind": {"pipeline"}}, Chats: []string{"chatA", "chatB"}},
+	})
+	srv, cap := newGitlabFanoutServer(t, &GitlabConfig{
+		SecretToken: "secret", Routes: routes, ErrorEvents: []string{"pipeline.failed"},
+	}, okSend, nil)
+	w := doRequest(srv, "POST", "/api/v1/gitlab", strings.NewReader(pipelinePayload), gitlabHeaders("secret"))
+	if w.Code != 200 {
+		t.Fatalf("status = %d, body: %s", w.Code, w.Body.String())
+	}
+	if cap.count() != 2 {
+		t.Fatalf("send count = %d, want 2", cap.count())
+	}
+	for _, p := range cap.calls {
+		if p.Status != "error" {
+			t.Errorf("chat %q status = %q, want error", p.ChatID, p.Status)
+		}
+	}
+}
+
 // TestGitlab_FanoutPartialFailure: one chat fails; the response is 200 with the
 // surviving result and the failure listed in errors.
 func TestGitlab_FanoutPartialFailure(t *testing.T) {
