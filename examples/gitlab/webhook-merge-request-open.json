@@ -1,0 +1,19 @@
+{
+  "object_kind": "merge_request",
+  "user": {
+    "name": "Jane Developer",
+    "username": "jane"
+  },
+  "project": {
+    "name": "backend",
+    "web_url": "https://gitlab.company.ru/team/backend"
+  },
+  "object_attributes": {
+    "action": "open",
+    "title": "Add rate limiting to API",
+    "url": "https://gitlab.company.ru/team/backend/-/merge_requests/42",
+    "source_branch": "feature/rate-limit",
+    "target_branch": "main",
+    "detailed_merge_status": "mergeable"
+  }
+}

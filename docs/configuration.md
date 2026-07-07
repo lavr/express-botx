@@ -64,7 +64,20 @@ server:
   grafana:                                  # опционально — endpoint включён по умолчанию
     default_chat_id: alerts
     error_states: [alerting]              # по умолчанию
+  gitlab:                                   # опционально — endpoint включён ТОЛЬКО с этой секцией
+    secret: env:GITLAB_WEBHOOK_TOKEN      # сверяется с заголовком X-Gitlab-Token (literal/env:/vault:)
+    default_chat_id: dev                  # UUID или алиас (опционально)
+    # template_file: gitlab.tmpl          # опциональный шаблон (template / template_file)
 ```
+
+Секция `server.gitlab` (обязательна для включения эндпоинта `/api/v1/gitlab`):
+
+| Поле | Описание |
+|---|---|
+| `secret` / `secret_token` | Ожидаемое значение заголовка `X-Gitlab-Token`. Ссылка `literal` / `env:VAR` / `vault:path#key`. Обязательно. |
+| `default_chat_id` | UUID или алиас чата по умолчанию (должен существовать в `chats`). |
+| `template` | Inline Go-шаблон сообщения (опционально). |
+| `template_file` | Путь к файлу шаблона (имеет приоритет над `template`). |
 
 ## Переменные окружения
 
@@ -184,7 +197,7 @@ express-botx config chat list                             # покажет (defa
 
 Приоритет выбора чата в HTTP-сервере:
 - `/send`: `chat_id` из запроса → чат по умолчанию → ошибка
-- `/alertmanager`, `/grafana`: `?chat_id=` → `default_chat_id` из конфига вебхука → чат по умолчанию → единственный чат → ошибка
+- `/alertmanager`, `/grafana`, `/gitlab`: `?chat_id=` → `default_chat_id` из конфига вебхука → чат по умолчанию → единственный чат → ошибка
 
 ## Формат host
 

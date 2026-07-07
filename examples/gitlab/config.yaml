@@ -1,0 +1,28 @@
+# Example config for the GitLab merge request webhook endpoint (/api/v1/gitlab).
+#
+# The endpoint is enabled ONLY when the `server.gitlab` section is present
+# (unlike alertmanager/grafana, which are on by default) because it requires
+# a secret token. Fields with "env:X" / "vault:path#key" are resolved at startup.
+
+bots:
+  mybot:
+    host: "env:BOT_HOST"
+    id: "env:BOT_ID"
+    secret: "env:BOT_SECRET"
+
+chats:
+  dev:
+    id: "env:DEV_CHAT_ID"
+    bot: mybot
+    default: true
+
+server:
+  listen: ":8080"
+  base_path: /api/v1
+  gitlab:
+    # Compared against the X-Gitlab-Token header sent by GitLab.
+    # Set the same value as the webhook's "Secret token" in GitLab.
+    secret: "env:GITLAB_WEBHOOK_TOKEN"
+    default_chat_id: dev
+    # Optional custom message template (inline or from a file):
+    # template_file: gitlab.tmpl

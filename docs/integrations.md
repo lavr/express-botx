@@ -164,6 +164,79 @@ curl -X POST http://localhost:8080/api/v1/grafana \
 
 ---
 
+## GitLab (Merge Requests)
+
+Endpoint `/api/v1/gitlab` принимает group/project-вебхуки GitLab и отправляет в чат
+уведомления о трёх событиях merge request'ов:
+
+- **открытие MR** (`object_kind: merge_request`, `action: open`)
+- **успешный мерж** (`object_kind: merge_request`, `action: merge`)
+- **комментарий в MR** (`object_kind: note`, `noteable_type: MergeRequest`)
+
+Все остальные события (update/close, комментарии не к MR, системные заметки)
+получают `200 OK` с `"ignored": true` и сообщение не отправляется.
+
+Аутентификация — по заголовку `X-Gitlab-Token` (GitLab не умеет ставить
+`Authorization`/`X-API-Key`), поэтому эндпоинт не использует обычные `api_keys`.
+
+### Настройка express-botx
+
+В отличие от Alertmanager/Grafana, эндпоинт включается только при наличии секции
+`gitlab` с секретом:
+
+```yaml
+server:
+  listen: ":8080"
+  base_path: /api/v1
+  gitlab:
+    secret: env:GITLAB_WEBHOOK_TOKEN   # literal / env: / vault: — сверяется с X-Gitlab-Token
+    default_chat_id: dev               # UUID или алиас чата (опционально)
+    # template: "..."                  # опциональный inline-шаблон
+    # template_file: gitlab.tmpl       # или шаблон из файла
+```
+
+Если `default_chat_id` не задан, используется чат по умолчанию (`default: true`),
+единственный чат из конфига или query-параметр `?chat_id=`.
+
+### Настройка GitLab
+
+1. В группе или проекте: **Settings → Webhooks → Add new webhook**
+2. **URL:** `http://express-botx:8080/api/v1/gitlab` (можно с `?chat_id=<alias>`)
+3. **Secret token:** то же значение, что и `server.gitlab.secret`
+4. Отметьте триггеры **Merge request events** и **Comments**
+5. Сохраните и нажмите **Test → Merge request events**
+
+### Несколько чатов
+
+Как и у Alertmanager/Grafana — используйте `?chat_id=` в URL вебхука, чтобы
+направлять MR разных групп/проектов в разные чаты:
+
+- `http://express-botx:8080/api/v1/gitlab?chat_id=backend-mrs`
+- `http://express-botx:8080/api/v1/gitlab?chat_id=frontend-mrs`
+
+### Проверка вручную
+
+```bash
+curl -X POST "http://localhost:8080/api/v1/gitlab" \
+  -H "X-Gitlab-Token: <secret token>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "object_kind": "merge_request",
+    "user": { "name": "Jane Developer", "username": "jane" },
+    "project": { "name": "backend" },
+    "object_attributes": {
+      "action": "open",
+      "title": "Add rate limiting to API",
+      "url": "https://gitlab.company.ru/team/backend/-/merge_requests/42",
+      "source_branch": "feature/rate-limit",
+      "target_branch": "main",
+      "detailed_merge_status": "mergeable"
+    }
+  }'
+```
+
+---
+
 ## Callback-ы от Express Platform
 
 express-botx может принимать callback-и от сервера Express и маршрутизировать

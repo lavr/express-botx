@@ -1,0 +1,23 @@
+{
+  "object_kind": "note",
+  "user": {
+    "name": "Bob Reviewer",
+    "username": "bob"
+  },
+  "project": {
+    "name": "backend",
+    "web_url": "https://gitlab.company.ru/team/backend"
+  },
+  "object_attributes": {
+    "noteable_type": "MergeRequest",
+    "note": "Looks good, please add a test for the burst case.",
+    "url": "https://gitlab.company.ru/team/backend/-/merge_requests/42#note_1001",
+    "system": false
+  },
+  "merge_request": {
+    "title": "Add rate limiting to API",
+    "url": "https://gitlab.company.ru/team/backend/-/merge_requests/42",
+    "source_branch": "feature/rate-limit",
+    "target_branch": "main"
+  }
+}

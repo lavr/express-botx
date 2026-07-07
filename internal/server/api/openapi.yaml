@@ -542,6 +542,89 @@ paths:
               schema:
                 $ref: "#/components/schemas/ErrorResponse"
 
+  /gitlab:
+    post:
+      operationId: gitlab
+      summary: GitLab merge request webhook
+      description: |
+        Receives group/project webhook notifications from GitLab and sends
+        merge request events to eXpress. Covered events:
+        - merge request opened (`object_kind: merge_request`, `action: open`)
+        - merge request merged (`object_kind: merge_request`, `action: merge`)
+        - comment on a merge request (`object_kind: note`, `noteable_type: MergeRequest`)
+
+        All other events (update/close, notes on commits, system notes) are
+        answered with `200 OK` and `"ignored": true` without sending a message.
+
+        Authentication uses the `X-Gitlab-Token` header (GitLab cannot send
+        `Authorization`/`X-API-Key`). This endpoint is registered only when
+        `server.gitlab` is configured.
+
+        Chat resolution priority:
+        1. `?chat_id=` query parameter
+        2. `default_chat_id` from webhook config
+        3. Global default chat (`default: true` in chats section)
+        4. Single chat alias from config
+      security:
+        - gitlabToken: []
+      parameters:
+        - name: chat_id
+          in: query
+          description: Target chat UUID or alias (overrides config default)
+          schema:
+            type: string
+        - name: bot
+          in: query
+          description: Bot name (required in multi-bot mode unless chat has a default bot binding)
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/GitlabWebhook"
+            example:
+              object_kind: merge_request
+              user:
+                name: Jane Developer
+                username: jane
+              project:
+                name: backend
+                web_url: https://gitlab.company.ru/team/backend
+              object_attributes:
+                action: open
+                title: "Add rate limiting to API"
+                url: https://gitlab.company.ru/team/backend/-/merge_requests/42
+                source_branch: feature/rate-limit
+                target_branch: main
+                detailed_merge_status: mergeable
+      responses:
+        "200":
+          description: Event processed and sent (or ignored)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SuccessResponse"
+        "400":
+          description: Invalid request
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "401":
+          description: Missing or invalid X-Gitlab-Token
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "502":
+          description: Upstream error
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
 components:
   securitySchemes:
     bearerAuth:
@@ -562,6 +645,11 @@ components:
       type: http
       scheme: bearer
       description: "JWT signed with bot secret (HS256). Used for callback endpoints from eXpress platform."
+    gitlabToken:
+      type: apiKey
+      in: header
+      name: X-Gitlab-Token
+      description: "X-Gitlab-Token: <secret token> — secret token configured on the GitLab webhook."
 
   schemas:
     SendRequest:
@@ -792,6 +880,70 @@ components:
         values:
           type: object
           additionalProperties: true
+
+    GitlabWebhook:
+      type: object
+      required: [object_kind]
+      properties:
+        object_kind:
+          type: string
+          enum: [merge_request, note]
+          description: Event kind. Only merge_request and note are handled.
+        user:
+          type: object
+          description: Actor that triggered the event
+          properties:
+            name:
+              type: string
+            username:
+              type: string
+        project:
+          type: object
+          properties:
+            name:
+              type: string
+            web_url:
+              type: string
+              format: uri
+        object_attributes:
+          type: object
+          properties:
+            action:
+              type: string
+              description: "merge_request action: open, merge, update, close, ..."
+            title:
+              type: string
+            url:
+              type: string
+              format: uri
+            source_branch:
+              type: string
+            target_branch:
+              type: string
+            detailed_merge_status:
+              type: string
+            noteable_type:
+              type: string
+              description: "note events: MergeRequest, Commit, Issue, ..."
+            note:
+              type: string
+              description: Comment text (note events)
+            system:
+              type: boolean
+              description: True for system-generated notes (ignored)
+        merge_request:
+          type: object
+          description: Nested merge request block present on note events about MRs
+          properties:
+            title:
+              type: string
+            url:
+              type: string
+              format: uri
+            source_branch:
+              type: string
+            target_branch:
+              type: string
 
     SuccessResponse:
       type: object
