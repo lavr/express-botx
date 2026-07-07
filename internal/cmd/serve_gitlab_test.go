@@ -25,24 +25,23 @@ func TestBuildGitlabConfig_DefaultTemplate(t *testing.T) {
 	if cfg.SecretToken != "s3cr3t" {
 		t.Errorf("SecretToken = %q, want s3cr3t", cfg.SecretToken)
 	}
-	if cfg.Template == nil {
-		t.Fatal("Template is nil")
+	if cfg.Templates == nil {
+		t.Fatal("Templates is nil")
 	}
-	// Default template must be the built-in generic one; render a view to confirm
-	// it surfaces the event key and common fields.
-	var sb bytesBuffer
+	// With no template override, an unrecognised event falls through to the
+	// built-in generic default, which surfaces the event key and common fields.
 	view := map[string]any{
-		"EventKey": "merge_request.open",
+		"EventKey": "wiki_page",
 		"Project":  "myproj",
 		"Title":    "Add feature X",
 		"User":     "Alice",
-		"URL":      "https://gl/myproj/-/merge_requests/1",
+		"URL":      "https://gl/myproj/-/wikis/home",
 	}
-	if err := cfg.Template.Execute(&sb, view); err != nil {
+	msg, err := cfg.Templates.Render("wiki_page", "wiki_page", view)
+	if err != nil {
 		t.Fatalf("execute template: %v", err)
 	}
-	msg := sb.String()
-	for _, want := range []string{"merge_request.open", "myproj", "Add feature X", "Alice"} {
+	for _, want := range []string{"wiki_page", "myproj", "Add feature X", "Alice"} {
 		if !strings.Contains(msg, want) {
 			t.Errorf("default render missing %q:\n%s", want, msg)
 		}
@@ -134,15 +133,11 @@ func TestBuildGitlabConfig_MissingTemplateFile(t *testing.T) {
 
 func renderGitlabTemplate(t *testing.T, cfg *server.GitlabConfig, event string) string {
 	t.Helper()
-	var sb bytesBuffer
-	if err := cfg.Template.Execute(&sb, map[string]any{"Event": event}); err != nil {
+	// An empty kind/eventKey selects the generic default, which the inline/file
+	// template overrides in these tests.
+	msg, err := cfg.Templates.Render("", "", map[string]any{"Event": event})
+	if err != nil {
 		t.Fatalf("execute template: %v", err)
 	}
-	return sb.String()
+	return msg
 }
-
-// bytesBuffer is a tiny io.Writer to avoid importing bytes just for tests here.
-type bytesBuffer struct{ b []byte }
-
-func (w *bytesBuffer) Write(p []byte) (int, error) { w.b = append(w.b, p...); return len(p), nil }
-func (w *bytesBuffer) String() string              { return string(w.b) }

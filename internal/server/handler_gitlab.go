@@ -20,7 +20,10 @@ type GitlabConfig struct {
 	// cannot send Authorization/X-API-Key headers, so the /gitlab route uses
 	// this token instead of the standard API-key middleware.
 	SecretToken string
-	Template    *template.Template
+	// Templates is the compiled registry of per-event templates plus a generic
+	// default. It selects a template by event key, falling back to the bare kind
+	// and finally the default so every event renders.
+	Templates *gitlabTemplates
 	// FallbackChatID is resolved at startup from the config's chats section
 	// when there is exactly one chat alias configured. Empty otherwise.
 	FallbackChatID string
@@ -230,13 +233,12 @@ func (s *Server) handleGitlab(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Render template
-	var buf bytes.Buffer
-	if err := s.gitCfg.Template.Execute(&buf, view); err != nil {
+	// Render template: exact event key -> bare kind -> generic default.
+	message, err := s.gitCfg.Templates.Render(view.Kind, view.EventKey, view)
+	if err != nil {
 		writeError(w, http.StatusBadRequest, "template error: "+err.Error())
 		return
 	}
-	message := buf.String()
 	vlog.V3("gitlab: rendered message:\n%s", message)
 
 	// Resolve chat: query param > default_chat_id > global default chat > single chat from config
@@ -295,30 +297,128 @@ type gitlabIgnoredResponse struct {
 	Event   string `json:"event"`
 }
 
-// DefaultGitlabTemplate is a generic fallback that renders any GitLab event.
-// Per-event templates layer on top of this in later work.
+// DefaultGitlabTemplate is the generic fallback that renders any GitLab event
+// for which no more specific template exists. It is registered under the
+// "default" key of DefaultGitlabTemplates.
 const DefaultGitlabTemplate = `{{ .EventKey }}{{ if .Project }} [{{ .Project }}]{{ end }}{{ if .Title }}
 {{ .Title }}{{ end }}{{ if .User }}
   Автор: {{ .User }}{{ end }}{{ if .URL }}
 {{ .URL }}{{ end }}`
 
+// DefaultGitlabTemplates are the built-in templates keyed by event key. They
+// cover the most common events and always include a "default" fallback. Any key
+// can be overridden via configuration; the "default" key becomes the registry's
+// generic fallback for unrecognised events.
+var DefaultGitlabTemplates = map[string]string{
+	"default": DefaultGitlabTemplate,
+
+	"merge_request.open":  "🆕 MR{{ if .Project }} [{{ .Project }}]{{ end }}: {{ .Title }}\n  Автор: {{ .User }}\n{{ .URL }}",
+	"merge_request.merge": "✅ MR смёржен{{ if .Project }} [{{ .Project }}]{{ end }}: {{ .Title }}\n  Автор: {{ .User }}\n{{ .URL }}",
+	"merge_request.close": "🚫 MR закрыт{{ if .Project }} [{{ .Project }}]{{ end }}: {{ .Title }}\n  Автор: {{ .User }}\n{{ .URL }}",
+
+	"note.MergeRequest": "💬 Комментарий к MR{{ if .Project }} [{{ .Project }}]{{ end }} от {{ .User }}{{ with get .Raw \"object_attributes.note\" }}\n{{ . }}{{ end }}\n{{ .URL }}",
+
+	"push":     "⬆️ Push{{ if .Project }} [{{ .Project }}]{{ end }} от {{ .User }}{{ with get .Raw \"ref\" }}\n  Ветка: {{ . }}{{ end }}{{ if .URL }}\n{{ .URL }}{{ end }}",
+	"tag_push": "🏷️ Tag push{{ if .Project }} [{{ .Project }}]{{ end }} от {{ .User }}{{ with get .Raw \"ref\" }}\n  Реф: {{ . }}{{ end }}{{ if .URL }}\n{{ .URL }}{{ end }}",
+
+	"pipeline": "🚦 Pipeline{{ if .Project }} [{{ .Project }}]{{ end }}: {{ .Action }}{{ if .URL }}\n{{ .URL }}{{ end }}",
+
+	"issue": "📌 Issue{{ if .Project }} [{{ .Project }}]{{ end }}: {{ .Title }}\n  Автор: {{ .User }}{{ if .URL }}\n{{ .URL }}{{ end }}",
+}
+
+// gitlabTemplates is the compiled template registry: per-event templates keyed
+// by event key (or bare kind) plus a mandatory generic default.
+type gitlabTemplates struct {
+	byKey map[string]*template.Template
+	def   *template.Template
+}
+
 // gitlabFuncMap returns the template helpers available to GitLab templates.
-// `get` reaches an arbitrary dotted path inside the raw payload:
-// `{{ get .Raw "project.web_url" }}`.
+//
+//	get   reaches an arbitrary dotted path inside the raw payload:
+//	      {{ get .Raw "project.web_url" }} (nil when absent)
+//	default returns its first argument when the second is empty/nil:
+//	      {{ default "n/a" .Title }}
 func gitlabFuncMap() template.FuncMap {
 	return template.FuncMap{
 		"get": func(m map[string]any, path string) any {
 			return gitlabNestedGet(m, path)
 		},
+		"default": func(dflt, val any) any {
+			if gitlabIsEmpty(val) {
+				return dflt
+			}
+			return val
+		},
 	}
 }
 
-// ParseGitlabTemplate compiles a Go text/template for GitLab messages, with the
-// GitLab helper funcmap attached.
-func ParseGitlabTemplate(tmplStr string) (*template.Template, error) {
-	t, err := template.New("gitlab").Funcs(gitlabFuncMap()).Parse(tmplStr)
-	if err != nil {
-		return nil, fmt.Errorf("parsing gitlab template: %w", err)
+// gitlabIsEmpty reports whether a template value is considered empty for the
+// `default` helper: nil or the empty string.
+func gitlabIsEmpty(v any) bool {
+	switch x := v.(type) {
+	case nil:
+		return true
+	case string:
+		return x == ""
+	default:
+		return false
 	}
-	return t, nil
+}
+
+// ParseGitlabTemplates compiles the GitLab template registry. It starts from the
+// built-in DefaultGitlabTemplates and overlays the caller-supplied inline
+// templates (a user entry replaces a default of the same key). Every template is
+// compiled with the GitLab helper funcmap; a parse error aborts startup. The
+// "default" key is always present and becomes the generic fallback.
+func ParseGitlabTemplates(inline map[string]string) (*gitlabTemplates, error) {
+	merged := make(map[string]string, len(DefaultGitlabTemplates)+len(inline))
+	for k, v := range DefaultGitlabTemplates {
+		merged[k] = v
+	}
+	for k, v := range inline {
+		merged[k] = v
+	}
+
+	gt := &gitlabTemplates{byKey: make(map[string]*template.Template)}
+	for k, v := range merged {
+		t, err := template.New(k).Funcs(gitlabFuncMap()).Parse(v)
+		if err != nil {
+			return nil, fmt.Errorf("parsing gitlab template %q: %w", k, err)
+		}
+		if k == "default" {
+			gt.def = t
+		} else {
+			gt.byKey[k] = t
+		}
+	}
+	if gt.def == nil {
+		// DefaultGitlabTemplates always carries "default"; this guards against a
+		// caller clearing it in a future refactor.
+		return nil, fmt.Errorf("gitlab templates: missing \"default\" template")
+	}
+	return gt, nil
+}
+
+// selectTemplate picks the template for an event: exact event key, then the bare
+// kind, then the guaranteed generic default.
+func (gt *gitlabTemplates) selectTemplate(kind, eventKey string) *template.Template {
+	if t, ok := gt.byKey[eventKey]; ok {
+		return t
+	}
+	if kind != "" {
+		if t, ok := gt.byKey[kind]; ok {
+			return t
+		}
+	}
+	return gt.def
+}
+
+// Render selects the template for kind/eventKey and executes it against data.
+func (gt *gitlabTemplates) Render(kind, eventKey string, data any) (string, error) {
+	var buf bytes.Buffer
+	if err := gt.selectTemplate(kind, eventKey).Execute(&buf, data); err != nil {
+		return "", err
+	}
+	return buf.String(), nil
 }

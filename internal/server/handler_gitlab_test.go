@@ -19,12 +19,12 @@ func newGitlabTestServer(t *testing.T, cfg *GitlabConfig) (*Server, *captureSend
 // the server Config (e.g. DefaultChatAlias) and inject a send error.
 func newGitlabTestServerCfg(t *testing.T, srvCfg Config, cfg *GitlabConfig, sendErr error) (*Server, *captureSend) {
 	t.Helper()
-	if cfg.Template == nil {
-		tmpl, err := ParseGitlabTemplate(DefaultGitlabTemplate)
+	if cfg.Templates == nil {
+		tmpls, err := ParseGitlabTemplates(nil)
 		if err != nil {
-			t.Fatalf("parse default template: %v", err)
+			t.Fatalf("parse default templates: %v", err)
 		}
-		cfg.Template = tmpl
+		cfg.Templates = tmpls
 	}
 	cap := &captureSend{}
 	sendFn := func(ctx context.Context, p *SendPayload) (string, error) {
@@ -319,13 +319,16 @@ func TestGitlab_GenericRender(t *testing.T) {
 		payload string
 		wants   []string
 	}{
-		{"mr_open", mrOpenPayload, []string{"merge_request.open", "myproj", "Add feature X", "Alice"}},
-		{"mr_merge", mrMergePayload, []string{"merge_request.merge", "Add feature X", "Bob"}},
-		{"note", noteCommentPayload, []string{"note.MergeRequest", "Carol"}},
-		{"push", pushPayload, []string{"push", "myproj", "Erin"}},
-		{"pipeline", pipelinePayload, []string{"pipeline.failed", "Frank"}},
+		// merge_request/note/push/pipeline/issue have built-in per-event templates;
+		// job (build) and wiki_page fall through to the generic default (which
+		// prints the raw event key).
+		{"mr_open", mrOpenPayload, []string{"myproj", "Add feature X", "Alice"}},
+		{"mr_merge", mrMergePayload, []string{"Add feature X", "Bob"}},
+		{"note", noteCommentPayload, []string{"Carol", "Looks good to me"}},
+		{"push", pushPayload, []string{"myproj", "Erin"}},
+		{"pipeline", pipelinePayload, []string{"myproj", "failed"}},
 		{"job", jobPayload, []string{"build.success", "Grace"}},
-		{"issue", issuePayload, []string{"issue.open", "Something broke", "Heidi"}},
+		{"issue", issuePayload, []string{"Something broke", "Heidi"}},
 		{"unknown_kind", unknownKindPayload, []string{"wiki_page", "myproj", "Ivan"}},
 	}
 	for _, tc := range cases {
@@ -579,6 +582,113 @@ func TestGitlab_FilterIgnoresEvent(t *testing.T) {
 			t.Errorf("send count = %d, want 1 (matches only)", cap.count())
 		}
 	})
+}
+
+func TestGitlabTemplates_Selection(t *testing.T) {
+	gt, err := ParseGitlabTemplates(map[string]string{
+		"issue.open": "OPEN {{ .Title }}",
+		"issue":      "ISSUE {{ .Title }}",
+	})
+	if err != nil {
+		t.Fatalf("ParseGitlabTemplates: %v", err)
+	}
+	// Exact event key beats the bare kind.
+	if msg, _ := gt.Render("issue", "issue.open", gitlabView{Title: "T"}); msg != "OPEN T" {
+		t.Errorf("exact key render = %q, want %q", msg, "OPEN T")
+	}
+	// Bare kind is the fallback for other subtypes.
+	if msg, _ := gt.Render("issue", "issue.close", gitlabView{Title: "T"}); msg != "ISSUE T" {
+		t.Errorf("bare kind render = %q, want %q", msg, "ISSUE T")
+	}
+	// Unknown event falls through to the generic default (prints the event key).
+	msg, err := gt.Render("wiki_page", "wiki_page", gitlabView{EventKey: "wiki_page", Project: "p"})
+	if err != nil {
+		t.Fatalf("render default: %v", err)
+	}
+	if !strings.Contains(msg, "wiki_page") {
+		t.Errorf("default render = %q, want it to contain the event key", msg)
+	}
+}
+
+func TestGitlabTemplates_Override(t *testing.T) {
+	// A user entry replaces a built-in default of the same key.
+	gt, err := ParseGitlabTemplates(map[string]string{
+		"merge_request.open": "custom {{ .Title }}",
+	})
+	if err != nil {
+		t.Fatalf("ParseGitlabTemplates: %v", err)
+	}
+	msg, _ := gt.Render("merge_request", "merge_request.open", gitlabView{Title: "X"})
+	if msg != "custom X" {
+		t.Errorf("override render = %q, want %q", msg, "custom X")
+	}
+}
+
+func TestGitlabTemplates_ParseError(t *testing.T) {
+	if _, err := ParseGitlabTemplates(map[string]string{"push": "{{ .Broken "}); err == nil {
+		t.Fatal("expected parse error at startup for a malformed template")
+	}
+}
+
+func TestGitlabTemplates_DefaultAlwaysPresent(t *testing.T) {
+	gt, err := ParseGitlabTemplates(nil)
+	if err != nil {
+		t.Fatalf("ParseGitlabTemplates(nil): %v", err)
+	}
+	if gt.def == nil {
+		t.Fatal("registry default template is nil")
+	}
+	// Every built-in key compiles into byKey (minus "default").
+	if _, ok := gt.byKey["merge_request.open"]; !ok {
+		t.Error("built-in merge_request.open missing from registry")
+	}
+}
+
+func TestGitlabTemplates_RawAndGet(t *testing.T) {
+	gt, err := ParseGitlabTemplates(map[string]string{
+		"merge_request.open": `{{ .Raw.object_attributes.title }} @ {{ get .Raw "project.web_url" }}`,
+	})
+	if err != nil {
+		t.Fatalf("ParseGitlabTemplates: %v", err)
+	}
+	v := normalizeGitlab(mustDecode(t, mrOpenPayload))
+	msg, err := gt.Render(v.Kind, v.EventKey, v)
+	if err != nil {
+		t.Fatalf("render: %v", err)
+	}
+	if msg != "Add feature X @ https://gl/myproj" {
+		t.Errorf("raw/get render = %q, want %q", msg, "Add feature X @ https://gl/myproj")
+	}
+}
+
+func TestGitlabDefaultHelper(t *testing.T) {
+	fn := gitlabFuncMap()["default"].(func(dflt, val any) any)
+	if got := fn("fallback", ""); got != "fallback" {
+		t.Errorf("default(fallback, \"\") = %v, want fallback", got)
+	}
+	if got := fn("fallback", nil); got != "fallback" {
+		t.Errorf("default(fallback, nil) = %v, want fallback", got)
+	}
+	if got := fn("fallback", "value"); got != "value" {
+		t.Errorf("default(fallback, value) = %v, want value", got)
+	}
+}
+
+func TestGitlab_TemplateOverrideEndpoint(t *testing.T) {
+	gt, err := ParseGitlabTemplates(map[string]string{"merge_request.open": "OVR {{ .Title }}"})
+	if err != nil {
+		t.Fatalf("ParseGitlabTemplates: %v", err)
+	}
+	srv, cap := newGitlabTestServer(t, &GitlabConfig{
+		DefaultChatID: "chat1", SecretToken: "secret", Templates: gt,
+	})
+	w := doRequest(srv, "POST", "/api/v1/gitlab", strings.NewReader(mrOpenPayload), gitlabHeaders("secret"))
+	if w.Code != 200 {
+		t.Fatalf("status = %d, body: %s", w.Code, w.Body.String())
+	}
+	if cap.last().Message != "OVR Add feature X" {
+		t.Errorf("message = %q, want %q", cap.last().Message, "OVR Add feature X")
+	}
 }
 
 func TestGitlab_NotRegisteredWithoutConfig(t *testing.T) {
