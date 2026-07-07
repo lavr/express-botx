@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"strings"
 	"text/template"
 	"time"
 
@@ -25,108 +26,143 @@ type GitlabConfig struct {
 	FallbackChatID string
 }
 
-// GitlabWebhook is the subset of GitLab group/project webhook payloads we use.
-// It covers both merge_request and note events (fields not present in a given
-// event kind are simply left zero).
-type GitlabWebhook struct {
-	ObjectKind       string              `json:"object_kind"`
-	User             GitlabUser          `json:"user"`
-	Project          GitlabProject       `json:"project"`
-	ObjectAttributes GitlabObjectAttrs   `json:"object_attributes"`
-	MergeRequest     *GitlabMergeRequest `json:"merge_request"` // present on note events about MRs
-}
-
-// GitlabUser is the actor that triggered the event.
-type GitlabUser struct {
-	Name     string `json:"name"`
-	Username string `json:"username"`
-}
-
-// GitlabProject is the project the event belongs to.
-type GitlabProject struct {
-	Name   string `json:"name"`
-	WebURL string `json:"web_url"`
-}
-
-// GitlabObjectAttrs holds the object_attributes block, shared between event kinds.
-type GitlabObjectAttrs struct {
-	Action              string `json:"action"`        // merge_request: open|merge|update|close|...
-	Title               string `json:"title"`         // merge_request
-	URL                 string `json:"url"`           // merge_request / note
-	SourceBranch        string `json:"source_branch"` // merge_request
-	TargetBranch        string `json:"target_branch"` // merge_request
-	DetailedMergeStatus string `json:"detailed_merge_status"`
-	NoteableType        string `json:"noteable_type"` // note: "MergeRequest", "Commit", ...
-	Note                string `json:"note"`          // note: comment text
-	System              bool   `json:"system"`        // note: true for system-generated notes
-}
-
-// GitlabMergeRequest is the merge_request block nested inside note events.
-type GitlabMergeRequest struct {
-	Title        string `json:"title"`
-	URL          string `json:"url"`
-	SourceBranch string `json:"source_branch"`
-	TargetBranch string `json:"target_branch"`
-}
-
-// gitlabView is the view-model passed to the message template.
+// gitlabView is the view-model passed to the message template. It is derived
+// best-effort from an arbitrary GitLab webhook payload; Raw carries the full
+// decoded payload so templates can reach fields not surfaced here (via the
+// `get` helper or the .Get method).
 type gitlabView struct {
-	Event        string // "open" | "merge" | "comment"
-	Author       string
-	Project      string
-	Title        string
-	URL          string
-	SourceBranch string
-	TargetBranch string
-	MergeStatus  string
-	Comment      string // comment text (Event == "comment")
+	Kind     string         // object_kind, e.g. "merge_request", "note", "push"
+	Action   string         // object_attributes.action, or the derived subtype
+	EventKey string         // "kind" or "kind.subtype"
+	Project  string         // project.name (fallback project.path_with_namespace)
+	User     string         // user.name / user.username (fallback user_name)
+	Title    string         // object_attributes.title
+	URL      string         // object_attributes.url (fallback project.web_url)
+	Raw      map[string]any // full decoded payload
 }
 
-// classifyGitlab maps a webhook into a view-model, or returns ok=false when the
-// event should be ignored (200 OK without sending anything).
-func classifyGitlab(w GitlabWebhook) (gitlabView, bool) {
-	author := w.User.Name
-	if author == "" {
-		author = w.User.Username
+// Get returns the value at a dotted path inside the raw payload, or nil when
+// any path segment is missing. It mirrors the `get` template helper so
+// templates can use either `{{ .Get "a.b.c" }}` or `{{ get .Raw "a.b.c" }}`.
+func (v gitlabView) Get(path string) any {
+	return gitlabNestedGet(v.Raw, path)
+}
+
+// gitlabNestedGet walks a dotted path (e.g. "object_attributes.url") through a
+// decoded JSON object and returns the value found, or nil when any segment is
+// absent or not an object.
+func gitlabNestedGet(m map[string]any, path string) any {
+	if m == nil || path == "" {
+		return nil
+	}
+	var cur any = m
+	for _, part := range strings.Split(path, ".") {
+		obj, ok := cur.(map[string]any)
+		if !ok {
+			return nil
+		}
+		cur, ok = obj[part]
+		if !ok {
+			return nil
+		}
+	}
+	return cur
+}
+
+// gitlabStringAt returns the string value at a dotted path, or "" when it is
+// missing or not a string.
+func gitlabStringAt(m map[string]any, path string) string {
+	if s, ok := gitlabNestedGet(m, path).(string); ok {
+		return s
+	}
+	return ""
+}
+
+// deriveEventKey computes the GitLab event key from a raw payload. The subtype
+// rule depends on object_kind:
+//
+//	merge_request, issue -> object_attributes.action
+//	note                 -> object_attributes.noteable_type
+//	pipeline             -> object_attributes.status
+//	build (job)          -> build_status (a flat top-level field)
+//	push, tag_push       -> none
+//	otherwise            -> object_attributes.action, then object_attributes.status
+//
+// eventKey is the bare kind when there is no subtype, otherwise "kind.subtype".
+// A payload without object_kind yields an empty eventKey.
+func deriveEventKey(raw map[string]any) (kind, subtype, eventKey string) {
+	kind = gitlabStringAt(raw, "object_kind")
+	switch kind {
+	case "merge_request", "issue":
+		subtype = gitlabStringAt(raw, "object_attributes.action")
+	case "note":
+		subtype = gitlabStringAt(raw, "object_attributes.noteable_type")
+	case "pipeline":
+		subtype = gitlabStringAt(raw, "object_attributes.status")
+	case "build":
+		subtype = gitlabStringAt(raw, "build_status")
+	case "push", "tag_push":
+		// No subtype for push-style events.
+	default:
+		if s := gitlabStringAt(raw, "object_attributes.action"); s != "" {
+			subtype = s
+		} else {
+			subtype = gitlabStringAt(raw, "object_attributes.status")
+		}
 	}
 
-	switch w.ObjectKind {
-	case "merge_request":
-		switch w.ObjectAttributes.Action {
-		case "open", "merge":
-			return gitlabView{
-				Event:        w.ObjectAttributes.Action,
-				Author:       author,
-				Project:      w.Project.Name,
-				Title:        w.ObjectAttributes.Title,
-				URL:          w.ObjectAttributes.URL,
-				SourceBranch: w.ObjectAttributes.SourceBranch,
-				TargetBranch: w.ObjectAttributes.TargetBranch,
-				MergeStatus:  w.ObjectAttributes.DetailedMergeStatus,
-			}, true
-		}
-	case "note":
-		// Only comments on merge requests, excluding system-generated notes.
-		if w.ObjectAttributes.NoteableType == "MergeRequest" && !w.ObjectAttributes.System {
-			v := gitlabView{
-				Event:   "comment",
-				Author:  author,
-				Project: w.Project.Name,
-				URL:     w.ObjectAttributes.URL,
-				Comment: w.ObjectAttributes.Note,
-			}
-			if w.MergeRequest != nil {
-				v.Title = w.MergeRequest.Title
-				v.SourceBranch = w.MergeRequest.SourceBranch
-				v.TargetBranch = w.MergeRequest.TargetBranch
-				if v.URL == "" {
-					v.URL = w.MergeRequest.URL
-				}
-			}
-			return v, true
-		}
+	switch {
+	case kind == "":
+		eventKey = ""
+	case subtype == "":
+		eventKey = kind
+	default:
+		eventKey = kind + "." + subtype
 	}
-	return gitlabView{}, false
+	return kind, subtype, eventKey
+}
+
+// normalizeGitlab derives a gitlabView from an arbitrary payload, filling common
+// fields best-effort and keeping the full payload in Raw.
+func normalizeGitlab(raw map[string]any) gitlabView {
+	kind, subtype, eventKey := deriveEventKey(raw)
+	v := gitlabView{
+		Kind:     kind,
+		EventKey: eventKey,
+		Raw:      raw,
+	}
+
+	// Action: prefer the literal object_attributes.action, else the derived subtype.
+	if a := gitlabStringAt(raw, "object_attributes.action"); a != "" {
+		v.Action = a
+	} else {
+		v.Action = subtype
+	}
+
+	// Project name.
+	v.Project = gitlabStringAt(raw, "project.name")
+	if v.Project == "" {
+		v.Project = gitlabStringAt(raw, "project.path_with_namespace")
+	}
+
+	// Acting user.
+	v.User = gitlabStringAt(raw, "user.name")
+	if v.User == "" {
+		v.User = gitlabStringAt(raw, "user.username")
+	}
+	if v.User == "" {
+		// push / tag_push events carry a flat user_name field.
+		v.User = gitlabStringAt(raw, "user_name")
+	}
+
+	// Title and URL.
+	v.Title = gitlabStringAt(raw, "object_attributes.title")
+	v.URL = gitlabStringAt(raw, "object_attributes.url")
+	if v.URL == "" {
+		v.URL = gitlabStringAt(raw, "project.web_url")
+	}
+
+	return v
 }
 
 func (s *Server) handleGitlab(w http.ResponseWriter, r *http.Request) {
@@ -146,21 +182,14 @@ func (s *Server) handleGitlab(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var webhook GitlabWebhook
-	if err := json.NewDecoder(r.Body).Decode(&webhook); err != nil {
+	var raw map[string]any
+	if err := json.NewDecoder(r.Body).Decode(&raw); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
 		return
 	}
 
-	vlog.V1("gitlab: received %s (action: %s, noteable: %s)", webhook.ObjectKind, webhook.ObjectAttributes.Action, webhook.ObjectAttributes.NoteableType)
-
-	view, ok := classifyGitlab(webhook)
-	if !ok {
-		vlog.V2("gitlab: ignored %s event (action: %s)", webhook.ObjectKind, webhook.ObjectAttributes.Action)
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]any{"ok": true, "ignored": true})
-		return
-	}
+	view := normalizeGitlab(raw)
+	vlog.V1("gitlab: received %s (eventKey: %s)", view.Kind, view.EventKey)
 
 	// Render template
 	var buf bytes.Buffer
@@ -214,25 +243,33 @@ func (s *Server) handleGitlab(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	vlog.V1("gitlab: sent %s to %s -> 200 (%dms)", view.Event, targetChat, elapsed.Milliseconds())
+	vlog.V1("gitlab: sent %s to %s -> 200 (%dms)", view.EventKey, targetChat, elapsed.Milliseconds())
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(sendResponse{OK: true, SyncID: syncID})
 }
 
-// DefaultGitlabTemplate is the built-in template for formatting GitLab MR events.
-const DefaultGitlabTemplate = `{{ if eq .Event "open" }}` + "\U0001F195" + ` Новый MR{{ else if eq .Event "merge" }}` + "✅" + ` MR слит{{ else }}` + "\U0001F4AC" + ` Комментарий в MR{{ end }}{{ if .Project }} [{{ .Project }}]{{ end }}
-{{ if eq .Event "comment" }}{{ .Author }}: {{ .Comment }}
-{{ if .Title }}MR: {{ .Title }}
-{{ end }}{{ else }}{{ .Title }}
-  Автор:  {{ .Author }}
-  Ветки:  {{ .SourceBranch }} -> {{ .TargetBranch }}{{ if eq .Event "merge" }}
-  Статус: Успешно слито{{ else if .MergeStatus }}
-  Статус: {{ .MergeStatus }}{{ end }}
-{{ end }}{{ if .URL }}{{ .URL }}{{ end }}`
+// DefaultGitlabTemplate is a generic fallback that renders any GitLab event.
+// Per-event templates layer on top of this in later work.
+const DefaultGitlabTemplate = `{{ .EventKey }}{{ if .Project }} [{{ .Project }}]{{ end }}{{ if .Title }}
+{{ .Title }}{{ end }}{{ if .User }}
+  Автор: {{ .User }}{{ end }}{{ if .URL }}
+{{ .URL }}{{ end }}`
 
-// ParseGitlabTemplate compiles a Go text/template for GitLab messages.
+// gitlabFuncMap returns the template helpers available to GitLab templates.
+// `get` reaches an arbitrary dotted path inside the raw payload:
+// `{{ get .Raw "project.web_url" }}`.
+func gitlabFuncMap() template.FuncMap {
+	return template.FuncMap{
+		"get": func(m map[string]any, path string) any {
+			return gitlabNestedGet(m, path)
+		},
+	}
+}
+
+// ParseGitlabTemplate compiles a Go text/template for GitLab messages, with the
+// GitLab helper funcmap attached.
 func ParseGitlabTemplate(tmplStr string) (*template.Template, error) {
-	t, err := template.New("gitlab").Parse(tmplStr)
+	t, err := template.New("gitlab").Funcs(gitlabFuncMap()).Parse(tmplStr)
 	if err != nil {
 		return nil, fmt.Errorf("parsing gitlab template: %w", err)
 	}

@@ -28,13 +28,24 @@ func TestBuildGitlabConfig_DefaultTemplate(t *testing.T) {
 	if cfg.Template == nil {
 		t.Fatal("Template is nil")
 	}
-	// Default template must be the built-in one; render known events to confirm
-	// it produces the expected branch-specific output.
-	if msg := renderGitlabTemplate(t, cfg, "open"); !strings.Contains(msg, "Новый MR") {
-		t.Errorf("open render missing %q:\n%s", "Новый MR", msg)
+	// Default template must be the built-in generic one; render a view to confirm
+	// it surfaces the event key and common fields.
+	var sb bytesBuffer
+	view := map[string]any{
+		"EventKey": "merge_request.open",
+		"Project":  "myproj",
+		"Title":    "Add feature X",
+		"User":     "Alice",
+		"URL":      "https://gl/myproj/-/merge_requests/1",
 	}
-	if msg := renderGitlabTemplate(t, cfg, "merge"); !strings.Contains(msg, "Успешно слито") {
-		t.Errorf("merge render missing %q:\n%s", "Успешно слито", msg)
+	if err := cfg.Template.Execute(&sb, view); err != nil {
+		t.Fatalf("execute template: %v", err)
+	}
+	msg := sb.String()
+	for _, want := range []string{"merge_request.open", "myproj", "Add feature X", "Alice"} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("default render missing %q:\n%s", want, msg)
+		}
 	}
 }
 

@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"strings"
 	"sync"
@@ -119,15 +120,40 @@ const (
 			"target_branch": "main"
 		}
 	}`
-	noteSystemPayload = `{
-		"object_kind": "note",
-		"user": {"name": "Carol"},
-		"object_attributes": {"note": "changed the description", "noteable_type": "MergeRequest", "system": true}
+	pushPayload = `{
+		"object_kind": "push",
+		"user_name": "Erin",
+		"project": {"name": "myproj", "web_url": "https://gl/myproj"},
+		"ref": "refs/heads/main"
 	}`
-	noteCommitPayload = `{
-		"object_kind": "note",
-		"user": {"name": "Carol"},
-		"object_attributes": {"note": "nice commit", "noteable_type": "Commit", "system": false}
+	tagPushPayload = `{
+		"object_kind": "tag_push",
+		"user_name": "Erin",
+		"project": {"name": "myproj", "web_url": "https://gl/myproj"},
+		"ref": "refs/tags/v1.0.0"
+	}`
+	pipelinePayload = `{
+		"object_kind": "pipeline",
+		"user": {"name": "Frank"},
+		"project": {"name": "myproj", "web_url": "https://gl/myproj"},
+		"object_attributes": {"status": "failed", "id": 42}
+	}`
+	jobPayload = `{
+		"object_kind": "build",
+		"build_status": "success",
+		"user": {"name": "Grace"},
+		"project": {"name": "myproj", "web_url": "https://gl/myproj"}
+	}`
+	issuePayload = `{
+		"object_kind": "issue",
+		"user": {"name": "Heidi"},
+		"project": {"name": "myproj", "web_url": "https://gl/myproj"},
+		"object_attributes": {"action": "open", "title": "Something broke", "url": "https://gl/myproj/-/issues/7"}
+	}`
+	unknownKindPayload = `{
+		"object_kind": "wiki_page",
+		"user": {"name": "Ivan"},
+		"project": {"name": "myproj", "web_url": "https://gl/myproj"}
 	}`
 	// mrOpenUsernameOnlyPayload carries only user.username (no user.name), to
 	// exercise the author fallback.
@@ -143,19 +169,6 @@ const (
 			"target_branch": "main"
 		}
 	}`
-	// noteCommentNoMRPayload is an MR comment without the nested merge_request
-	// block, so URL must come from object_attributes.
-	noteCommentNoMRPayload = `{
-		"object_kind": "note",
-		"user": {"name": "Dave"},
-		"project": {"name": "myproj"},
-		"object_attributes": {
-			"note": "please rebase",
-			"noteable_type": "MergeRequest",
-			"url": "https://gl/myproj/-/merge_requests/3#note_9",
-			"system": false
-		}
-	}`
 )
 
 func gitlabHeaders(token string) map[string]string {
@@ -165,68 +178,155 @@ func gitlabHeaders(token string) map[string]string {
 	}
 }
 
-func TestGitlab_Open(t *testing.T) {
-	srv, cap := newGitlabTestServer(t, &GitlabConfig{DefaultChatID: "chat1", SecretToken: "secret"})
-	w := doRequest(srv, "POST", "/api/v1/gitlab", strings.NewReader(mrOpenPayload), gitlabHeaders("secret"))
-	if w.Code != 200 {
-		t.Fatalf("status = %d, body: %s", w.Code, w.Body.String())
+// mustDecode parses a JSON payload string into a map for the unit tests.
+func mustDecode(t *testing.T, s string) map[string]any {
+	t.Helper()
+	var m map[string]any
+	if err := json.Unmarshal([]byte(s), &m); err != nil {
+		t.Fatalf("decode payload: %v", err)
 	}
-	if cap.count() != 1 {
-		t.Fatalf("send count = %d, want 1", cap.count())
+	return m
+}
+
+func TestDeriveEventKey(t *testing.T) {
+	cases := []struct {
+		name        string
+		payload     string
+		wantKind    string
+		wantSubtype string
+		wantKey     string
+	}{
+		{"mr_open", mrOpenPayload, "merge_request", "open", "merge_request.open"},
+		{"mr_merge", mrMergePayload, "merge_request", "merge", "merge_request.merge"},
+		{"note_mr", noteCommentPayload, "note", "MergeRequest", "note.MergeRequest"},
+		{"pipeline_status", pipelinePayload, "pipeline", "failed", "pipeline.failed"},
+		{"build_status", jobPayload, "build", "success", "build.success"},
+		{"push", pushPayload, "push", "", "push"},
+		{"tag_push", tagPushPayload, "tag_push", "", "tag_push"},
+		{"issue_action", issuePayload, "issue", "open", "issue.open"},
+		{"unknown_kind", unknownKindPayload, "wiki_page", "", "wiki_page"},
+		{"empty", `{}`, "", "", ""},
 	}
-	msg := cap.last().Message
-	for _, want := range []string{"Новый MR", "Add feature X", "Alice", "feature-x -> main", "mergeable"} {
-		if !strings.Contains(msg, want) {
-			t.Errorf("message missing %q:\n%s", want, msg)
-		}
-	}
-	if cap.last().ChatID != "chat1" {
-		t.Errorf("chat = %q, want chat1", cap.last().ChatID)
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			kind, subtype, key := deriveEventKey(mustDecode(t, tc.payload))
+			if kind != tc.wantKind || subtype != tc.wantSubtype || key != tc.wantKey {
+				t.Errorf("deriveEventKey = (%q, %q, %q), want (%q, %q, %q)",
+					kind, subtype, key, tc.wantKind, tc.wantSubtype, tc.wantKey)
+			}
+		})
 	}
 }
 
-func TestGitlab_Merge(t *testing.T) {
-	srv, cap := newGitlabTestServer(t, &GitlabConfig{DefaultChatID: "chat1", SecretToken: "secret"})
-	w := doRequest(srv, "POST", "/api/v1/gitlab", strings.NewReader(mrMergePayload), gitlabHeaders("secret"))
-	if w.Code != 200 {
-		t.Fatalf("status = %d, body: %s", w.Code, w.Body.String())
+func TestDeriveEventKey_FallbackSubtype(t *testing.T) {
+	// An unknown kind with object_attributes.action should use the action.
+	kind, subtype, key := deriveEventKey(mustDecode(t, `{
+		"object_kind": "deployment",
+		"object_attributes": {"action": "created"}
+	}`))
+	if kind != "deployment" || subtype != "created" || key != "deployment.created" {
+		t.Errorf("got (%q, %q, %q), want deployment/created/deployment.created", kind, subtype, key)
 	}
-	if cap.count() != 1 {
-		t.Fatalf("send count = %d, want 1", cap.count())
-	}
-	msg := cap.last().Message
-	for _, want := range []string{"MR слит", "Успешно слито", "Add feature X"} {
-		if !strings.Contains(msg, want) {
-			t.Errorf("message missing %q:\n%s", want, msg)
-		}
-	}
-}
-
-func TestGitlab_Comment(t *testing.T) {
-	srv, cap := newGitlabTestServer(t, &GitlabConfig{DefaultChatID: "chat1", SecretToken: "secret"})
-	w := doRequest(srv, "POST", "/api/v1/gitlab", strings.NewReader(noteCommentPayload), gitlabHeaders("secret"))
-	if w.Code != 200 {
-		t.Fatalf("status = %d, body: %s", w.Code, w.Body.String())
-	}
-	if cap.count() != 1 {
-		t.Fatalf("send count = %d, want 1", cap.count())
-	}
-	msg := cap.last().Message
-	for _, want := range []string{"Комментарий в MR", "Carol", "Looks good to me", "Add feature X"} {
-		if !strings.Contains(msg, want) {
-			t.Errorf("message missing %q:\n%s", want, msg)
-		}
+	// An unknown kind with object_attributes.status (no action) uses the status.
+	kind, subtype, key = deriveEventKey(mustDecode(t, `{
+		"object_kind": "deployment",
+		"object_attributes": {"status": "running"}
+	}`))
+	if kind != "deployment" || subtype != "running" || key != "deployment.running" {
+		t.Errorf("got (%q, %q, %q), want deployment/running/deployment.running", kind, subtype, key)
 	}
 }
 
-func TestGitlab_IgnoredEvents(t *testing.T) {
+func TestNormalizeGitlab(t *testing.T) {
+	t.Run("merge_request", func(t *testing.T) {
+		v := normalizeGitlab(mustDecode(t, mrOpenPayload))
+		if v.Kind != "merge_request" || v.EventKey != "merge_request.open" || v.Action != "open" {
+			t.Errorf("kind/key/action = %q/%q/%q", v.Kind, v.EventKey, v.Action)
+		}
+		if v.Project != "myproj" || v.User != "Alice" || v.Title != "Add feature X" {
+			t.Errorf("project/user/title = %q/%q/%q", v.Project, v.User, v.Title)
+		}
+		if v.URL != "https://gl/myproj/-/merge_requests/1" {
+			t.Errorf("url = %q", v.URL)
+		}
+	})
+	t.Run("username_fallback", func(t *testing.T) {
+		v := normalizeGitlab(mustDecode(t, mrOpenUsernameOnlyPayload))
+		if v.User != "jane" {
+			t.Errorf("user = %q, want username fallback jane", v.User)
+		}
+	})
+	t.Run("push_user_name_and_web_url_fallback", func(t *testing.T) {
+		v := normalizeGitlab(mustDecode(t, pushPayload))
+		if v.User != "Erin" {
+			t.Errorf("user = %q, want user_name fallback Erin", v.User)
+		}
+		if v.URL != "https://gl/myproj" {
+			t.Errorf("url = %q, want project.web_url fallback", v.URL)
+		}
+		if v.Title != "" {
+			t.Errorf("title = %q, want empty for push", v.Title)
+		}
+	})
+	t.Run("path_with_namespace_fallback", func(t *testing.T) {
+		v := normalizeGitlab(mustDecode(t, `{
+			"object_kind": "push",
+			"project": {"path_with_namespace": "grp/myproj"}
+		}`))
+		if v.Project != "grp/myproj" {
+			t.Errorf("project = %q, want path_with_namespace fallback", v.Project)
+		}
+	})
+	t.Run("empty_payload", func(t *testing.T) {
+		v := normalizeGitlab(map[string]any{})
+		if v.Kind != "" || v.EventKey != "" || v.Project != "" || v.User != "" {
+			t.Errorf("expected zero view, got %+v", v)
+		}
+	})
+}
+
+func TestGitlabGet(t *testing.T) {
+	raw := mustDecode(t, mrOpenPayload)
+	// Success: nested string.
+	if got := gitlabNestedGet(raw, "object_attributes.title"); got != "Add feature X" {
+		t.Errorf("get title = %v", got)
+	}
+	// Success via the view helper.
+	v := gitlabView{Raw: raw}
+	if got := v.Get("project.web_url"); got != "https://gl/myproj" {
+		t.Errorf("Get project.web_url = %v", got)
+	}
+	// Miss: absent leaf.
+	if got := gitlabNestedGet(raw, "object_attributes.nope"); got != nil {
+		t.Errorf("get absent leaf = %v, want nil", got)
+	}
+	// Miss: path descends through a non-object.
+	if got := gitlabNestedGet(raw, "object_attributes.title.deeper"); got != nil {
+		t.Errorf("get through scalar = %v, want nil", got)
+	}
+	// Nil map and empty path.
+	if got := gitlabNestedGet(nil, "a.b"); got != nil {
+		t.Errorf("get on nil map = %v, want nil", got)
+	}
+	if got := gitlabNestedGet(raw, ""); got != nil {
+		t.Errorf("get empty path = %v, want nil", got)
+	}
+}
+
+func TestGitlab_GenericRender(t *testing.T) {
 	cases := []struct {
 		name    string
 		payload string
+		wants   []string
 	}{
-		{"mr_update", mrUpdatePayload},
-		{"note_system", noteSystemPayload},
-		{"note_commit", noteCommitPayload},
+		{"mr_open", mrOpenPayload, []string{"merge_request.open", "myproj", "Add feature X", "Alice"}},
+		{"mr_merge", mrMergePayload, []string{"merge_request.merge", "Add feature X", "Bob"}},
+		{"note", noteCommentPayload, []string{"note.MergeRequest", "Carol"}},
+		{"push", pushPayload, []string{"push", "myproj", "Erin"}},
+		{"pipeline", pipelinePayload, []string{"pipeline.failed", "Frank"}},
+		{"job", jobPayload, []string{"build.success", "Grace"}},
+		{"issue", issuePayload, []string{"issue.open", "Something broke", "Heidi"}},
+		{"unknown_kind", unknownKindPayload, []string{"wiki_page", "myproj", "Ivan"}},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -235,11 +335,14 @@ func TestGitlab_IgnoredEvents(t *testing.T) {
 			if w.Code != 200 {
 				t.Fatalf("status = %d, body: %s", w.Code, w.Body.String())
 			}
-			if cap.count() != 0 {
-				t.Errorf("send count = %d, want 0 (event should be ignored)", cap.count())
+			if cap.count() != 1 {
+				t.Fatalf("send count = %d, want 1", cap.count())
 			}
-			if !strings.Contains(w.Body.String(), "ignored") {
-				t.Errorf("body missing ignored marker: %s", w.Body.String())
+			msg := cap.last().Message
+			for _, want := range tc.wants {
+				if !strings.Contains(msg, want) {
+					t.Errorf("message missing %q:\n%s", want, msg)
+				}
 			}
 		})
 	}
@@ -326,23 +429,6 @@ func TestGitlab_AuthorUsernameFallback(t *testing.T) {
 	}
 	if !strings.Contains(cap.last().Message, "jane") {
 		t.Errorf("message missing username fallback %q:\n%s", "jane", cap.last().Message)
-	}
-}
-
-func TestGitlab_CommentWithoutNestedMR(t *testing.T) {
-	srv, cap := newGitlabTestServer(t, &GitlabConfig{DefaultChatID: "chat1", SecretToken: "secret"})
-	w := doRequest(srv, "POST", "/api/v1/gitlab", strings.NewReader(noteCommentNoMRPayload), gitlabHeaders("secret"))
-	if w.Code != 200 {
-		t.Fatalf("status = %d, body: %s", w.Code, w.Body.String())
-	}
-	if cap.count() != 1 {
-		t.Fatalf("send count = %d, want 1", cap.count())
-	}
-	msg := cap.last().Message
-	for _, want := range []string{"Комментарий в MR", "Dave", "please rebase", "https://gl/myproj/-/merge_requests/3#note_9"} {
-		if !strings.Contains(msg, want) {
-			t.Errorf("message missing %q:\n%s", want, msg)
-		}
 	}
 }
 
