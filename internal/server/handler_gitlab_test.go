@@ -584,6 +584,40 @@ func TestGitlab_FilterIgnoresEvent(t *testing.T) {
 	})
 }
 
+func TestGitlab_ErrorEventsStatus(t *testing.T) {
+	cases := []struct {
+		name        string
+		payload     string
+		errorEvents []string
+		wantStatus  string
+	}{
+		{"exact_key_error", pipelinePayload, []string{"pipeline.failed"}, "error"},
+		{"ordinary_event_ok", mrOpenPayload, []string{"pipeline.failed"}, "ok"},
+		{"wildcard_error", pipelinePayload, []string{"pipeline.*"}, "error"},
+		{"empty_error_events_ok", pipelinePayload, nil, "ok"},
+		{"bare_kind_error", jobPayload, []string{"build"}, "error"},
+		{"not_in_error_events_ok", mrOpenPayload, []string{"pipeline.*", "build.failed"}, "ok"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			srv, cap := newGitlabTestServer(t, &GitlabConfig{
+				DefaultChatID: "chat1", SecretToken: "secret",
+				ErrorEvents: tc.errorEvents,
+			})
+			w := doRequest(srv, "POST", "/api/v1/gitlab", strings.NewReader(tc.payload), gitlabHeaders("secret"))
+			if w.Code != 200 {
+				t.Fatalf("status = %d, body: %s", w.Code, w.Body.String())
+			}
+			if cap.count() != 1 {
+				t.Fatalf("send count = %d, want 1", cap.count())
+			}
+			if got := cap.last().Status; got != tc.wantStatus {
+				t.Errorf("status = %q, want %q", got, tc.wantStatus)
+			}
+		})
+	}
+}
+
 func TestGitlabTemplates_Selection(t *testing.T) {
 	gt, err := ParseGitlabTemplates(map[string]string{
 		"issue.open": "OPEN {{ .Title }}",

@@ -32,6 +32,10 @@ type GitlabConfig struct {
 	// "kind.*" wildcard. An empty Only allows every event; Exclude always wins.
 	Only    []string
 	Exclude []string
+	// ErrorEvents lists event keys that should be delivered with status "error"
+	// (surfaced as BotX notification.status). Entries use the same matching as
+	// Only/Exclude (full key, bare kind, or "kind.*"). Everything else is "ok".
+	ErrorEvents []string
 }
 
 // gitlabView is the view-model passed to the message template. It is derived
@@ -269,12 +273,19 @@ func (s *Server) handleGitlab(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Map to BotX notification.status: error when the event key matches
+	// ErrorEvents, otherwise ok.
+	status := "ok"
+	if eventMatches(view.Kind, view.EventKey, s.gitCfg.ErrorEvents) {
+		status = "error"
+	}
+
 	start := time.Now()
 	syncID, err := s.send(r.Context(), &SendPayload{
 		Bot:     botName,
 		ChatID:  chatResult.ChatID,
 		Message: message,
-		Status:  "ok",
+		Status:  status,
 	})
 	elapsed := time.Since(start)
 
