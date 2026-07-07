@@ -246,3 +246,74 @@ func conditionMatches(values []string, matchers []patternMatcher) bool {
 	}
 	return false
 }
+
+// --- Task 3: rules and evaluate (all-match + stop + dedup) ---
+
+// compiledCondition is one selector predicate of a compiled route. For every
+// selector but "event" the candidate values (resolveSelector) are tested against
+// matchers with OR semantics; when selector == "event" the event field carries an
+// eventMatcher and value patterns are not used.
+type compiledCondition struct {
+	selector string
+	matchers []patternMatcher
+	event    eventMatcher // set only when selector == "event"
+}
+
+// matches reports whether this condition holds for an event. The "event" selector
+// routes through the dedicated event matcher (kind / kind.subtype / kind.*);
+// every other selector resolves candidate values and OR-matches them against the
+// condition's patterns.
+func (c compiledCondition) matches(view gitlabView) bool {
+	if c.selector == "event" {
+		return c.event.matchesEvent(view.Kind, view.EventKey)
+	}
+	return conditionMatches(resolveSelector(view, c.selector), c.matchers)
+}
+
+// compiledRoute is a single routing rule: a set of conditions (AND), the chats a
+// matching event fans out to, and whether a match stops the rule scan.
+type compiledRoute struct {
+	conds []compiledCondition
+	chats []string
+	stop  bool
+}
+
+// routeMatches reports whether a route applies to an event. All conditions must
+// hold (AND across fields); a selector that the rule does not mention is simply
+// absent from conds and so places no constraint. A route with no conditions is a
+// catch-all that always matches.
+func routeMatches(view gitlabView, route compiledRoute) bool {
+	for _, cond := range route.conds {
+		if !cond.matches(view) {
+			return false
+		}
+	}
+	return true
+}
+
+// evaluateRoutes runs the ordered rule list against an event. Every matching rule
+// contributes its chats (all-match, not first-match); the chats are unioned with
+// duplicates removed while preserving first-seen order. A matching rule with
+// stop:true ends the scan after its chats are collected. matched reports whether
+// any rule matched at all (distinct from "matched but produced no chats", which a
+// well-formed config never does since chats is required non-empty).
+func evaluateRoutes(routes []compiledRoute, view gitlabView) (chats []string, matched bool) {
+	seen := make(map[string]struct{})
+	for _, route := range routes {
+		if !routeMatches(view, route) {
+			continue
+		}
+		matched = true
+		for _, chat := range route.chats {
+			if _, ok := seen[chat]; ok {
+				continue
+			}
+			seen[chat] = struct{}{}
+			chats = append(chats, chat)
+		}
+		if route.stop {
+			break
+		}
+	}
+	return chats, matched
+}

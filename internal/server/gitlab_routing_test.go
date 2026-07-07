@@ -285,6 +285,187 @@ func TestGitlabSelectorStringsSkipsObjects(t *testing.T) {
 	}
 }
 
+// mustPattern compiles a pattern for tests, failing fast on error.
+func mustPattern(t *testing.T, pattern string) patternMatcher {
+	t.Helper()
+	m, err := compilePattern(pattern)
+	if err != nil {
+		t.Fatalf("compilePattern(%q): %v", pattern, err)
+	}
+	return m
+}
+
+func TestRouteMatches(t *testing.T) {
+	view := gitlabView{
+		Kind:     "merge_request",
+		EventKey: "merge_request.open",
+		Project:  "group/backend",
+		Raw: map[string]any{
+			"object_attributes": map[string]any{"target_branch": "main"},
+		},
+	}
+	tests := []struct {
+		name  string
+		route compiledRoute
+		want  bool
+	}{
+		{
+			name:  "empty conds is catch-all",
+			route: compiledRoute{},
+			want:  true,
+		},
+		{
+			name: "single condition hit",
+			route: compiledRoute{conds: []compiledCondition{
+				{selector: "project", matchers: []patternMatcher{mustPattern(t, "group/backend")}},
+			}},
+			want: true,
+		},
+		{
+			name: "single condition miss",
+			route: compiledRoute{conds: []compiledCondition{
+				{selector: "project", matchers: []patternMatcher{mustPattern(t, "group/frontend")}},
+			}},
+			want: false,
+		},
+		{
+			name: "all conds must hold (AND) - all hit",
+			route: compiledRoute{conds: []compiledCondition{
+				{selector: "project", matchers: []patternMatcher{mustPattern(t, "group/*")}},
+				{selector: "branch", matchers: []patternMatcher{mustPattern(t, "main")}},
+			}},
+			want: true,
+		},
+		{
+			name: "all conds must hold (AND) - one miss",
+			route: compiledRoute{conds: []compiledCondition{
+				{selector: "project", matchers: []patternMatcher{mustPattern(t, "group/*")}},
+				{selector: "branch", matchers: []patternMatcher{mustPattern(t, "develop")}},
+			}},
+			want: false,
+		},
+		{
+			name: "event selector matches through event matcher",
+			route: compiledRoute{conds: []compiledCondition{
+				{selector: "event", event: eventMatcher{"merge_request.open"}},
+			}},
+			want: true,
+		},
+		{
+			name: "event selector no match",
+			route: compiledRoute{conds: []compiledCondition{
+				{selector: "event", event: eventMatcher{"pipeline.failed"}},
+			}},
+			want: false,
+		},
+		{
+			name: "omitted selector places no constraint",
+			route: compiledRoute{conds: []compiledCondition{
+				{selector: "branch", matchers: []patternMatcher{mustPattern(t, "main")}},
+			}},
+			want: true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := routeMatches(view, tt.route); got != tt.want {
+				t.Errorf("routeMatches = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestEvaluateRoutes(t *testing.T) {
+	view := gitlabView{
+		Kind:     "merge_request",
+		EventKey: "merge_request.open",
+		Project:  "group/backend",
+		Raw: map[string]any{
+			"object_attributes": map[string]any{"target_branch": "main"},
+		},
+	}
+
+	condProject := func(pat string) compiledCondition {
+		return compiledCondition{selector: "project", matchers: []patternMatcher{mustPattern(t, pat)}}
+	}
+	condBranch := func(pat string) compiledCondition {
+		return compiledCondition{selector: "branch", matchers: []patternMatcher{mustPattern(t, pat)}}
+	}
+
+	tests := []struct {
+		name        string
+		routes      []compiledRoute
+		wantChats   []string
+		wantMatched bool
+	}{
+		{
+			name:        "no routes matched",
+			routes:      []compiledRoute{{conds: []compiledCondition{condProject("group/frontend")}, chats: []string{"c1"}}},
+			wantChats:   nil,
+			wantMatched: false,
+		},
+		{
+			name:        "single match",
+			routes:      []compiledRoute{{conds: []compiledCondition{condProject("group/backend")}, chats: []string{"c1"}}},
+			wantChats:   []string{"c1"},
+			wantMatched: true,
+		},
+		{
+			name: "multiple matches union chats",
+			routes: []compiledRoute{
+				{conds: []compiledCondition{condProject("group/*")}, chats: []string{"c1"}},
+				{conds: []compiledCondition{condBranch("main")}, chats: []string{"c2"}},
+			},
+			wantChats:   []string{"c1", "c2"},
+			wantMatched: true,
+		},
+		{
+			name: "dedup preserves first-seen order",
+			routes: []compiledRoute{
+				{conds: []compiledCondition{condProject("group/*")}, chats: []string{"c1", "c2"}},
+				{conds: []compiledCondition{condBranch("main")}, chats: []string{"c2", "c3"}},
+			},
+			wantChats:   []string{"c1", "c2", "c3"},
+			wantMatched: true,
+		},
+		{
+			name: "stop halts scan after collecting its chats",
+			routes: []compiledRoute{
+				{conds: []compiledCondition{condProject("group/*")}, chats: []string{"c1"}, stop: true},
+				{conds: []compiledCondition{condBranch("main")}, chats: []string{"c2"}},
+			},
+			wantChats:   []string{"c1"},
+			wantMatched: true,
+		},
+		{
+			name: "non-matching rule does not stop scan",
+			routes: []compiledRoute{
+				{conds: []compiledCondition{condProject("group/frontend")}, chats: []string{"c1"}, stop: true},
+				{conds: []compiledCondition{condBranch("main")}, chats: []string{"c2"}},
+			},
+			wantChats:   []string{"c2"},
+			wantMatched: true,
+		},
+		{
+			name:        "catch-all matches",
+			routes:      []compiledRoute{{chats: []string{"c1"}}},
+			wantChats:   []string{"c1"},
+			wantMatched: true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			gotChats, gotMatched := evaluateRoutes(tt.routes, view)
+			if gotMatched != tt.wantMatched {
+				t.Errorf("matched = %v, want %v", gotMatched, tt.wantMatched)
+			}
+			if !reflect.DeepEqual(gotChats, tt.wantChats) {
+				t.Errorf("chats = %v, want %v", gotChats, tt.wantChats)
+			}
+		})
+	}
+}
+
 func TestConditionMatches(t *testing.T) {
 	globBackend, _ := compilePattern("group/backend/*")
 	exactMain, _ := compilePattern("main")
