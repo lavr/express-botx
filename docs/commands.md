@@ -294,8 +294,9 @@ express-botx serve --config config.yaml --api-key env:MY_API_KEY
 | `POST` | `{basePath}/send` | Отправка сообщения (JSON / multipart) |
 | `POST` | `{basePath}/alertmanager` | Приём вебхуков от Alertmanager |
 | `POST` | `{basePath}/grafana` | Приём вебхуков от Grafana |
+| `POST` | `{basePath}/gitlab` | Приём вебхуков GitLab MR (авторизация: `X-Gitlab-Token`) |
 
-Все `POST`-эндпоинты требуют авторизации: `Authorization: Bearer <key>` или `X-API-Key: <key>`.
+Все `POST`-эндпоинты требуют авторизации: `Authorization: Bearer <key>` или `X-API-Key: <key>`. Исключение — `/gitlab`, который авторизуется по заголовку `X-Gitlab-Token` и включается только при наличии секции `server.gitlab`.
 
 ### serve --enqueue (асинхронный режим)
 
@@ -712,7 +713,7 @@ express-botx config validate --format json
 - Неизвестные ключи в YAML (предупреждения)
 - Обязательные поля: `host` и `id` для ботов, `secret` или `token` (но не оба)
 - Форматы: UUID для `id` и `chat_id`, длительности (`timeout`, `retry_backoff`), допустимые enum-значения (`cache.type`, `queue.driver`, `routing_mode`)
-- Перекрёстные ссылки: `bot` в чате ссылается на существующего бота, не более одного чата по умолчанию, `default_chat_id` в alertmanager/grafana ссылается на существующий алиас
+- Перекрёстные ссылки: `bot` в чате ссылается на существующего бота, не более одного чата по умолчанию, `default_chat_id` в alertmanager/grafana/gitlab ссылается на существующий алиас
 
 Флаги:
 

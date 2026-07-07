@@ -11,6 +11,12 @@ import (
 // newGitlabTestServer builds a server with the gitlab endpoint enabled and a
 // send function that records the last SendPayload it received.
 func newGitlabTestServer(t *testing.T, cfg *GitlabConfig) (*Server, *captureSend) {
+	return newGitlabTestServerCfg(t, Config{Listen: ":0", BasePath: "/api/v1"}, cfg, nil)
+}
+
+// newGitlabTestServerCfg is like newGitlabTestServer but lets the caller control
+// the server Config (e.g. DefaultChatAlias) and inject a send error.
+func newGitlabTestServerCfg(t *testing.T, srvCfg Config, cfg *GitlabConfig, sendErr error) (*Server, *captureSend) {
 	t.Helper()
 	if cfg.Template == nil {
 		tmpl, err := ParseGitlabTemplate(DefaultGitlabTemplate)
@@ -22,6 +28,9 @@ func newGitlabTestServer(t *testing.T, cfg *GitlabConfig) (*Server, *captureSend
 	cap := &captureSend{}
 	sendFn := func(ctx context.Context, p *SendPayload) (string, error) {
 		cap.record(p)
+		if sendErr != nil {
+			return "", sendErr
+		}
 		return "sync-1", nil
 	}
 	chatResolver := func(chatID string) (ChatResolveResult, error) {
@@ -30,7 +39,7 @@ func newGitlabTestServer(t *testing.T, cfg *GitlabConfig) (*Server, *captureSend
 		}
 		return ChatResolveResult{ChatID: chatID}, nil
 	}
-	srv := New(Config{Listen: ":0", BasePath: "/api/v1"}, sendFn, chatResolver, WithGitlab(cfg))
+	srv := New(srvCfg, sendFn, chatResolver, WithGitlab(cfg))
 	return srv, cap
 }
 
@@ -119,6 +128,33 @@ const (
 		"object_kind": "note",
 		"user": {"name": "Carol"},
 		"object_attributes": {"note": "nice commit", "noteable_type": "Commit", "system": false}
+	}`
+	// mrOpenUsernameOnlyPayload carries only user.username (no user.name), to
+	// exercise the author fallback.
+	mrOpenUsernameOnlyPayload = `{
+		"object_kind": "merge_request",
+		"user": {"username": "jane"},
+		"project": {"name": "myproj"},
+		"object_attributes": {
+			"action": "open",
+			"title": "Add feature Y",
+			"url": "https://gl/myproj/-/merge_requests/2",
+			"source_branch": "feature-y",
+			"target_branch": "main"
+		}
+	}`
+	// noteCommentNoMRPayload is an MR comment without the nested merge_request
+	// block, so URL must come from object_attributes.
+	noteCommentNoMRPayload = `{
+		"object_kind": "note",
+		"user": {"name": "Dave"},
+		"project": {"name": "myproj"},
+		"object_attributes": {
+			"note": "please rebase",
+			"noteable_type": "MergeRequest",
+			"url": "https://gl/myproj/-/merge_requests/3#note_9",
+			"system": false
+		}
 	}`
 )
 
@@ -277,6 +313,84 @@ func TestGitlab_InvalidJSON(t *testing.T) {
 	if w.Code != 400 {
 		t.Fatalf("status = %d, want 400 (body: %s)", w.Code, w.Body.String())
 	}
+}
+
+func TestGitlab_AuthorUsernameFallback(t *testing.T) {
+	srv, cap := newGitlabTestServer(t, &GitlabConfig{DefaultChatID: "chat1", SecretToken: "secret"})
+	w := doRequest(srv, "POST", "/api/v1/gitlab", strings.NewReader(mrOpenUsernameOnlyPayload), gitlabHeaders("secret"))
+	if w.Code != 200 {
+		t.Fatalf("status = %d, body: %s", w.Code, w.Body.String())
+	}
+	if cap.count() != 1 {
+		t.Fatalf("send count = %d, want 1", cap.count())
+	}
+	if !strings.Contains(cap.last().Message, "jane") {
+		t.Errorf("message missing username fallback %q:\n%s", "jane", cap.last().Message)
+	}
+}
+
+func TestGitlab_CommentWithoutNestedMR(t *testing.T) {
+	srv, cap := newGitlabTestServer(t, &GitlabConfig{DefaultChatID: "chat1", SecretToken: "secret"})
+	w := doRequest(srv, "POST", "/api/v1/gitlab", strings.NewReader(noteCommentNoMRPayload), gitlabHeaders("secret"))
+	if w.Code != 200 {
+		t.Fatalf("status = %d, body: %s", w.Code, w.Body.String())
+	}
+	if cap.count() != 1 {
+		t.Fatalf("send count = %d, want 1", cap.count())
+	}
+	msg := cap.last().Message
+	for _, want := range []string{"Комментарий в MR", "Dave", "please rebase", "https://gl/myproj/-/merge_requests/3#note_9"} {
+		if !strings.Contains(msg, want) {
+			t.Errorf("message missing %q:\n%s", want, msg)
+		}
+	}
+}
+
+func TestGitlab_SendFailure(t *testing.T) {
+	srv, cap := newGitlabTestServerCfg(t, Config{Listen: ":0", BasePath: "/api/v1"},
+		&GitlabConfig{DefaultChatID: "chat1", SecretToken: "secret"}, fmt.Errorf("botx unavailable"))
+	w := doRequest(srv, "POST", "/api/v1/gitlab", strings.NewReader(mrOpenPayload), gitlabHeaders("secret"))
+	if w.Code != 502 {
+		t.Fatalf("status = %d, want 502 (body: %s)", w.Code, w.Body.String())
+	}
+	if cap.count() != 1 {
+		t.Errorf("send count = %d, want 1 (send attempted then failed)", cap.count())
+	}
+}
+
+func TestGitlab_ChatResolutionFallbacks(t *testing.T) {
+	t.Run("global_default_chat", func(t *testing.T) {
+		srv, cap := newGitlabTestServerCfg(t, Config{Listen: ":0", BasePath: "/api/v1", DefaultChatAlias: "globchat"},
+			&GitlabConfig{SecretToken: "secret"}, nil)
+		w := doRequest(srv, "POST", "/api/v1/gitlab", strings.NewReader(mrOpenPayload), gitlabHeaders("secret"))
+		if w.Code != 200 {
+			t.Fatalf("status = %d, body: %s", w.Code, w.Body.String())
+		}
+		if cap.last().ChatID != "globchat" {
+			t.Errorf("chat = %q, want globchat", cap.last().ChatID)
+		}
+	})
+	t.Run("single_chat_fallback", func(t *testing.T) {
+		srv, cap := newGitlabTestServer(t, &GitlabConfig{SecretToken: "secret", FallbackChatID: "onlychat"})
+		w := doRequest(srv, "POST", "/api/v1/gitlab", strings.NewReader(mrOpenPayload), gitlabHeaders("secret"))
+		if w.Code != 200 {
+			t.Fatalf("status = %d, body: %s", w.Code, w.Body.String())
+		}
+		if cap.last().ChatID != "onlychat" {
+			t.Errorf("chat = %q, want onlychat", cap.last().ChatID)
+		}
+	})
+	t.Run("query_overrides_default_chat", func(t *testing.T) {
+		srv, cap := newGitlabTestServerCfg(t, Config{Listen: ":0", BasePath: "/api/v1", DefaultChatAlias: "globchat"},
+			&GitlabConfig{SecretToken: "secret", FallbackChatID: "onlychat"}, nil)
+		w := doRequest(srv, "POST", "/api/v1/gitlab?chat_id=override", strings.NewReader(mrOpenPayload), gitlabHeaders("secret"))
+		if w.Code != 200 {
+			t.Fatalf("status = %d, body: %s", w.Code, w.Body.String())
+		}
+		if cap.last().ChatID != "override" {
+			t.Errorf("chat = %q, want override", cap.last().ChatID)
+		}
+	})
 }
 
 func TestGitlab_NotRegisteredWithoutConfig(t *testing.T) {

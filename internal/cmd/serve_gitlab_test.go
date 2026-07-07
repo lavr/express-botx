@@ -3,6 +3,7 @@ package cmd
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/lavr/express-botx/internal/config"
@@ -27,9 +28,13 @@ func TestBuildGitlabConfig_DefaultTemplate(t *testing.T) {
 	if cfg.Template == nil {
 		t.Fatal("Template is nil")
 	}
-	// Default template must be the built-in one; render a known event to confirm.
-	if cfg.Template.Tree == nil {
-		t.Error("default template not parsed")
+	// Default template must be the built-in one; render known events to confirm
+	// it produces the expected branch-specific output.
+	if msg := renderGitlabTemplate(t, cfg, "open"); !strings.Contains(msg, "Новый MR") {
+		t.Errorf("open render missing %q:\n%s", "Новый MR", msg)
+	}
+	if msg := renderGitlabTemplate(t, cfg, "merge"); !strings.Contains(msg, "Успешно слито") {
+		t.Errorf("merge render missing %q:\n%s", "Успешно слито", msg)
 	}
 }
 

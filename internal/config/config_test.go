@@ -2744,5 +2744,11 @@ server:
 		if r.Path == "server.gitlab.default_chat_id" && r.Level == ValidationError {
 			t.Errorf("unexpected error for valid gitlab default_chat_id: %s", r.Message)
 		}
+		// server.gitlab and its keys must be registered in knownKeys, so no
+		// spurious "unknown key" warnings should surface for this block.
+		if r.Level == ValidationWarning && strings.Contains(r.Message, "unknown key") &&
+			strings.HasPrefix(r.Path, "server.gitlab") {
+			t.Errorf("unexpected unknown-key warning for %s: %s", r.Path, r.Message)
+		}
 	}
 }

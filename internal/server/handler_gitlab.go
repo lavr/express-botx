@@ -93,20 +93,9 @@ func classifyGitlab(w GitlabWebhook) (gitlabView, bool) {
 	switch w.ObjectKind {
 	case "merge_request":
 		switch w.ObjectAttributes.Action {
-		case "open":
+		case "open", "merge":
 			return gitlabView{
-				Event:        "open",
-				Author:       author,
-				Project:      w.Project.Name,
-				Title:        w.ObjectAttributes.Title,
-				URL:          w.ObjectAttributes.URL,
-				SourceBranch: w.ObjectAttributes.SourceBranch,
-				TargetBranch: w.ObjectAttributes.TargetBranch,
-				MergeStatus:  w.ObjectAttributes.DetailedMergeStatus,
-			}, true
-		case "merge":
-			return gitlabView{
-				Event:        "merge",
+				Event:        w.ObjectAttributes.Action,
 				Author:       author,
 				Project:      w.Project.Name,
 				Title:        w.ObjectAttributes.Title,
@@ -147,8 +136,11 @@ func (s *Server) handleGitlab(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Verify X-Gitlab-Token (GitLab cannot set Authorization/X-API-Key).
+	// Reject empty tokens outright so a misconfigured empty SecretToken never
+	// authenticates an unauthenticated request via the constant-time compare.
 	token := r.Header.Get("X-Gitlab-Token")
-	if subtle.ConstantTimeCompare([]byte(token), []byte(s.gitCfg.SecretToken)) != 1 {
+	if s.gitCfg.SecretToken == "" || token == "" ||
+		subtle.ConstantTimeCompare([]byte(token), []byte(s.gitCfg.SecretToken)) != 1 {
 		vlog.V1("gitlab: token mismatch -> 401")
 		writeError(w, http.StatusUnauthorized, "invalid gitlab token")
 		return

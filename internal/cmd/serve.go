@@ -315,14 +315,6 @@ Options:
 				vlog.V1("gitlab: using single chat alias %q as fallback", alias)
 			}
 		}
-		chatInfo := gitCfg.DefaultChatID
-		if chatInfo == "" {
-			chatInfo = gitCfg.FallbackChatID
-		}
-		if chatInfo == "" {
-			chatInfo = "?chat_id required"
-		}
-		vlog.Info("serve: gitlab endpoint enabled (chat: %s, token auth)", chatInfo)
 		srvOpts = append(srvOpts, server.WithGitlab(gitCfg))
 	}
 

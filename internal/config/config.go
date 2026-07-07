@@ -1007,13 +1007,16 @@ var knownKeys = map[string]map[string]bool{
 	},
 	"server": {
 		"listen": true, "base_path": true, "api_keys": true, "allow_bot_secret_auth": true,
-		"alertmanager": true, "grafana": true, "callbacks": true, "docs": true, "external_url": true,
+		"alertmanager": true, "grafana": true, "gitlab": true, "callbacks": true, "docs": true, "external_url": true,
 	},
 	"server.alertmanager": {
 		"default_chat_id": true, "error_severities": true, "template": true, "template_file": true,
 	},
 	"server.grafana": {
 		"default_chat_id": true, "error_states": true, "template": true, "template_file": true,
+	},
+	"server.gitlab": {
+		"default_chat_id": true, "secret": true, "secret_token": true, "template": true, "template_file": true,
 	},
 	"server.callbacks": {
 		"base_path": true, "verify_jwt": true, "rules": true,
