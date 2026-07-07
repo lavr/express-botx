@@ -121,6 +121,7 @@ func (m eventMatcher) matchesEvent(kind, eventKey string) bool {
 //	                       (fallback merge_request.target_branch)
 //	push, tag_push      -> the branch of ref ("refs/heads/main" -> "main")
 //	pipeline            -> object_attributes.ref
+//	build (job)         -> the branch of the top-level ref (bare "main")
 //	otherwise           -> "" (issue, wiki, deployment, ... have no branch)
 //
 // Non-MR notes (on a commit/issue/snippet) carry no target_branch, so they
@@ -132,7 +133,7 @@ func gitlabBranch(kind string, raw map[string]any) string {
 			return b
 		}
 		return gitlabStringAt(raw, "merge_request.target_branch")
-	case "push", "tag_push":
+	case "push", "tag_push", "build":
 		return refBranch(gitlabStringAt(raw, "ref"))
 	case "pipeline":
 		return gitlabStringAt(raw, "object_attributes.ref")

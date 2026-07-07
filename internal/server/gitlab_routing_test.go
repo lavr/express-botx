@@ -168,6 +168,18 @@ func TestGitlabBranch(t *testing.T) {
 			want: "feature/x",
 		},
 		{
+			name: "build uses top-level bare ref",
+			kind: "build",
+			raw:  map[string]any{"ref": "main"},
+			want: "main",
+		},
+		{
+			name: "build strips refs/heads prefix when present",
+			kind: "build",
+			raw:  map[string]any{"ref": "refs/heads/release/2.0"},
+			want: "release/2.0",
+		},
+		{
 			name: "issue has no branch",
 			kind: "issue",
 			raw:  map[string]any{"object_attributes": map[string]any{"title": "bug"}},

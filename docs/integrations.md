@@ -336,7 +336,8 @@ server:
 Нормализация `branch`: MR/`note` → `object_attributes.target_branch` (fallback
 `merge_request.target_branch`); `push`/`tag_push` → ветка из `ref`
 (`refs/heads/release/2.0` → `release/2.0`); `pipeline` →
-`object_attributes.ref`; остальные типы → пусто.
+`object_attributes.ref`; `build`/`job` → ветка из верхнеуровневого `ref`;
+остальные типы → пусто.
 
 **Паттерны:**
 
