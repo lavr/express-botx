@@ -303,6 +303,29 @@ Options:
 	}
 	srvOpts = append(srvOpts, server.WithGrafana(grCfg))
 
+	// GitLab endpoint (only enabled when configured — it needs a secret token)
+	if gl := cfg.Server.Gitlab; gl != nil {
+		gitCfg, err := buildGitlabConfig(gl, cfg.ConfigPath())
+		if err != nil {
+			return err
+		}
+		if gitCfg.DefaultChatID == "" && len(cfg.Chats) == 1 {
+			for alias := range cfg.Chats {
+				gitCfg.FallbackChatID = alias
+				vlog.V1("gitlab: using single chat alias %q as fallback", alias)
+			}
+		}
+		chatInfo := gitCfg.DefaultChatID
+		if chatInfo == "" {
+			chatInfo = gitCfg.FallbackChatID
+		}
+		if chatInfo == "" {
+			chatInfo = "?chat_id required"
+		}
+		vlog.Info("serve: gitlab endpoint enabled (chat: %s, token auth)", chatInfo)
+		srvOpts = append(srvOpts, server.WithGitlab(gitCfg))
+	}
+
 	// Callback endpoints
 	if cb := cfg.Server.Callbacks; cb != nil && len(cb.Rules) > 0 {
 		if err := cb.Validate(); err != nil {
@@ -462,6 +485,55 @@ func buildGrafanaConfig(gr *config.GrafanaYAMLConfig, configPath string) (*serve
 	return &server.GrafanaConfig{
 		DefaultChatID: gr.DefaultChatID,
 		ErrorStates:   states,
+		Template:      tmpl,
+	}, nil
+}
+
+func buildGitlabConfig(gl *config.GitlabYAMLConfig, configPath string) (*server.GitlabConfig, error) {
+	// Resolve the shared secret token (accepts literal, env:, vault:). The
+	// `secret` key takes precedence over the `secret_token` alias.
+	tokenRef := gl.Secret
+	if tokenRef == "" {
+		tokenRef = gl.SecretToken
+	}
+	if tokenRef == "" {
+		return nil, fmt.Errorf("gitlab: secret token is required (set server.gitlab.secret)")
+	}
+	secretToken, err := secret.Resolve(tokenRef)
+	if err != nil {
+		return nil, fmt.Errorf("resolving gitlab secret: %w", err)
+	}
+
+	// Determine template source: template_file > template > default
+	var tmplStr string
+	switch {
+	case gl.TemplateFile != "":
+		path := gl.TemplateFile
+		if !filepath.IsAbs(path) && configPath != "" {
+			path = filepath.Join(filepath.Dir(configPath), path)
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return nil, fmt.Errorf("reading gitlab template %s: %w", path, err)
+		}
+		tmplStr = string(data)
+		vlog.V1("gitlab: loaded template from %s", path)
+	case gl.Template != "":
+		tmplStr = gl.Template
+		vlog.V1("gitlab: using inline template")
+	default:
+		tmplStr = server.DefaultGitlabTemplate
+		vlog.V1("gitlab: using default template")
+	}
+
+	tmpl, err := server.ParseGitlabTemplate(tmplStr)
+	if err != nil {
+		return nil, err
+	}
+
+	return &server.GitlabConfig{
+		DefaultChatID: gl.DefaultChatID,
+		SecretToken:   secretToken,
 		Template:      tmpl,
 	}, nil
 }

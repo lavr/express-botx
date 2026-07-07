@@ -2689,3 +2689,60 @@ server:
 		}
 	}
 }
+
+func TestValidate_GitlabDefaultChatID(t *testing.T) {
+	rawYAML := []byte(`
+bots:
+  main:
+    host: h
+    id: 00000000-0000-0000-0000-000000000001
+    secret: s
+chats:
+  alerts:
+    id: 00000000-0000-0000-0000-000000000003
+server:
+  gitlab:
+    secret: tok
+    default_chat_id: missing_chat
+`)
+	var cfg Config
+	if err := yaml.Unmarshal(rawYAML, &cfg); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	results := cfg.Validate(rawYAML)
+
+	found := false
+	for _, r := range results {
+		if r.Path == "server.gitlab.default_chat_id" && r.Level == ValidationError {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("expected error for gitlab.default_chat_id referencing unknown chat")
+	}
+
+	// A valid alias reference should not raise an error.
+	rawOK := []byte(`
+bots:
+  main:
+    host: h
+    id: 00000000-0000-0000-0000-000000000001
+    secret: s
+chats:
+  alerts:
+    id: 00000000-0000-0000-0000-000000000003
+server:
+  gitlab:
+    secret: tok
+    default_chat_id: alerts
+`)
+	var cfgOK Config
+	if err := yaml.Unmarshal(rawOK, &cfgOK); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	for _, r := range cfgOK.Validate(rawOK) {
+		if r.Path == "server.gitlab.default_chat_id" && r.Level == ValidationError {
+			t.Errorf("unexpected error for valid gitlab default_chat_id: %s", r.Message)
+		}
+	}
+}

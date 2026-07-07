@@ -99,6 +99,7 @@ type ServerConfig struct {
 	AllowBotSecretAuth bool                    `yaml:"allow_bot_secret_auth,omitempty"`
 	Alertmanager       *AlertmanagerYAMLConfig `yaml:"alertmanager,omitempty"`
 	Grafana            *GrafanaYAMLConfig      `yaml:"grafana,omitempty"`
+	Gitlab             *GitlabYAMLConfig       `yaml:"gitlab,omitempty"`
 	Callbacks          *CallbacksConfig        `yaml:"callbacks,omitempty"`
 	Docs               *bool                   `yaml:"docs,omitempty"`         // enable /docs endpoint (default: true)
 	ExternalURL        string                  `yaml:"external_url,omitempty"` // public URL for OpenAPI docs (e.g. http://express-botx.invitro-dev.k8s)
@@ -140,6 +141,20 @@ type GrafanaYAMLConfig struct {
 	ErrorStates   []string `yaml:"error_states,omitempty"`
 	Template      string   `yaml:"template,omitempty"`
 	TemplateFile  string   `yaml:"template_file,omitempty"`
+}
+
+// GitlabYAMLConfig holds YAML settings for the GitLab webhook endpoint.
+// Unlike alertmanager/grafana, the GitLab endpoint is only enabled when this
+// section is present, because it requires a secret token (GitLab cannot send
+// Authorization/X-API-Key headers, so it authenticates via X-Gitlab-Token).
+type GitlabYAMLConfig struct {
+	DefaultChatID string `yaml:"default_chat_id,omitempty"`
+	// Secret is the expected value of the X-Gitlab-Token header. Accepts a
+	// literal, env:VAR, or vault:path#key reference. SecretToken is an alias.
+	Secret       string `yaml:"secret,omitempty"`
+	SecretToken  string `yaml:"secret_token,omitempty"`
+	Template     string `yaml:"template,omitempty"`
+	TemplateFile string `yaml:"template_file,omitempty"`
 }
 
 // APIKeyConfig defines a single API key for server authentication.
@@ -1419,6 +1434,20 @@ func (c *Config) validateCrossReferences() []ValidationResult {
 				results = append(results, ValidationResult{
 					Level:   ValidationError,
 					Path:    "server.grafana.default_chat_id",
+					Message: fmt.Sprintf("references unknown chat alias %q", chatID),
+				})
+			}
+		}
+	}
+
+	// Gitlab default_chat_id must reference existing chat alias
+	if c.Server.Gitlab != nil && c.Server.Gitlab.DefaultChatID != "" {
+		chatID := c.Server.Gitlab.DefaultChatID
+		if !IsUUID(chatID) {
+			if _, ok := c.Chats[chatID]; !ok {
+				results = append(results, ValidationResult{
+					Level:   ValidationError,
+					Path:    "server.gitlab.default_chat_id",
 					Message: fmt.Sprintf("references unknown chat alias %q", chatID),
 				})
 			}
