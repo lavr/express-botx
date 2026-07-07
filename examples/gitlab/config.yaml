@@ -40,6 +40,7 @@ server:
         - "push"
         - "tag_push"
         - "pipeline.failed"
+        - "build.failed"       # failed jobs (delivered as status=error below)
         - "issue.*"
       exclude:
         - "merge_request.update"

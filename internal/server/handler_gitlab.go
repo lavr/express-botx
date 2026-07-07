@@ -116,7 +116,8 @@ func gitlabStringAt(m map[string]any, path string) string {
 //	pipeline             -> object_attributes.status
 //	build (job)          -> build_status (a flat top-level field)
 //	push, tag_push       -> none
-//	otherwise            -> object_attributes.action, then object_attributes.status
+//	otherwise            -> object_attributes.action, then object_attributes.status,
+//	                        then a flat top-level status (e.g. deployment)
 //
 // eventKey is the bare kind when there is no subtype, otherwise "kind.subtype".
 // A payload without object_kind yields an empty eventKey.
@@ -136,8 +137,12 @@ func deriveEventKey(raw map[string]any) (kind, subtype, eventKey string) {
 	default:
 		if s := gitlabStringAt(raw, "object_attributes.action"); s != "" {
 			subtype = s
+		} else if s := gitlabStringAt(raw, "object_attributes.status"); s != "" {
+			subtype = s
 		} else {
-			subtype = gitlabStringAt(raw, "object_attributes.status")
+			// Some hooks (e.g. deployment) carry a flat top-level status
+			// field rather than object_attributes.status.
+			subtype = gitlabStringAt(raw, "status")
 		}
 	}
 
@@ -262,6 +267,16 @@ func (s *Server) handleGitlab(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	vlog.V3("gitlab: rendered message:\n%s", message)
+
+	// Never post a blank message (e.g. a payload without object_kind that
+	// renders to an empty generic template). Treat it as ignored rather than
+	// delivering an empty notification to the chat.
+	if strings.TrimSpace(message) == "" {
+		vlog.V2("gitlab: %s rendered empty message -> ignored", view.EventKey)
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(gitlabIgnoredResponse{OK: true, Ignored: true, Event: view.EventKey})
+		return
+	}
 
 	// Resolve chat: query param > default_chat_id > global default chat > single chat from config
 	targetChat := s.gitCfg.DefaultChatID

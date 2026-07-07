@@ -235,6 +235,15 @@ func TestDeriveEventKey_FallbackSubtype(t *testing.T) {
 	if kind != "deployment" || subtype != "running" || key != "deployment.running" {
 		t.Errorf("got (%q, %q, %q), want deployment/running/deployment.running", kind, subtype, key)
 	}
+	// An unknown kind with only a flat top-level status (real GitLab deployment
+	// hooks have no object_attributes) falls back to that status.
+	kind, subtype, key = deriveEventKey(mustDecode(t, `{
+		"object_kind": "deployment",
+		"status": "failed"
+	}`))
+	if kind != "deployment" || subtype != "failed" || key != "deployment.failed" {
+		t.Errorf("got (%q, %q, %q), want deployment/failed/deployment.failed", kind, subtype, key)
+	}
 }
 
 func TestNormalizeGitlab(t *testing.T) {
@@ -592,6 +601,28 @@ func TestGitlab_FilterIgnoresEvent(t *testing.T) {
 			t.Errorf("send count = %d, want 1 (matches only)", cap.count())
 		}
 	})
+}
+
+func TestGitlab_EmptyMessageIgnored(t *testing.T) {
+	// A payload without object_kind renders the generic default to an empty
+	// string; with an allow-all config it must be ignored, not sent blank.
+	srv, cap := newGitlabTestServer(t, &GitlabConfig{
+		DefaultChatID: "chat1", SecretToken: "secret",
+	})
+	w := doRequest(srv, "POST", "/api/v1/gitlab", strings.NewReader(`{}`), gitlabHeaders("secret"))
+	if w.Code != 200 {
+		t.Fatalf("status = %d, body: %s", w.Code, w.Body.String())
+	}
+	if cap.count() != 0 {
+		t.Errorf("send count = %d, want 0 (empty message ignored)", cap.count())
+	}
+	var resp gitlabIgnoredResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode response: %v (body: %s)", err, w.Body.String())
+	}
+	if !resp.OK || !resp.Ignored {
+		t.Errorf("response = %+v, want ok/ignored", resp)
+	}
 }
 
 func TestGitlab_ErrorEventsStatus(t *testing.T) {
