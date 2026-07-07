@@ -479,6 +479,108 @@ func TestGitlab_ChatResolutionFallbacks(t *testing.T) {
 	})
 }
 
+func TestEventMatches(t *testing.T) {
+	cases := []struct {
+		name     string
+		kind     string
+		eventKey string
+		entries  []string
+		want     bool
+	}{
+		{"exact_key", "merge_request", "merge_request.open", []string{"merge_request.open"}, true},
+		{"bare_kind", "merge_request", "merge_request.open", []string{"merge_request"}, true},
+		{"wildcard", "merge_request", "merge_request.merge", []string{"merge_request.*"}, true},
+		{"no_match", "merge_request", "merge_request.open", []string{"pipeline.failed"}, false},
+		{"empty_entries", "push", "push", nil, false},
+		{"push_bare", "push", "push", []string{"push"}, true},
+		{"among_many", "pipeline", "pipeline.failed", []string{"push", "pipeline.failed", "merge_request.*"}, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := eventMatches(tc.kind, tc.eventKey, tc.entries); got != tc.want {
+				t.Errorf("eventMatches(%q,%q,%v) = %v, want %v", tc.kind, tc.eventKey, tc.entries, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestPassesFilter(t *testing.T) {
+	cases := []struct {
+		name     string
+		kind     string
+		eventKey string
+		only     []string
+		exclude  []string
+		want     bool
+	}{
+		{"only_empty_passes_all", "push", "push", nil, nil, true},
+		{"only_set_not_listed", "push", "push", []string{"merge_request.*"}, nil, false},
+		{"only_set_listed", "merge_request", "merge_request.open", []string{"merge_request.*"}, nil, true},
+		{"exclude_subtracts", "merge_request", "merge_request.update", nil, []string{"merge_request.update"}, false},
+		{"wildcard_only", "merge_request", "merge_request.merge", []string{"merge_request.*"}, nil, true},
+		{"bare_kind_matches_open", "merge_request", "merge_request.open", []string{"merge_request"}, nil, true},
+		{"bare_kind_matches_merge", "merge_request", "merge_request.merge", []string{"merge_request"}, nil, true},
+		{"exclude_wins_over_only", "merge_request", "merge_request.update", []string{"merge_request.*"}, []string{"merge_request.update"}, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := passesFilter(tc.kind, tc.eventKey, tc.only, tc.exclude); got != tc.want {
+				t.Errorf("passesFilter(%q,%q,%v,%v) = %v, want %v",
+					tc.kind, tc.eventKey, tc.only, tc.exclude, got, tc.want)
+			}
+		})
+	}
+}
+
+func TestGitlab_FilterIgnoresEvent(t *testing.T) {
+	t.Run("excluded_event_ignored", func(t *testing.T) {
+		srv, cap := newGitlabTestServer(t, &GitlabConfig{
+			DefaultChatID: "chat1", SecretToken: "secret",
+			Exclude: []string{"merge_request.update"},
+		})
+		w := doRequest(srv, "POST", "/api/v1/gitlab", strings.NewReader(mrUpdatePayload), gitlabHeaders("secret"))
+		if w.Code != 200 {
+			t.Fatalf("status = %d, body: %s", w.Code, w.Body.String())
+		}
+		if cap.count() != 0 {
+			t.Errorf("send count = %d, want 0 (event ignored)", cap.count())
+		}
+		var resp gitlabIgnoredResponse
+		if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+			t.Fatalf("decode response: %v (body: %s)", err, w.Body.String())
+		}
+		if !resp.OK || !resp.Ignored || resp.Event != "merge_request.update" {
+			t.Errorf("response = %+v, want ok/ignored merge_request.update", resp)
+		}
+	})
+	t.Run("only_not_listed_ignored", func(t *testing.T) {
+		srv, cap := newGitlabTestServer(t, &GitlabConfig{
+			DefaultChatID: "chat1", SecretToken: "secret",
+			Only: []string{"pipeline.*"},
+		})
+		w := doRequest(srv, "POST", "/api/v1/gitlab", strings.NewReader(mrOpenPayload), gitlabHeaders("secret"))
+		if w.Code != 200 {
+			t.Fatalf("status = %d, body: %s", w.Code, w.Body.String())
+		}
+		if cap.count() != 0 {
+			t.Errorf("send count = %d, want 0 (not in only)", cap.count())
+		}
+	})
+	t.Run("only_listed_passes", func(t *testing.T) {
+		srv, cap := newGitlabTestServer(t, &GitlabConfig{
+			DefaultChatID: "chat1", SecretToken: "secret",
+			Only: []string{"merge_request.*"},
+		})
+		w := doRequest(srv, "POST", "/api/v1/gitlab", strings.NewReader(mrOpenPayload), gitlabHeaders("secret"))
+		if w.Code != 200 {
+			t.Fatalf("status = %d, body: %s", w.Code, w.Body.String())
+		}
+		if cap.count() != 1 {
+			t.Errorf("send count = %d, want 1 (matches only)", cap.count())
+		}
+	})
+}
+
 func TestGitlab_NotRegisteredWithoutConfig(t *testing.T) {
 	srv := newTestServer([]ResolvedKey{{Name: "t", Key: "k"}})
 	w := doRequest(srv, "POST", "/api/v1/gitlab", strings.NewReader(mrOpenPayload), map[string]string{"X-Gitlab-Token": "secret"})

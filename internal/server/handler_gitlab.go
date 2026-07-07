@@ -24,6 +24,11 @@ type GitlabConfig struct {
 	// FallbackChatID is resolved at startup from the config's chats section
 	// when there is exactly one chat alias configured. Empty otherwise.
 	FallbackChatID string
+	// Only and Exclude filter incoming events by event key. Each entry matches
+	// a full event key ("kind.subtype"), a bare kind (all subtypes), or a
+	// "kind.*" wildcard. An empty Only allows every event; Exclude always wins.
+	Only    []string
+	Exclude []string
 }
 
 // gitlabView is the view-model passed to the message template. It is derived
@@ -165,6 +170,32 @@ func normalizeGitlab(raw map[string]any) gitlabView {
 	return v
 }
 
+// eventMatches reports whether the event identified by kind/eventKey matches any
+// entry in entries. An entry matches when it equals the full event key
+// ("kind.subtype"), the bare kind (i.e. every subtype of that kind), or the
+// "kind.*" wildcard form.
+func eventMatches(kind, eventKey string, entries []string) bool {
+	for _, e := range entries {
+		if e == eventKey || e == kind || e == kind+".*" {
+			return true
+		}
+	}
+	return false
+}
+
+// passesFilter applies the only/exclude filter to an event. An empty only list
+// admits every event; a non-empty only list requires a match. Exclude always
+// wins: a matching exclude entry drops the event regardless of only.
+func passesFilter(kind, eventKey string, only, exclude []string) bool {
+	if len(only) > 0 && !eventMatches(kind, eventKey, only) {
+		return false
+	}
+	if eventMatches(kind, eventKey, exclude) {
+		return false
+	}
+	return true
+}
+
 func (s *Server) handleGitlab(w http.ResponseWriter, r *http.Request) {
 	if s.gitCfg == nil {
 		writeError(w, http.StatusInternalServerError, "gitlab not configured")
@@ -190,6 +221,14 @@ func (s *Server) handleGitlab(w http.ResponseWriter, r *http.Request) {
 
 	view := normalizeGitlab(raw)
 	vlog.V1("gitlab: received %s (eventKey: %s)", view.Kind, view.EventKey)
+
+	// Apply the only/exclude filter before doing any work.
+	if !passesFilter(view.Kind, view.EventKey, s.gitCfg.Only, s.gitCfg.Exclude) {
+		vlog.V2("gitlab: %s filtered out -> ignored", view.EventKey)
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(gitlabIgnoredResponse{OK: true, Ignored: true, Event: view.EventKey})
+		return
+	}
 
 	// Render template
 	var buf bytes.Buffer
@@ -246,6 +285,14 @@ func (s *Server) handleGitlab(w http.ResponseWriter, r *http.Request) {
 	vlog.V1("gitlab: sent %s to %s -> 200 (%dms)", view.EventKey, targetChat, elapsed.Milliseconds())
 	w.Header().Set("Content-Type", "application/json")
 	json.NewEncoder(w).Encode(sendResponse{OK: true, SyncID: syncID})
+}
+
+// gitlabIgnoredResponse is returned with 200 OK when an event is filtered out
+// by the only/exclude rules and no message is sent.
+type gitlabIgnoredResponse struct {
+	OK      bool   `json:"ok"`
+	Ignored bool   `json:"ignored"`
+	Event   string `json:"event"`
 }
 
 // DefaultGitlabTemplate is a generic fallback that renders any GitLab event.
