@@ -545,16 +545,32 @@ paths:
   /gitlab:
     post:
       operationId: gitlab
-      summary: GitLab merge request webhook
+      summary: GitLab group/project webhook (universal)
       description: |
-        Receives group/project webhook notifications from GitLab and sends
-        merge request events to eXpress. Covered events:
-        - merge request opened (`object_kind: merge_request`, `action: open`)
-        - merge request merged (`object_kind: merge_request`, `action: merge`)
-        - comment on a merge request (`object_kind: note`, `noteable_type: MergeRequest`)
+        Receives **any** GitLab group/project webhook notification and forwards
+        it to eXpress. There is no fixed list of supported events: the event key
+        is derived generically from the payload as `kind` or `kind.subtype`,
+        where `kind` is `object_kind` and the subtype depends on the kind:
 
-        All other events (update/close, notes on commits, system notes) are
-        answered with `200 OK` and `"ignored": true` without sending a message.
+        - `merge_request`, `issue` → `object_attributes.action`
+        - `note` → `object_attributes.noteable_type`
+        - `pipeline` → `object_attributes.status`
+        - `build` (job) → `build_status` (a flat top-level field)
+        - `push`, `tag_push` → no subtype (bare kind)
+        - otherwise → `object_attributes.action`, then `object_attributes.status`
+
+        Delivery is controlled by application config:
+        - **Filter** (`server.gitlab.events.only` / `.exclude`): each entry matches
+          a full event key (`kind.subtype`), a bare `kind` (all subtypes), or a
+          `kind.*` wildcard. `only` empty admits everything; `exclude` always wins.
+          A filtered-out event returns `200 OK` with `{"ok":true,"ignored":true,"event":"<key>"}`
+          and no message is sent.
+        - **Templates** (`server.gitlab.templates` / `.template_files`): the message
+          is rendered by selecting the template for the exact event key, then the
+          bare kind, then a generic `default` — so every event always renders.
+        - **error_events** (`server.gitlab.error_events`): event keys matching this
+          list are delivered with BotX `notification.status=error`; everything else
+          is `ok`. Matched with the same rules as the filter.
 
         Authentication uses the `X-Gitlab-Token` header (GitLab cannot send
         `Authorization`/`X-API-Key`). This endpoint is registered only when
@@ -601,13 +617,19 @@ paths:
                 detailed_merge_status: mergeable
       responses:
         "200":
-          description: Event processed and sent (or ignored)
+          description: |
+            Event processed. When the event passes the filter and is sent, the
+            body is a `SuccessResponse` (`ok` + `sync_id`). When the event is
+            filtered out by `only`/`exclude`, the body is a `GitlabIgnoredResponse`
+            (`ok:true`, `ignored:true`, `event:<key>`) and no message is sent.
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/SuccessResponse"
+                oneOf:
+                  - $ref: "#/components/schemas/SuccessResponse"
+                  - $ref: "#/components/schemas/GitlabIgnoredResponse"
         "400":
-          description: Invalid request
+          description: Invalid request (malformed JSON or template error)
           content:
             application/json:
               schema:
@@ -884,11 +906,23 @@ components:
     GitlabWebhook:
       type: object
       required: [object_kind]
+      description: |
+        A GitLab group/project webhook payload. Accepts **any** `object_kind`;
+        the endpoint decodes the payload generically and derives an event key
+        (`kind` / `kind.subtype`). The properties below are the common fields
+        surfaced to templates as `.Kind`/`.Action`/`.Project`/`.User`/`.Title`/`.URL`;
+        the full payload is available to templates via `.Raw` and the `get` helper.
+        `additionalProperties` is true — event-specific fields (`build_status`,
+        `ref`, `commits`, `builds`, …) are passed through untouched.
+      additionalProperties: true
       properties:
         object_kind:
           type: string
-          enum: [merge_request, note]
-          description: Event kind. Only merge_request and note are handled.
+          example: merge_request
+          description: |
+            Event kind, e.g. `merge_request`, `note`, `push`, `tag_push`,
+            `pipeline`, `build`, `issue`, `release`, `wiki_page`, `deployment`.
+            Any value is accepted.
         user:
           type: object
           description: Actor that triggered the event
@@ -907,10 +941,14 @@ components:
               format: uri
         object_attributes:
           type: object
+          additionalProperties: true
           properties:
             action:
               type: string
-              description: "merge_request action: open, merge, update, close, ..."
+              description: "merge_request/issue action: open, merge, update, close, ..."
+            status:
+              type: string
+              description: "pipeline status: pending, running, success, failed, ..."
             title:
               type: string
             url:
@@ -954,6 +992,21 @@ components:
         sync_id:
           type: string
           example: "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+
+    GitlabIgnoredResponse:
+      type: object
+      description: Returned by /gitlab when an event is filtered out by only/exclude.
+      properties:
+        ok:
+          type: boolean
+          example: true
+        ignored:
+          type: boolean
+          example: true
+        event:
+          type: string
+          description: The derived event key that was filtered out.
+          example: "merge_request.update"
 
     BotEntry:
       type: object

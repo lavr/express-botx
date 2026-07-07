@@ -1,14 +1,21 @@
-# GitLab merge request notifications
+# GitLab notifications (universal endpoint)
 
 Example configuration and payloads for the `/api/v1/gitlab` webhook endpoint,
-which forwards GitLab merge request events to an eXpress chat.
+which forwards **any** GitLab group/project event to an eXpress chat. The payload
+is decoded generically and reduced to an event key (`kind` or `kind.subtype`),
+then filtered and rendered by a per-event template registry.
 
 ## Files
 
-- `config.yaml` — express-botx config enabling the `server.gitlab` endpoint.
-- `webhook-merge-request-open.json` — MR opened event.
-- `webhook-merge-request-merge.json` — MR merged event.
-- `webhook-note.json` — comment on an MR.
+- `config.yaml` — express-botx config enabling `server.gitlab` with an
+  `only`/`exclude` filter, per-event `templates`, and `error_events`.
+- `webhook-merge-request-open.json` — MR opened (`merge_request.open`).
+- `webhook-merge-request-merge.json` — MR merged (`merge_request.merge`).
+- `webhook-note.json` — comment on an MR (`note.MergeRequest`).
+- `webhook-pipeline-failed.json` — failed pipeline (`pipeline.failed`, delivered
+  with `status=error`).
+- `webhook-push.json` — branch push (`push`).
+- `webhook-issue-open.json` — issue opened (`issue.open`).
 
 ## Try it locally
 
@@ -18,11 +25,19 @@ export BOT_HOST=express.company.ru BOT_ID=... BOT_SECRET=... \
 
 express-botx serve --config config.yaml &
 
-curl -X POST "http://localhost:8080/api/v1/gitlab" \
-  -H "X-Gitlab-Token: my-secret-token" \
-  -H "Content-Type: application/json" \
-  --data @webhook-merge-request-open.json
+for f in webhook-merge-request-open webhook-note webhook-pipeline-failed \
+         webhook-push webhook-issue-open; do
+  curl -X POST "http://localhost:8080/api/v1/gitlab" \
+    -H "X-Gitlab-Token: my-secret-token" \
+    -H "Content-Type: application/json" \
+    --data @"$f.json"
+  echo
+done
 ```
+
+`merge_request.update` is in `exclude`, so a payload with `"action":"update"`
+is answered with `200 OK` and `{"ok":true,"ignored":true,"event":"merge_request.update"}`
+without sending a message.
 
 ## GitLab webhook setup
 
@@ -30,9 +45,21 @@ In a group or project: **Settings → Webhooks → Add new webhook**
 
 - **URL:** `http://express-botx:8080/api/v1/gitlab` (optionally `?chat_id=<alias>`)
 - **Secret token:** same value as `server.gitlab.secret`
-- **Triggers:** Merge request events, Comments
+- **Triggers:** enable whichever events you want — or all of them, since filtering
+  now happens in express-botx via `events.only` / `events.exclude`.
 
-Events other than MR open/merge and MR comments (update/close, notes on commits,
-system notes) are answered with `200 OK` and `"ignored": true` — no message sent.
+## Event keys and subtypes
 
-See [docs/integrations.md](../../docs/integrations.md#gitlab-merge-requests) for details.
+The event key is `kind` or `kind.subtype`:
+
+| `object_kind` | subtype from | example key |
+|---|---|---|
+| `merge_request`, `issue` | `object_attributes.action` | `merge_request.open` |
+| `note` | `object_attributes.noteable_type` | `note.MergeRequest` |
+| `pipeline` | `object_attributes.status` | `pipeline.failed` |
+| `build` (job) | `build_status` | `build.failed` |
+| `push`, `tag_push` | — | `push` |
+
+See [docs/integrations.md](../../docs/integrations.md#gitlab-универсальный-приёмник-событий)
+for the filter rules, template registry, template variables/helpers, and
+`error_events`.

@@ -1,0 +1,18 @@
+{
+  "object_kind": "pipeline",
+  "user": {
+    "name": "Jane Developer",
+    "username": "jane"
+  },
+  "project": {
+    "name": "backend",
+    "web_url": "https://gitlab.company.ru/team/backend"
+  },
+  "object_attributes": {
+    "status": "failed",
+    "ref": "main",
+    "sha": "0f1e2d3c4b5a69788796a5b4c3d2e1f0",
+    "url": "https://gitlab.company.ru/team/backend/-/pipelines/777",
+    "detailed_status": "failed"
+  }
+}

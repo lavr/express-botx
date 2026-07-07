@@ -15,7 +15,7 @@ CLI и HTTP-сервер для отправки сообщений в корп�
 - **Отправка сообщений** из CLI, скриптов, пайплайнов CI/CD
 - **API-запросы** — произвольные вызовы eXpress BotX API из командной строки с автоаутентификацией
 - **HTTP-сервер** с API для отправки и приёма вебхуков
-- **Alertmanager, Grafana и GitLab** — готовые эндпоинты для мониторинга и MR-уведомлений
+- **Alertmanager, Grafana и GitLab** — готовые эндпоинты для мониторинга; универсальный приёмник любых событий GitLab с фильтрами и шаблонами ([examples/gitlab/](examples/gitlab/))
 - **Асинхронная очередь** — RabbitMQ или Kafka для надёжной доставки
 - **Секреты** — поддержка переменных окружения и HashiCorp Vault
 - **Kubernetes-ready** — Docker, Helm chart, бинарник
@@ -93,7 +93,7 @@ curl -X POST http://localhost:8080/api/v1/send \
 | `POST` | `/api/v1/send` | Отправка сообщения |
 | `POST` | `/api/v1/alertmanager` | Вебхук Alertmanager |
 | `POST` | `/api/v1/grafana` | Вебхук Grafana |
-| `POST` | `/api/v1/gitlab` | Вебхук GitLab MR (auth: `X-Gitlab-Token`) |
+| `POST` | `/api/v1/gitlab` | Универсальный вебхук GitLab — любые события, фильтры + шаблоны (auth: `X-Gitlab-Token`) |
 
 Сервер автоматически добавляет заголовок `X-Request-ID` к каждому ответу (если клиент не передал свой, генерируется уникальный). Все HTTP-запросы логируются в stderr (метод, путь, статус, время выполнения).
 
@@ -167,7 +167,7 @@ chats:
 
 ## Интеграции
 
-В режиме веб-сервера есть методы для интеграции с alertmanager, grafana и gitlab (уведомления по merge request'ам).
+В режиме веб-сервера есть методы для интеграции с alertmanager, grafana и gitlab (универсальный приёмник любых событий GitLab с фильтрами `only`/`exclude`, шаблонами по типам и `error_events`).
 
 Пример конфига alertmanager:
 

@@ -67,17 +67,31 @@ server:
   gitlab:                                   # опционально — endpoint включён ТОЛЬКО с этой секцией
     secret: env:GITLAB_WEBHOOK_TOKEN      # сверяется с заголовком X-Gitlab-Token (literal/env:/vault:)
     default_chat_id: dev                  # UUID или алиас (опционально)
-    # template_file: gitlab.tmpl          # опциональный шаблон (template / template_file)
+    events:                               # фильтр событий (опционально)
+      only:    ["merge_request.*", "pipeline.failed", "push"]
+      exclude: ["merge_request.update"]
+    templates:                            # переопределение шаблонов по event-ключу (опционально)
+      "merge_request.open": "🆕 {{.Title}} — {{.User}}\n{{.URL}}"
+    # template_files:                     # шаблоны из файлов (ключ → путь); ключ не может быть и там, и там
+    #   "default": ./tmpl/gitlab-default.tmpl
+    error_events: ["pipeline.failed", "build.failed"]  # доставка со status=error (опционально)
 ```
 
-Секция `server.gitlab` (обязательна для включения эндпоинта `/api/v1/gitlab`):
+Секция `server.gitlab` (обязательна для включения эндпоинта `/api/v1/gitlab`).
+Эндпоинт универсальный: принимает любые group/project-вебхуки GitLab, сводит
+событие к event-ключу (`kind` или `kind.subtype`) и рендерит шаблоном. Подробнее
+про деривацию субтипов, фильтры и шаблоны — в
+[docs/integrations.md](integrations.md#gitlab-универсальный-приёмник-событий).
 
 | Поле | Описание |
 |---|---|
 | `secret` / `secret_token` | Ожидаемое значение заголовка `X-Gitlab-Token`. Ссылка `literal` / `env:VAR` / `vault:path#key`. Обязательно. |
 | `default_chat_id` | UUID или алиас чата по умолчанию (должен существовать в `chats`). |
-| `template` | Inline Go-шаблон сообщения (опционально). |
-| `template_file` | Путь к файлу шаблона (имеет приоритет над `template`). |
+| `events.only` | Allowlist event-ключей. Запись матчит полный `kind.subtype`, голый `kind` или `kind.*`. Пустой → пропускать всё. |
+| `events.exclude` | Denylist event-ключей (та же грануляция). Всегда выигрывает над `only`. |
+| `templates` | Мапа `event-ключ → inline Go-шаблон`. Переопределяет встроенные дефолты. |
+| `template_files` | Мапа `event-ключ → путь к файлу шаблона`. Один ключ нельзя задать и в `templates`, и в `template_files`. |
+| `error_events` | Список event-ключей, доставляемых с `notification.status=error` (та же грануляция матчинга). |
 
 ## Переменные окружения
 
