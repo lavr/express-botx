@@ -8,7 +8,11 @@ then filtered and rendered by a per-event template registry.
 ## Files
 
 - `config.yaml` — express-botx config enabling `server.gitlab` with an
-  `only`/`exclude` filter, per-event `templates`, and `error_events`.
+  `only`/`exclude` filter, per-event `templates`, and `error_events` (single
+  chat via `default_chat_id`).
+- `config-routing.yaml` — same endpoint with `server.gitlab.routes`: one event
+  fans out to multiple chats by project/event/branch (all-match + `stop`, with a
+  `default_chat_id` fallback).
 - `webhook-merge-request-open.json` — MR opened (`merge_request.open`).
 - `webhook-merge-request-merge.json` — MR merged (`merge_request.merge`).
 - `webhook-note.json` — comment on an MR (`note.MergeRequest`).
@@ -63,3 +67,14 @@ The event key is `kind` or `kind.subtype`:
 See [docs/integrations.md](../../docs/integrations.md#gitlab-универсальный-приёмник-событий)
 for the filter rules, template registry, template variables/helpers, and
 `error_events`.
+
+## Routing one event to several chats
+
+`config-routing.yaml` adds `server.gitlab.routes` — an ordered rule list that
+fans a single event out to one or more chats by project, event key, and branch
+(glob or `/regex/` patterns). All matching rules contribute their chats (unioned
+and de-duplicated); a rule with `stop: true` ends the scan; unmatched events fall
+back to `default_chat_id`. Delivery is best-effort: `200` with `{results,errors}`
+once at least one chat is delivered, `502` if they all fail. See the
+[routing section](../../docs/integrations.md#роутинг-событий-по-чатам-routes)
+for the full model and chat-selection priority.

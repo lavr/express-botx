@@ -75,6 +75,13 @@ server:
     # template_files:                     # шаблоны из файлов (ключ → путь); ключ не может быть и там, и там
     #   "default": ./tmpl/gitlab-default.tmpl
     error_events: ["pipeline.failed", "build.failed"]  # доставка со status=error (опционально)
+    routes:                               # роутинг события по нескольким чатам (опционально)
+      - match:                            # селектор → паттерны (glob или /regex/); event — по event-ключу
+          project: ["group/backend/*"]
+          event:   ["merge_request"]
+          branch:  ["main", "release/*"]
+        chats: [backend-mrs, releases]    # совпало → в оба чата (объединение+дедуп)
+        stop: true                        # совпав, оборвать перебор правил
 ```
 
 Секция `server.gitlab` (обязательна для включения эндпоинта `/api/v1/gitlab`).
@@ -92,6 +99,7 @@ server:
 | `templates` | Мапа `event-ключ → inline Go-шаблон`. Переопределяет встроенные дефолты. |
 | `template_files` | Мапа `event-ключ → путь к файлу шаблона`. Один ключ нельзя задать и в `templates`, и в `template_files`. |
 | `error_events` | Список event-ключей, доставляемых с `notification.status=error` (та же грануляция матчинга). |
+| `routes` | Опциональный упорядоченный список правил роутинга. Событие уходит в чаты **всех** совпавших правил (объединение+дедуп), `stop:true` обрывает перебор. Каждое правило: `match` (селектор → паттерны glob/`/regex/`; `event` — по event-ключу), `chats` (непустой список алиасов/UUID), `stop`. Без секции — прежнее поведение (один чат). Подробнее и приоритет чатов — в [docs/integrations.md](integrations.md#роутинг-событий-по-чатам-routes). |
 
 ## Переменные окружения
 
@@ -211,7 +219,8 @@ express-botx config chat list                             # покажет (defa
 
 Приоритет выбора чата в HTTP-сервере:
 - `/send`: `chat_id` из запроса → чат по умолчанию → ошибка
-- `/alertmanager`, `/grafana`, `/gitlab`: `?chat_id=` → `default_chat_id` из конфига вебхука → чат по умолчанию → единственный чат → ошибка
+- `/alertmanager`, `/grafana`: `?chat_id=` → `default_chat_id` из конфига вебхука → чат по умолчанию → единственный чат → ошибка
+- `/gitlab`: `?chat_id=` → `routes` (все совпавшие правила, объединение+дедуп) → `default_chat_id` → чат по умолчанию → единственный чат → `200 {ignored}`
 
 ## Формат host
 

@@ -1,0 +1,84 @@
+# Example config for the GitLab endpoint WITH per-chat routing (server.gitlab.routes).
+#
+# Unlike config.yaml (single chat via default_chat_id), this fans one incoming
+# event out to one or more chats based on the project, event key, and branch.
+# Routing is all-match + stop: EVERY matching rule contributes its chats (unioned
+# and de-duplicated, order preserved), and a matching rule with `stop: true` ends
+# the scan. When no rule matches, delivery falls back to default_chat_id.
+#
+# Chat resolution priority for /gitlab:
+#   ?chat_id= -> routes -> default_chat_id -> global default chat -> single chat.
+#
+# Fan-out is best-effort: HTTP 200 with {results,errors} when >=1 chat delivered,
+# HTTP 502 when they all failed.
+
+bots:
+  mybot:
+    host: "env:BOT_HOST"
+    id: "env:BOT_ID"
+    secret: "env:BOT_SECRET"
+
+chats:
+  dev:          # fallback for events that match no route
+    id: "env:DEV_CHAT_ID"
+    bot: mybot
+    default: true
+  backend-mrs:
+    id: "env:BACKEND_MRS_CHAT_ID"
+    bot: mybot
+  releases:
+    id: "env:RELEASES_CHAT_ID"
+    bot: mybot
+  oncall:
+    id: "env:ONCALL_CHAT_ID"
+    bot: mybot
+  hotfixes:
+    id: "env:HOTFIXES_CHAT_ID"
+    bot: mybot
+
+server:
+  listen: ":8080"
+  base_path: /api/v1
+  gitlab:
+    secret: "env:GITLAB_WEBHOOK_TOKEN"
+    default_chat_id: dev
+
+    # Deliver everything relevant; routing (not the filter) decides the chat set.
+    events:
+      only:
+        - "merge_request.*"
+        - "pipeline.failed"
+        - "build.failed"
+        - "push"
+
+    error_events:
+      - "pipeline.failed"
+      - "build.failed"
+
+    # Ordered routing rules. Selectors: reserved names
+    #   (kind/event/action/project/branch/user/title/url) or a dotted raw path.
+    # Patterns are globs (`*`) by default, or /regex/ (Go RE2). The `event`
+    # selector matches by event key (kind / kind.subtype / kind.*), not patterns.
+    # Within a selector patterns are OR; across selectors they are AND; an omitted
+    # selector places no constraint; an empty `match` is a catch-all.
+    routes:
+      # MRs into main/release of any backend project -> two chats; stop here.
+      - match:
+          project: ["group/backend/*"]
+          event:   ["merge_request"]
+          branch:  ["main", "release/*"]
+        chats: [backend-mrs, releases]
+        stop: true
+
+      # Failed pipelines and jobs on protected branches -> on-call (regex branch).
+      - match:
+          event:  ["pipeline.failed", "build.failed"]
+          branch: ["/^(main|release\\/.*)$/"]
+        chats: [oncall]
+
+      # MRs opened from a hotfix/* source branch (dotted raw-payload path) ->
+      # the hotfixes chat.
+      - match:
+          event: ["merge_request.open"]
+          object_attributes.source_branch: ["hotfix/*"]
+        chats: [hotfixes]

@@ -572,16 +572,30 @@ paths:
         - **error_events** (`server.gitlab.error_events`): event keys matching this
           list are delivered with BotX `notification.status=error`; everything else
           is `ok`. Matched with the same rules as the filter.
+        - **routes** (`server.gitlab.routes`): an optional ordered list of routing
+          rules. When configured (and no explicit `?chat_id=` overrides them), an
+          incoming event fans out to the chats of **every** matching rule (their
+          chats are unioned and de-duplicated, preserving order); a matching rule
+          with `stop:true` ends the scan. Each rule matches on selectors —
+          reserved names (`kind`/`event`/`action`/`project`/`branch`/`user`/`title`/`url`)
+          or a dotted raw-payload path — against glob (`group/backend/*`) or
+          `/regex/` patterns (the `event` selector uses event-key matching instead).
+          When no rule matches, delivery falls back to the single default chat, and
+          if none is configured the event is ignored (`200`). Fan-out is
+          best-effort: the response is `200` with a `GitlabFanoutResponse` when at
+          least one delivery succeeds (partial failures are listed in `errors`), or
+          `502` when they all fail.
 
         Authentication uses the `X-Gitlab-Token` header (GitLab cannot send
         `Authorization`/`X-API-Key`). This endpoint is registered only when
         `server.gitlab` is configured.
 
         Chat resolution priority:
-        1. `?chat_id=` query parameter
-        2. `default_chat_id` from webhook config
-        3. Global default chat (`default: true` in chats section)
-        4. Single chat alias from config
+        1. `?chat_id=` query parameter (overrides routing entirely)
+        2. `server.gitlab.routes` (all matching rules, unioned + de-duplicated)
+        3. `default_chat_id` from webhook config
+        4. Global default chat (`default: true` in chats section)
+        5. Single chat alias from config
       security:
         - gitlabToken: []
       parameters:
@@ -619,15 +633,21 @@ paths:
       responses:
         "200":
           description: |
-            Event processed. When the event passes the filter and is sent, the
-            body is a `SuccessResponse` (`ok` + `sync_id`). When the event is
-            filtered out by `only`/`exclude`, the body is a `GitlabIgnoredResponse`
-            (`ok:true`, `ignored:true`, `event:<key>`) and no message is sent.
+            Event processed. The body depends on how the event was delivered:
+            - Single-chat delivery (`?chat_id=`, or no `routes` configured):
+              a `SuccessResponse` (`ok` + `sync_id`).
+            - Fan-out via `routes`: a `GitlabFanoutResponse` with a `results`
+              entry per successful chat and an `errors` entry per failed chat
+              (`ok:true` when at least one delivery succeeded).
+            - Filtered out by `only`/`exclude`, or matched no route with no
+              default chat: a `GitlabIgnoredResponse` (`ok:true`, `ignored:true`,
+              `event:<key>`) and no message is sent.
           content:
             application/json:
               schema:
                 oneOf:
                   - $ref: "#/components/schemas/SuccessResponse"
+                  - $ref: "#/components/schemas/GitlabFanoutResponse"
                   - $ref: "#/components/schemas/GitlabIgnoredResponse"
         "400":
           description: Invalid request (malformed JSON or template error)
@@ -642,11 +662,17 @@ paths:
               schema:
                 $ref: "#/components/schemas/ErrorResponse"
         "502":
-          description: Upstream error
+          description: |
+            Upstream error. For single-chat delivery the body is an
+            `ErrorResponse`. For a `routes` fan-out where every target chat
+            failed, the body is a `GitlabFanoutResponse` (`ok:false`) whose
+            `errors` list the per-chat failures.
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/ErrorResponse"
+                oneOf:
+                  - $ref: "#/components/schemas/ErrorResponse"
+                  - $ref: "#/components/schemas/GitlabFanoutResponse"
 
 components:
   securitySchemes:
@@ -1008,6 +1034,44 @@ components:
           type: string
           description: The derived event key that was filtered out.
           example: "merge_request.update"
+
+    GitlabFanoutResponse:
+      type: object
+      description: |
+        Returned by /gitlab when `server.gitlab.routes` fans an event out to one
+        or more chats. `ok` is true when at least one delivery succeeded (HTTP
+        200) and false when they all failed (HTTP 502). `results` lists each
+        successful delivery and `errors` each failed one; on a partial failure
+        both are present.
+      properties:
+        ok:
+          type: boolean
+          example: true
+        results:
+          type: array
+          description: Successful deliveries, one per chat.
+          items:
+            type: object
+            properties:
+              chat:
+                type: string
+                description: Target chat alias or UUID as configured in the rule.
+                example: backend-mrs
+              sync_id:
+                type: string
+                example: "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+        errors:
+          type: array
+          description: Failed deliveries, one per chat (chat/bot resolution or upstream send).
+          items:
+            type: object
+            properties:
+              chat:
+                type: string
+                example: frontend-mrs
+              error:
+                type: string
+                example: "upstream error: 502 Bad Gateway"
 
     BotEntry:
       type: object

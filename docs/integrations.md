@@ -293,6 +293,93 @@ server:
 - `http://express-botx:8080/api/v1/gitlab?chat_id=backend-mrs`
 - `http://express-botx:8080/api/v1/gitlab?chat_id=frontend-mrs`
 
+### Роутинг событий по чатам (`routes`)
+
+Когда одного `?chat_id`/`default_chat_id` мало (одно событие должно уходить в
+несколько чатов, а выбор чата зависит от проекта, типа события или ветки),
+используйте `server.gitlab.routes` — опциональный **упорядоченный** список
+правил. Секция обратно совместима: без неё поведение = прежнее (один чат).
+
+**Модель матчинга (all-match + stop):**
+
+- Срабатывают **все** совпавшие правила (не первое), их чаты объединяются и
+  дедуплицируются с сохранением порядка.
+- Правило с `stop: true`, совпав, обрывает дальнейший перебор.
+- Правило состоит из условий `match` (селектор → список паттернов). Внутри одного
+  селектора паттерны по **OR** (any-of), между селекторами — **AND**. Опущенный
+  селектор ничего не ограничивает; пустой `match` — catch-all (совпадает всегда).
+- Массив по dotted-пути матчится, если совпал **любой** его скалярный элемент.
+  Элементы-объекты пропускаются: GitLab отдаёт `object_attributes.labels` как
+  массив объектов `{title, color, …}`, поэтому напрямую по названию лейбла
+  сматчить нельзя — матчатся только массивы скаляров.
+
+**Контекст матчинга (селекторы):**
+
+Зарезервированные селекторы — нормализованные поля события:
+
+| Селектор | Значение |
+|---|---|
+| `kind` | `object_kind` |
+| `event` | event-ключ (`kind` или `kind.subtype`) — матчится **event-матчером**, не паттернами |
+| `action` | `object_attributes.action` или производный субтип |
+| `project` | `project.name` (fallback `project.path_with_namespace`) |
+| `branch` | нормализованная ветка (см. ниже) |
+| `user` | `user.name` / `user.username` (fallback `user_name`) |
+| `title` | `object_attributes.title` |
+| `url` | `object_attributes.url` (fallback `project.web_url`) |
+
+Любой другой селектор — **dotted-путь** в сыром payload (`view.Raw`): скаляр →
+одно значение, массив → список строк, отсутствие поля → пусто (не матчится).
+
+Нормализация `branch`: MR/`note` → `object_attributes.target_branch` (fallback
+`merge_request.target_branch`); `push`/`tag_push` → ветка из `ref`
+(`refs/heads/release/2.0` → `release/2.0`); `pipeline` →
+`object_attributes.ref`; остальные типы → пусто.
+
+**Паттерны:**
+
+- По умолчанию — **glob** с `*` (любая последовательность символов, включая `/`):
+  `group/backend/*`, `sec:*`, точное совпадение без `*`.
+- Обёрнутый в слэши `/…/` — **регулярное выражение** (Go RE2, без ReDoS),
+  компилируется на старте; битый regex роняет `serve`. Regex не заякорен —
+  используйте `^…$` для полного совпадения.
+- Селектор `event` использует event-матчинг (полный ключ `kind.subtype`, голый
+  `kind`, `kind.*`), glob/regex к нему **не применяются**.
+
+**Приоритет выбора чатов:** `?chat_id=` → `routes` (all-match+stop, дедуп) →
+`default_chat_id` → чат по умолчанию → единственный чат → `200 {ignored}`.
+
+**Фан-аут и коды ответа (best-effort):** сообщение отправляется в каждый целевой
+чат независимо. Ответ `200` c телом
+`{"ok":true,"results":[{"chat","sync_id"}],"errors":[{"chat","error"}]}`, если
+доставлено **хотя бы в один** чат (частичные сбои — в `errors`); `502`, если
+упали все. Явный `?chat_id=` сохраняет прежний одиночный ответ (`SuccessResponse`).
+
+```yaml
+server:
+  gitlab:
+    secret: env:GITLAB_WEBHOOK_TOKEN
+    default_chat_id: dev          # fallback, если ни одно правило не совпало
+    routes:
+      # MR в main любого backend-проекта → в два чата; stop обрывает перебор.
+      - match:
+          project: ["group/backend/*"]
+          event:   ["merge_request"]
+          branch:  ["main", "release/*"]
+        chats: [backend-mrs, releases]
+        stop: true
+      # Упавшие пайплайны и джобы → в дежурный чат (regex по ветке).
+      - match:
+          event:  ["pipeline.failed", "build.failed"]
+          branch: ["/^(main|release\\/.*)$/"]
+        chats: [oncall]
+      # MR из веток hotfix/* (dotted-путь к скаляру в payload) → чат хотфиксов.
+      - match:
+          event: ["merge_request"]
+          object_attributes.source_branch: ["hotfix/*"]
+        chats: [hotfixes]
+```
+
 ### Проверка вручную
 
 ```bash
