@@ -180,6 +180,12 @@ func TestGitlabBranch(t *testing.T) {
 			want: "release/2.0",
 		},
 		{
+			name: "build preserves namespace of a bare slashed branch",
+			kind: "build",
+			raw:  map[string]any{"ref": "feature/login"},
+			want: "feature/login",
+		},
+		{
 			name: "issue has no branch",
 			kind: "issue",
 			raw:  map[string]any{"object_attributes": map[string]any{"title": "bug"}},

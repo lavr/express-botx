@@ -143,7 +143,10 @@ server:
           project: ["group/backend/*"]
           event:   ["pipeline.failed", "pipeline.success"]
           branch:  ["main", "/^release-/"]
-          "object_attributes.labels": ["urgent"]
+          # NB: match scalar fields only. object_attributes.labels is an array
+          # of objects ({id,title,…}) and is skipped by the flattener, so a
+          # selector on it never matches — use a scalar like source_branch.
+          "object_attributes.source_branch": ["hotfix/*"]
         chats: [ops, audit]
         stop: false
       - match:

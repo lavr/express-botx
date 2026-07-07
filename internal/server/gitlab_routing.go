@@ -133,8 +133,10 @@ func gitlabBranch(kind string, raw map[string]any) string {
 			return b
 		}
 		return gitlabStringAt(raw, "merge_request.target_branch")
-	case "push", "tag_push", "build":
+	case "push", "tag_push":
 		return refBranch(gitlabStringAt(raw, "ref"))
+	case "build":
+		return refBranchBare(gitlabStringAt(raw, "ref"))
 	case "pipeline":
 		return gitlabStringAt(raw, "object_attributes.ref")
 	default:
@@ -169,6 +171,21 @@ func refBranch(ref string) string {
 		}
 	}
 	return path.Base(ref)
+}
+
+// refBranchBare normalizes a job ("build") hook's top-level ref, which GitLab
+// sends as a bare branch name (no "refs/…/" prefix). It strips the conventional
+// prefixes if one happens to be present but otherwise returns the ref verbatim,
+// preserving interior slashes (so a "feature/login" branch keeps its namespace
+// and still matches a "feature/*" glob, rather than being reduced to "login" by
+// a basename fallback).
+func refBranchBare(ref string) string {
+	for _, prefix := range []string{"refs/heads/", "refs/tags/"} {
+		if s, ok := strings.CutPrefix(ref, prefix); ok {
+			return s
+		}
+	}
+	return ref
 }
 
 // resolveSelector maps a match selector to the candidate string values it should
