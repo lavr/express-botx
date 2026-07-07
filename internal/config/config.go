@@ -164,6 +164,24 @@ type GitlabYAMLConfig struct {
 	// ErrorEvents lists event keys that are delivered with notification
 	// status=error (instead of ok). Matched with the same rules as filters.
 	ErrorEvents []string `yaml:"error_events,omitempty"`
+	// Routes is an optional ordered list of routing rules. When present, an
+	// incoming event fans out to the chats of every matching rule (see
+	// GitlabRouteYAMLConfig). When absent, the endpoint keeps its single-chat
+	// behaviour (default_chat_id / global default).
+	Routes []GitlabRouteYAMLConfig `yaml:"routes,omitempty"`
+}
+
+// GitlabRouteYAMLConfig is a single GitLab routing rule. Match maps a selector
+// (a reserved name like "project"/"event"/"branch", or a dotted raw-payload
+// path) to a list of patterns; a rule matches when, for every selector, at least
+// one of its patterns matches (OR within a selector, AND across selectors; an
+// omitted selector places no constraint, an empty Match is a catch-all). A
+// matching rule delivers to every alias/UUID in Chats. Stop:true halts the rule
+// scan after this rule matches.
+type GitlabRouteYAMLConfig struct {
+	Match map[string][]string `yaml:"match,omitempty"`
+	Chats []string            `yaml:"chats"`
+	Stop  bool                `yaml:"stop,omitempty"`
 }
 
 // GitlabEventsConfig configures the allow/deny filter for GitLab events.
@@ -1035,10 +1053,18 @@ var knownKeys = map[string]map[string]bool{
 	"server.gitlab": {
 		"default_chat_id": true, "secret": true, "secret_token": true,
 		"events": true, "templates": true, "template_files": true, "error_events": true,
+		"routes": true,
 	},
 	"server.gitlab.events": {
 		"only": true, "exclude": true,
 	},
+	"server.gitlab.routes.*": {
+		"match": true, "chats": true, "stop": true,
+	},
+	// server.gitlab.routes.*.match has no registered schema on purpose: its keys
+	// are arbitrary match selectors (reserved names or dotted raw-payload paths),
+	// so unknown-key checking is skipped for them (a nil known-set means "accept
+	// any key").
 	"server.callbacks": {
 		"base_path": true, "verify_jwt": true, "rules": true,
 	},
@@ -1489,6 +1515,24 @@ func (c *Config) validateCrossReferences() []ValidationResult {
 		}
 	}
 
+	// Gitlab route chats must reference existing chat aliases (or be UUIDs).
+	if c.Server.Gitlab != nil {
+		for i, route := range c.Server.Gitlab.Routes {
+			for _, chatID := range route.Chats {
+				if IsUUID(chatID) {
+					continue
+				}
+				if _, ok := c.Chats[chatID]; !ok {
+					results = append(results, ValidationResult{
+						Level:   ValidationError,
+						Path:    fmt.Sprintf("server.gitlab.routes[%d].chats", i),
+						Message: fmt.Sprintf("references unknown chat alias %q", chatID),
+					})
+				}
+			}
+		}
+	}
+
 	// Gitlab event-key syntax and templates/template_files key overlap
 	if g := c.Server.Gitlab; g != nil {
 		results = append(results, validateGitlab(g)...)
@@ -1573,7 +1617,65 @@ func validateGitlab(g *GitlabYAMLConfig) []ValidationResult {
 		}
 	}
 
+	results = append(results, validateGitlabRoutes(g.Routes)...)
+
 	return results
+}
+
+// validateGitlabRoutes checks each routing rule's chats and match patterns. A
+// rule must deliver to at least one chat; "event"-selector patterns must be
+// valid event keys (kind / kind.subtype / kind.*); and "/regex/" patterns on any
+// other selector must compile. Chat-alias existence is a cross-reference check
+// (validateCrossReferences), since it needs the chats map.
+func validateGitlabRoutes(routes []GitlabRouteYAMLConfig) []ValidationResult {
+	var results []ValidationResult
+	for i, route := range routes {
+		if len(route.Chats) == 0 {
+			results = append(results, ValidationResult{
+				Level:   ValidationError,
+				Path:    fmt.Sprintf("server.gitlab.routes[%d].chats", i),
+				Message: "chats must not be empty",
+			})
+		}
+		for _, selector := range sortedMapKeys(route.Match) {
+			patterns := route.Match[selector]
+			path := fmt.Sprintf("server.gitlab.routes[%d].match.%s", i, selector)
+			for _, p := range patterns {
+				if selector == "event" {
+					if !validGitlabEventKey(p) {
+						results = append(results, ValidationResult{
+							Level:   ValidationError,
+							Path:    path,
+							Message: fmt.Sprintf("invalid event key %q: must be \"kind\", \"kind.subtype\", or \"kind.*\"", p),
+						})
+					}
+					continue
+				}
+				if err := gitlabRoutePatternError(p); err != nil {
+					results = append(results, ValidationResult{
+						Level:   ValidationError,
+						Path:    path,
+						Message: fmt.Sprintf("invalid regex pattern %q: %v", p, err),
+					})
+				}
+			}
+		}
+	}
+	return results
+}
+
+// gitlabRoutePatternError reports a compilation error for a route match pattern.
+// A pattern wrapped in slashes ("/.../") is a Go RE2 regular expression and must
+// compile; any other pattern is a glob and is always valid. This mirrors the
+// server-side compilePattern so config validation rejects broken regexes at
+// `config validate` and serve startup, before the engine ever compiles them.
+func gitlabRoutePatternError(pattern string) error {
+	if len(pattern) >= 2 && strings.HasPrefix(pattern, "/") && strings.HasSuffix(pattern, "/") {
+		if _, err := regexp.Compile(pattern[1 : len(pattern)-1]); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // ValidateForServe returns the first blocking GitLab config error, or nil. The

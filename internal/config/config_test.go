@@ -3013,3 +3013,158 @@ server:
 		}
 	}
 }
+
+// gitlabRoutesYAML wraps a routes YAML body in a minimal valid config with one
+// bot and an "alerts" chat alias.
+func gitlabRoutesYAML(routesBody string) []byte {
+	return []byte(`
+bots:
+  main:
+    host: h
+    id: 00000000-0000-0000-0000-000000000001
+    secret: s
+chats:
+  alerts:
+    id: 00000000-0000-0000-0000-000000000003
+  releases:
+    id: 00000000-0000-0000-0000-000000000004
+server:
+  gitlab:
+    secret: tok
+    default_chat_id: alerts
+    routes:` + routesBody + "\n")
+}
+
+func TestValidate_GitlabRoutes(t *testing.T) {
+	tests := []struct {
+		name       string
+		routesBody string
+		wantErr    bool
+		wantMsg    string // substring expected in an error message (when wantErr)
+	}{
+		{
+			name: "unknown chat alias",
+			routesBody: `
+      - match:
+          project: ["group/backend/*"]
+        chats: ["nope"]`,
+			wantErr: true,
+			wantMsg: "unknown chat alias",
+		},
+		{
+			name: "empty chats",
+			routesBody: `
+      - match:
+          project: ["group/backend/*"]
+        chats: []`,
+			wantErr: true,
+			wantMsg: "chats must not be empty",
+		},
+		{
+			name: "broken regex pattern",
+			routesBody: `
+      - match:
+          branch: ["/release-([/"]
+        chats: ["alerts"]`,
+			wantErr: true,
+			wantMsg: "invalid regex pattern",
+		},
+		{
+			name: "bad event key",
+			routesBody: `
+      - match:
+          event: ["merge_request", "bad..key"]
+        chats: ["alerts"]`,
+			wantErr: true,
+			wantMsg: "invalid event key",
+		},
+		{
+			name: "valid routes with glob, regex, event and raw selector",
+			routesBody: `
+      - match:
+          project: ["group/backend/*"]
+          branch: ["/^release-/"]
+          event: ["merge_request.open", "pipeline.*"]
+          object_attributes.labels: ["urgent"]
+        chats: ["alerts", "00000000-0000-0000-0000-000000000009"]
+        stop: true
+      - chats: ["releases"]`,
+			wantErr: false,
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			rawYAML := gitlabRoutesYAML(tc.routesBody)
+			var cfg Config
+			if err := yaml.Unmarshal(rawYAML, &cfg); err != nil {
+				t.Fatalf("unmarshal: %v", err)
+			}
+			results := cfg.Validate(rawYAML)
+
+			var gotErr bool
+			var gotMsg bool
+			for _, r := range results {
+				if r.Level == ValidationError && strings.HasPrefix(r.Path, "server.gitlab.routes") {
+					gotErr = true
+					if tc.wantMsg != "" && strings.Contains(r.Message, tc.wantMsg) {
+						gotMsg = true
+					}
+				}
+				// An arbitrary selector inside match (e.g. object_attributes.labels)
+				// must not surface an unknown-key warning.
+				if r.Level == ValidationWarning && strings.Contains(r.Message, "unknown key") &&
+					strings.HasPrefix(r.Path, "server.gitlab.routes") {
+					t.Errorf("unexpected unknown-key warning: %s: %s", r.Path, r.Message)
+				}
+			}
+			if gotErr != tc.wantErr {
+				t.Errorf("route error present = %v, want %v; results: %+v", gotErr, tc.wantErr, results)
+			}
+			if tc.wantErr && tc.wantMsg != "" && !gotMsg {
+				t.Errorf("expected error message containing %q; results: %+v", tc.wantMsg, results)
+			}
+		})
+	}
+}
+
+// TestValidate_GitlabRoutesKnownKeys checks that the rule keys match/chats/stop
+// are registered (no unknown-key warnings) while arbitrary match selectors are
+// accepted, and that a misspelled rule key IS flagged.
+func TestValidate_GitlabRoutesKnownKeys(t *testing.T) {
+	rawYAML := gitlabRoutesYAML(`
+      - match:
+          project: ["group/backend/*"]
+          object_attributes.action: ["open"]
+        chats: ["alerts"]
+        stop: true`)
+	var cfg Config
+	if err := yaml.Unmarshal(rawYAML, &cfg); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	for _, r := range cfg.Validate(rawYAML) {
+		if r.Level == ValidationWarning && strings.Contains(r.Message, "unknown key") &&
+			strings.HasPrefix(r.Path, "server.gitlab.routes") {
+			t.Errorf("unexpected unknown-key warning: %s: %s", r.Path, r.Message)
+		}
+	}
+
+	// A misspelled rule key must be reported as unknown.
+	rawBad := gitlabRoutesYAML(`
+      - chats: ["alerts"]
+        stopp: true`)
+	var cfgBad Config
+	if err := yaml.Unmarshal(rawBad, &cfgBad); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	found := false
+	for _, r := range cfgBad.Validate(rawBad) {
+		if r.Level == ValidationWarning && strings.Contains(r.Message, "unknown key") &&
+			strings.Contains(r.Path, "stopp") {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("expected unknown-key warning for misspelled rule key \"stopp\"")
+	}
+}
