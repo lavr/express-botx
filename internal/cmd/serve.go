@@ -495,6 +495,12 @@ func buildGitlabConfig(gl *config.GitlabYAMLConfig, configPath string) (*server.
 	if err != nil {
 		return nil, fmt.Errorf("resolving gitlab secret: %w", err)
 	}
+	if secretToken == "" {
+		// A reference (e.g. vault:path#key) can resolve to an empty value.
+		// Fail startup rather than register an endpoint that rejects every
+		// request with 401.
+		return nil, fmt.Errorf("gitlab: resolved secret token is empty")
+	}
 
 	// Determine template source: template_file > template > default
 	var tmplStr string

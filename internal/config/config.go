@@ -1209,6 +1209,17 @@ func (c *Config) validateRequiredFields() []ValidationResult {
 		}
 	}
 
+	// The GitLab endpoint authenticates via X-Gitlab-Token, so a configured
+	// server.gitlab section requires a secret token. Catch it here so `config
+	// validate` fails instead of deferring the error to `serve`.
+	if c.Server.Gitlab != nil && c.Server.Gitlab.Secret == "" && c.Server.Gitlab.SecretToken == "" {
+		results = append(results, ValidationResult{
+			Level:   ValidationError,
+			Path:    "server.gitlab.secret",
+			Message: "secret or secret_token is required",
+		})
+	}
+
 	return results
 }
 
