@@ -99,6 +99,7 @@ type ServerConfig struct {
 	AllowBotSecretAuth bool                    `yaml:"allow_bot_secret_auth,omitempty"`
 	Alertmanager       *AlertmanagerYAMLConfig `yaml:"alertmanager,omitempty"`
 	Grafana            *GrafanaYAMLConfig      `yaml:"grafana,omitempty"`
+	Gitlab             *GitlabYAMLConfig       `yaml:"gitlab,omitempty"`
 	Callbacks          *CallbacksConfig        `yaml:"callbacks,omitempty"`
 	Docs               *bool                   `yaml:"docs,omitempty"`         // enable /docs endpoint (default: true)
 	ExternalURL        string                  `yaml:"external_url,omitempty"` // public URL for OpenAPI docs (e.g. http://express-botx.invitro-dev.k8s)
@@ -140,6 +141,55 @@ type GrafanaYAMLConfig struct {
 	ErrorStates   []string `yaml:"error_states,omitempty"`
 	Template      string   `yaml:"template,omitempty"`
 	TemplateFile  string   `yaml:"template_file,omitempty"`
+}
+
+// GitlabYAMLConfig holds YAML settings for the GitLab webhook endpoint.
+// Unlike alertmanager/grafana, the GitLab endpoint is only enabled when this
+// section is present, because it requires a secret token (GitLab cannot send
+// Authorization/X-API-Key headers, so it authenticates via X-Gitlab-Token).
+type GitlabYAMLConfig struct {
+	DefaultChatID string `yaml:"default_chat_id,omitempty"`
+	// Secret is the expected value of the X-Gitlab-Token header. Accepts a
+	// literal, env:VAR, or vault:path#key reference. SecretToken is an alias.
+	Secret      string `yaml:"secret,omitempty"`
+	SecretToken string `yaml:"secret_token,omitempty"`
+	// Events filters which GitLab events are delivered. See GitlabEventsConfig.
+	Events GitlabEventsConfig `yaml:"events,omitempty"`
+	// Templates maps an event key (kind, kind.subtype, or kind.*) to an inline
+	// Go text/template. Overrides built-in defaults.
+	Templates map[string]string `yaml:"templates,omitempty"`
+	// TemplateFiles maps an event key to a template file path. A given key may
+	// appear in Templates or TemplateFiles, but not both.
+	TemplateFiles map[string]string `yaml:"template_files,omitempty"`
+	// ErrorEvents lists event keys that are delivered with notification
+	// status=error (instead of ok). Matched with the same rules as filters.
+	ErrorEvents []string `yaml:"error_events,omitempty"`
+	// Routes is an optional ordered list of routing rules. When present, an
+	// incoming event fans out to the chats of every matching rule (see
+	// GitlabRouteYAMLConfig). When absent, the endpoint keeps its single-chat
+	// behaviour (default_chat_id / global default).
+	Routes []GitlabRouteYAMLConfig `yaml:"routes,omitempty"`
+}
+
+// GitlabRouteYAMLConfig is a single GitLab routing rule. Match maps a selector
+// (a reserved name like "project"/"event"/"branch", or a dotted raw-payload
+// path) to a list of patterns; a rule matches when, for every selector, at least
+// one of its patterns matches (OR within a selector, AND across selectors; an
+// omitted selector places no constraint, an empty Match is a catch-all). A
+// matching rule delivers to every alias/UUID in Chats. Stop:true halts the rule
+// scan after this rule matches.
+type GitlabRouteYAMLConfig struct {
+	Match map[string][]string `yaml:"match,omitempty"`
+	Chats []string            `yaml:"chats"`
+	Stop  bool                `yaml:"stop,omitempty"`
+}
+
+// GitlabEventsConfig configures the allow/deny filter for GitLab events.
+// Entries are event keys: a bare kind ("push"), a kind.subtype
+// ("merge_request.open"), or a wildcard ("merge_request.*").
+type GitlabEventsConfig struct {
+	Only    []string `yaml:"only,omitempty"`    // allowlist; empty means allow all
+	Exclude []string `yaml:"exclude,omitempty"` // denylist; always wins over only
 }
 
 // APIKeyConfig defines a single API key for server authentication.
@@ -992,7 +1042,7 @@ var knownKeys = map[string]map[string]bool{
 	},
 	"server": {
 		"listen": true, "base_path": true, "api_keys": true, "allow_bot_secret_auth": true,
-		"alertmanager": true, "grafana": true, "callbacks": true, "docs": true, "external_url": true,
+		"alertmanager": true, "grafana": true, "gitlab": true, "callbacks": true, "docs": true, "external_url": true,
 	},
 	"server.alertmanager": {
 		"default_chat_id": true, "error_severities": true, "template": true, "template_file": true,
@@ -1000,6 +1050,21 @@ var knownKeys = map[string]map[string]bool{
 	"server.grafana": {
 		"default_chat_id": true, "error_states": true, "template": true, "template_file": true,
 	},
+	"server.gitlab": {
+		"default_chat_id": true, "secret": true, "secret_token": true,
+		"events": true, "templates": true, "template_files": true, "error_events": true,
+		"routes": true,
+	},
+	"server.gitlab.events": {
+		"only": true, "exclude": true,
+	},
+	"server.gitlab.routes.*": {
+		"match": true, "chats": true, "stop": true,
+	},
+	// server.gitlab.routes.*.match has no registered schema on purpose: its keys
+	// are arbitrary match selectors (reserved names or dotted raw-payload paths),
+	// so unknown-key checking is skipped for them (a nil known-set means "accept
+	// any key").
 	"server.callbacks": {
 		"base_path": true, "verify_jwt": true, "rules": true,
 	},
@@ -1189,6 +1254,17 @@ func (c *Config) validateRequiredFields() []ValidationResult {
 				Message: "has both secret and token, use one",
 			})
 		}
+	}
+
+	// The GitLab endpoint authenticates via X-Gitlab-Token, so a configured
+	// server.gitlab section requires a secret token. Catch it here so `config
+	// validate` fails instead of deferring the error to `serve`.
+	if c.Server.Gitlab != nil && c.Server.Gitlab.Secret == "" && c.Server.Gitlab.SecretToken == "" {
+		results = append(results, ValidationResult{
+			Level:   ValidationError,
+			Path:    "server.gitlab.secret",
+			Message: "secret or secret_token is required",
+		})
 	}
 
 	return results
@@ -1425,7 +1501,217 @@ func (c *Config) validateCrossReferences() []ValidationResult {
 		}
 	}
 
+	// Gitlab default_chat_id must reference existing chat alias
+	if c.Server.Gitlab != nil && c.Server.Gitlab.DefaultChatID != "" {
+		chatID := c.Server.Gitlab.DefaultChatID
+		if !IsUUID(chatID) {
+			if _, ok := c.Chats[chatID]; !ok {
+				results = append(results, ValidationResult{
+					Level:   ValidationError,
+					Path:    "server.gitlab.default_chat_id",
+					Message: fmt.Sprintf("references unknown chat alias %q", chatID),
+				})
+			}
+		}
+	}
+
+	// Gitlab route chats must reference existing chat aliases (or be UUIDs).
+	if c.Server.Gitlab != nil {
+		for i, route := range c.Server.Gitlab.Routes {
+			for _, chatID := range route.Chats {
+				if IsUUID(chatID) {
+					continue
+				}
+				if _, ok := c.Chats[chatID]; !ok {
+					results = append(results, ValidationResult{
+						Level:   ValidationError,
+						Path:    fmt.Sprintf("server.gitlab.routes[%d].chats", i),
+						Message: fmt.Sprintf("references unknown chat alias %q", chatID),
+					})
+				}
+			}
+		}
+	}
+
+	// Gitlab event-key syntax and templates/template_files key overlap
+	if g := c.Server.Gitlab; g != nil {
+		results = append(results, validateGitlab(g)...)
+	}
+
 	return results
+}
+
+// validateGitlab checks GitLab event-key syntax, templates/template_files key
+// overlap, and catch-all ambiguity. It is shared by the offline Config.Validate
+// and by the serve startup path (see GitlabYAMLConfig.ValidateForServe), which
+// does not run the full Config.Validate.
+func validateGitlab(g *GitlabYAMLConfig) []ValidationResult {
+	var results []ValidationResult
+
+	checkKeys := func(path string, entries []string) {
+		for _, e := range entries {
+			if !validGitlabEventKey(e) {
+				results = append(results, ValidationResult{
+					Level:   ValidationError,
+					Path:    path,
+					Message: fmt.Sprintf("invalid event key %q: must be \"kind\", \"kind.subtype\", or \"kind.*\"", e),
+				})
+			}
+		}
+	}
+	checkKeys("server.gitlab.events.only", g.Events.Only)
+	checkKeys("server.gitlab.events.exclude", g.Events.Exclude)
+	checkKeys("server.gitlab.error_events", g.ErrorEvents)
+
+	// Template keys must be valid event keys too.
+	for _, k := range sortedMapKeys(g.Templates) {
+		if !validGitlabEventKey(k) {
+			results = append(results, ValidationResult{
+				Level:   ValidationError,
+				Path:    "server.gitlab.templates." + k,
+				Message: fmt.Sprintf("invalid event key %q: must be \"kind\", \"kind.subtype\", or \"kind.*\"", k),
+			})
+		}
+	}
+	for _, k := range sortedMapKeys(g.TemplateFiles) {
+		if !validGitlabEventKey(k) {
+			results = append(results, ValidationResult{
+				Level:   ValidationError,
+				Path:    "server.gitlab.template_files." + k,
+				Message: fmt.Sprintf("invalid event key %q: must be \"kind\", \"kind.subtype\", or \"kind.*\"", k),
+			})
+		}
+	}
+
+	// A given key must not be defined in both templates and template_files.
+	for _, k := range sortedMapKeys(g.Templates) {
+		if _, dup := g.TemplateFiles[k]; dup {
+			results = append(results, ValidationResult{
+				Level:   ValidationError,
+				Path:    "server.gitlab.template_files." + k,
+				Message: fmt.Sprintf("event key %q is defined in both templates and template_files", k),
+			})
+		}
+	}
+
+	// A kind's catch-all template must be given in exactly one form: the bare
+	// "kind" and "kind.*" are equivalent all-subtypes catch-alls that share a
+	// single registry slot (see canonGitlabTemplateKey), so defining both is
+	// ambiguous. Checked across the union of templates and template_files.
+	catchAllForm := map[string]string{}
+	for _, m := range []map[string]string{g.Templates, g.TemplateFiles} {
+		for _, k := range sortedMapKeys(m) {
+			canon, isCatchAll := gitlabCatchAllKind(k)
+			if !isCatchAll {
+				continue
+			}
+			if prev, ok := catchAllForm[canon]; ok && prev != k {
+				results = append(results, ValidationResult{
+					Level:   ValidationError,
+					Path:    "server.gitlab.templates",
+					Message: fmt.Sprintf("event keys %q and %q are equivalent catch-alls; define only one", prev, k),
+				})
+			} else {
+				catchAllForm[canon] = k
+			}
+		}
+	}
+
+	results = append(results, validateGitlabRoutes(g.Routes)...)
+
+	return results
+}
+
+// validateGitlabRoutes checks each routing rule's chats and match patterns. A
+// rule must deliver to at least one chat; "event"-selector patterns must be
+// valid event keys (kind / kind.subtype / kind.*); and "/regex/" patterns on any
+// other selector must compile. Chat-alias existence is a cross-reference check
+// (validateCrossReferences), since it needs the chats map.
+func validateGitlabRoutes(routes []GitlabRouteYAMLConfig) []ValidationResult {
+	var results []ValidationResult
+	for i, route := range routes {
+		if len(route.Chats) == 0 {
+			results = append(results, ValidationResult{
+				Level:   ValidationError,
+				Path:    fmt.Sprintf("server.gitlab.routes[%d].chats", i),
+				Message: "chats must not be empty",
+			})
+		}
+		for _, selector := range sortedMapKeys(route.Match) {
+			patterns := route.Match[selector]
+			path := fmt.Sprintf("server.gitlab.routes[%d].match.%s", i, selector)
+			for _, p := range patterns {
+				if selector == "event" {
+					if !validGitlabEventKey(p) {
+						results = append(results, ValidationResult{
+							Level:   ValidationError,
+							Path:    path,
+							Message: fmt.Sprintf("invalid event key %q: must be \"kind\", \"kind.subtype\", or \"kind.*\"", p),
+						})
+					}
+					continue
+				}
+				if err := gitlabRoutePatternError(p); err != nil {
+					results = append(results, ValidationResult{
+						Level:   ValidationError,
+						Path:    path,
+						Message: fmt.Sprintf("invalid regex pattern %q: %v", p, err),
+					})
+				}
+			}
+		}
+	}
+	return results
+}
+
+// gitlabRoutePatternError reports a compilation error for a route match pattern.
+// A pattern wrapped in slashes ("/.../") is a Go RE2 regular expression and must
+// compile; any other pattern is a glob and is always valid. This mirrors the
+// server-side compilePattern so config validation rejects broken regexes at
+// `config validate` and serve startup, before the engine ever compiles them.
+func gitlabRoutePatternError(pattern string) error {
+	if len(pattern) >= 2 && strings.HasPrefix(pattern, "/") && strings.HasSuffix(pattern, "/") {
+		if _, err := regexp.Compile(pattern[1 : len(pattern)-1]); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// ValidateForServe returns the first blocking GitLab config error, or nil. The
+// serve startup path resolves config via LoadForServe, which does not run the
+// full Config.Validate, so buildGitlabConfig calls this to reject invalid event
+// keys and templates/template_files overlaps that offline validation would flag.
+func (g *GitlabYAMLConfig) ValidateForServe() error {
+	for _, r := range validateGitlab(g) {
+		if r.Level == ValidationError {
+			return fmt.Errorf("%s: %s", r.Path, r.Message)
+		}
+	}
+	return nil
+}
+
+// gitlabEventKeyRe matches a valid GitLab event key: a bare kind ("push"),
+// a kind.subtype ("merge_request.open"), or a wildcard ("merge_request.*").
+var gitlabEventKeyRe = regexp.MustCompile(`^[A-Za-z0-9_]+(\.([A-Za-z0-9_]+|\*))?$`)
+
+// validGitlabEventKey reports whether key is a syntactically valid GitLab event
+// filter/template key.
+func validGitlabEventKey(key string) bool {
+	return gitlabEventKeyRe.MatchString(key)
+}
+
+// gitlabCatchAllKind reports whether a template key is an all-subtypes catch-all
+// (a bare "kind" or a "kind.*" wildcard) and, if so, the bare kind it targets.
+// A specific "kind.subtype" key is not a catch-all.
+func gitlabCatchAllKind(key string) (string, bool) {
+	if k, ok := strings.CutSuffix(key, ".*"); ok {
+		return k, true
+	}
+	if !strings.Contains(key, ".") {
+		return key, true
+	}
+	return "", false
 }
 
 // looksLikeSecretRef returns true if the value looks like an env: or vault: reference.

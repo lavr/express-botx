@@ -164,6 +164,243 @@ curl -X POST http://localhost:8080/api/v1/grafana \
 
 ---
 
+## GitLab (универсальный приёмник событий)
+
+Endpoint `/api/v1/gitlab` принимает **любые** group/project-вебхуки GitLab
+(`merge_request`, `note`, `push`, `tag_push`, `pipeline`, `build`/`job`, `issue`,
+`release`, `wiki_page`, `deployment`, … и любые будущие) и отправляет их в чат
+eXpress. Новый тип события не требует правок в Go: полезная нагрузка разбирается
+generic-декодером, а событие сводится к **event-ключу** и рендерится шаблоном.
+
+Аутентификация — по заголовку `X-Gitlab-Token` (GitLab не умеет ставить
+`Authorization`/`X-API-Key`), поэтому эндпоинт не использует обычные `api_keys`.
+
+### Event-ключ и деривация субтипа
+
+Event-ключ — это строка `kind` или `kind.subtype`, где `kind` = `object_kind`,
+а субтип зависит от типа события:
+
+| `object_kind` | Субтип берётся из | Пример ключа |
+|---|---|---|
+| `merge_request`, `issue` | `object_attributes.action` | `merge_request.open`, `issue.close` |
+| `note` | `object_attributes.noteable_type` | `note.MergeRequest`, `note.Commit` |
+| `pipeline` | `object_attributes.status` | `pipeline.failed`, `pipeline.success` |
+| `build` (job) | `build_status` (плоское поле) | `build.failed`, `build.success` |
+| `push`, `tag_push` | — (только `kind`) | `push`, `tag_push` |
+| прочее | `object_attributes.action`, затем `.status` | `deployment.success` |
+
+### Фильтр событий: only / exclude
+
+Через `server.gitlab.events` можно ограничить, какие события отправляются.
+Каждая запись фильтра матчит: полный event-ключ (`kind.subtype`), голый `kind`
+(все субтипы этого типа) или wildcard `kind.*` (то же, что голый `kind`).
+
+- `only` пустой → проходят все события; `only` непустой → событие должно матчиться.
+- `exclude` вычитает и **всегда выигрывает** над `only`.
+- Событие, не прошедшее фильтр → `200 OK` с телом
+  `{"ok":true,"ignored":true,"event":"<key>"}` и без отправки сообщения.
+
+```yaml
+events:
+  only:    ["merge_request.*", "pipeline.failed", "push"]
+  exclude: ["merge_request.update"]
+```
+
+### Шаблоны событий
+
+Сообщение рендерится реестром шаблонов: сначала берётся точный ключ
+`kind.subtype`, затем голый `kind`, затем генерик `default` — поэтому любое
+событие всегда отрендерится. Встроенные дефолты покрывают частые события
+(`merge_request.open/merge/close`, `note.MergeRequest`, `push`, `tag_push`,
+`pipeline`, `issue`) и `default`; любой ключ переопределяется в конфиге через
+`templates` (inline) или `template_files` (путь к файлу). Один и тот же ключ
+нельзя задать в обоих сразу. Ключи `kind` и `kind.*` эквивалентны (оба — catch-all
+для всех субтипов) и занимают один слот реестра: задать оба сразу — ошибка
+валидации; конкретный `kind.subtype` при этом можно задавать рядом с `kind`.
+
+Доступные переменные шаблона (view-модель):
+
+| Переменная | Значение |
+|---|---|
+| `.Kind` | `object_kind` |
+| `.Action` | `object_attributes.action` или производный субтип |
+| `.EventKey` | `kind` или `kind.subtype` |
+| `.Project` | `project.name` (fallback `project.path_with_namespace`) |
+| `.User` | `user.name` / `user.username` (fallback `user_name` для push) |
+| `.Title` | `object_attributes.title` |
+| `.URL` | `object_attributes.url` (fallback `project.web_url`) |
+| `.Raw` | весь декодированный payload (`map`) |
+
+Хелперы: `get` — доступ по вложенному пути в payload
+(`{{ get .Raw "object_attributes.note" }}`, `nil` если нет; эквивалент
+`{{ .Get "object_attributes.note" }}`); `default` — значение по умолчанию
+(`{{ default "n/a" .Title }}`).
+
+```yaml
+templates:
+  "merge_request.open": "🆕 {{.Title}} — {{.User}}\n{{.URL}}"
+  "pipeline": "🚦 {{ .Project }}: {{ .Action }}\n{{ get .Raw \"object_attributes.detailed_status\" }}"
+template_files:
+  "default": ./tmpl/gitlab-default.tmpl
+```
+
+### error_events → status=error
+
+Ключи из `error_events` доставляются с BotX `notification.status=error`
+(визуально выделяются в eXpress), остальные — `ok`. Матчинг — те же правила,
+что и у фильтра (полный ключ, голый `kind`, `kind.*`).
+
+```yaml
+error_events: ["pipeline.failed", "build.failed"]
+```
+
+### Настройка express-botx
+
+В отличие от Alertmanager/Grafana, эндпоинт включается только при наличии секции
+`gitlab` с секретом:
+
+```yaml
+server:
+  listen: ":8080"
+  base_path: /api/v1
+  gitlab:
+    secret: env:GITLAB_WEBHOOK_TOKEN   # literal / env: / vault: — сверяется с X-Gitlab-Token
+    default_chat_id: dev               # UUID или алиас чата (опционально)
+    events:
+      only:    ["merge_request.*", "pipeline.failed", "build.failed", "push"]
+      exclude: ["merge_request.update"]
+    templates:
+      "merge_request.open": "🆕 {{.Title}} — {{.User}}\n{{.URL}}"
+    # template_files:
+    #   "default": ./tmpl/gitlab-default.tmpl
+    error_events: ["pipeline.failed", "build.failed"]
+```
+
+Если `default_chat_id` не задан, используется чат по умолчанию (`default: true`),
+единственный чат из конфига или query-параметр `?chat_id=`.
+
+### Настройка GitLab
+
+1. В группе или проекте: **Settings → Webhooks → Add new webhook**
+2. **URL:** `http://express-botx:8080/api/v1/gitlab` (можно с `?chat_id=<alias>`)
+3. **Secret token:** то же значение, что и `server.gitlab.secret`
+4. Отметьте нужные триггеры (или все — фильтрация теперь на стороне приложения)
+5. Сохраните и нажмите **Test → …**
+
+### Несколько чатов
+
+Как и у Alertmanager/Grafana — используйте `?chat_id=` в URL вебхука, чтобы
+направлять события разных групп/проектов в разные чаты:
+
+- `http://express-botx:8080/api/v1/gitlab?chat_id=backend-mrs`
+- `http://express-botx:8080/api/v1/gitlab?chat_id=frontend-mrs`
+
+### Роутинг событий по чатам (`routes`)
+
+Когда одного `?chat_id`/`default_chat_id` мало (одно событие должно уходить в
+несколько чатов, а выбор чата зависит от проекта, типа события или ветки),
+используйте `server.gitlab.routes` — опциональный **упорядоченный** список
+правил. Секция обратно совместима: без неё поведение = прежнее (один чат).
+
+**Модель матчинга (all-match + stop):**
+
+- Срабатывают **все** совпавшие правила (не первое), их чаты объединяются и
+  дедуплицируются с сохранением порядка.
+- Правило с `stop: true`, совпав, обрывает дальнейший перебор.
+- Правило состоит из условий `match` (селектор → список паттернов). Внутри одного
+  селектора паттерны по **OR** (any-of), между селекторами — **AND**. Опущенный
+  селектор ничего не ограничивает; пустой `match` — catch-all (совпадает всегда).
+- Массив по dotted-пути матчится, если совпал **любой** его скалярный элемент.
+  Элементы-объекты пропускаются: GitLab отдаёт `object_attributes.labels` как
+  массив объектов `{title, color, …}`, поэтому напрямую по названию лейбла
+  сматчить нельзя — матчатся только массивы скаляров.
+
+**Контекст матчинга (селекторы):**
+
+Зарезервированные селекторы — нормализованные поля события:
+
+| Селектор | Значение |
+|---|---|
+| `kind` | `object_kind` |
+| `event` | event-ключ (`kind` или `kind.subtype`) — матчится **event-матчером**, не паттернами |
+| `action` | `object_attributes.action` или производный субтип |
+| `project` | `project.path_with_namespace` (fallback `project.name`) — в шаблонах `.Project` остаётся коротким `project.name` |
+| `branch` | нормализованная ветка (см. ниже) |
+| `user` | `user.name` / `user.username` (fallback `user_name`) |
+| `title` | `object_attributes.title` |
+| `url` | `object_attributes.url` (fallback `project.web_url`) |
+
+Любой другой селектор — **dotted-путь** в сыром payload (`view.Raw`): скаляр →
+одно значение, массив → список строк, отсутствие поля → пусто (не матчится).
+
+Нормализация `branch`: MR/`note` → `object_attributes.target_branch` (fallback
+`merge_request.target_branch`); `push`/`tag_push` → ветка из `ref`
+(`refs/heads/release/2.0` → `release/2.0`); `pipeline` →
+`object_attributes.ref`; `build`/`job` → ветка из верхнеуровневого `ref`;
+остальные типы → пусто.
+
+**Паттерны:**
+
+- По умолчанию — **glob** с `*` (любая последовательность символов, включая `/`):
+  `group/backend/*`, `sec:*`, точное совпадение без `*`.
+- Обёрнутый в слэши `/…/` — **регулярное выражение** (Go RE2, без ReDoS),
+  компилируется на старте; битый regex роняет `serve`. Regex не заякорен —
+  используйте `^…$` для полного совпадения.
+- Селектор `event` использует event-матчинг (полный ключ `kind.subtype`, голый
+  `kind`, `kind.*`), glob/regex к нему **не применяются**.
+
+**Приоритет выбора чатов:** `?chat_id=` → `routes` (all-match+stop, дедуп) →
+`default_chat_id` → чат по умолчанию → единственный чат → `200 {ignored}`.
+
+**Фан-аут и коды ответа (best-effort):** сообщение отправляется в каждый целевой
+чат независимо. Ответ `200` c телом
+`{"ok":true,"results":[{"chat","sync_id"}],"errors":[{"chat","error"}]}`, если
+доставлено **хотя бы в один** чат (частичные сбои — в `errors`); `502`, если
+упали все. Явный `?chat_id=` сохраняет прежний одиночный ответ (`SuccessResponse`).
+
+```yaml
+server:
+  gitlab:
+    secret: env:GITLAB_WEBHOOK_TOKEN
+    default_chat_id: dev          # fallback, если ни одно правило не совпало
+    routes:
+      # MR в main любого backend-проекта → в два чата; stop обрывает перебор.
+      - match:
+          project: ["group/backend/*"]
+          event:   ["merge_request"]
+          branch:  ["main", "release/*"]
+        chats: [backend-mrs, releases]
+        stop: true
+      # Упавшие пайплайны и джобы → в дежурный чат (regex по ветке).
+      - match:
+          event:  ["pipeline.failed", "build.failed"]
+          branch: ["/^(main|release\\/.*)$/"]
+        chats: [oncall]
+      # MR из веток hotfix/* (dotted-путь к скаляру в payload) → чат хотфиксов.
+      - match:
+          event: ["merge_request"]
+          object_attributes.source_branch: ["hotfix/*"]
+        chats: [hotfixes]
+```
+
+### Проверка вручную
+
+```bash
+curl -X POST "http://localhost:8080/api/v1/gitlab" \
+  -H "X-Gitlab-Token: <secret token>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "object_kind": "pipeline",
+    "project": { "name": "backend" },
+    "object_attributes": {
+      "status": "failed",
+      "url": "https://gitlab.company.ru/team/backend/-/pipelines/777"
+    }
+  }'
+```
+
+---
+
 ## Callback-ы от Express Platform
 
 express-botx может принимать callback-и от сервера Express и маршрутизировать

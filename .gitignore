@@ -3,9 +3,15 @@ dist/
 coverage.out
 TODO.md
 config-local.yaml
+# Local runtime config (default auto-loaded path) — may hold live tokens
+express-botx.yaml
+express-botx.yml
 examples/**/.env
 .*.json
 .claude/
+
+# macOS Finder artifacts
+.DS_Store
 
 .ralphex/progress/
 
@@ -15,3 +21,4 @@ examples/**/.env
 docs/express-api/
 docs/rfc/
 docs/plans/
+docs/superpowers/

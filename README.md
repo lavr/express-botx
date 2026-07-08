@@ -7,7 +7,7 @@
 
 CLI и HTTP-сервер для отправки сообщений в корпоративный мессенджер [eXpress](https://express.ms) через BotX API.
 
-Принимает вебхуки от Alertmanager и Grafana, поддерживает асинхронную отправку через RabbitMQ/Kafka, работает как утилита командной строки или HTTP-сервис.
+Принимает вебхуки от Alertmanager, Grafana и GitLab, поддерживает асинхронную отправку через RabbitMQ/Kafka, работает как утилита командной строки или HTTP-сервис.
 
 
 ## Возможности
@@ -15,7 +15,7 @@ CLI и HTTP-сервер для отправки сообщений в корп�
 - **Отправка сообщений** из CLI, скриптов, пайплайнов CI/CD
 - **API-запросы** — произвольные вызовы eXpress BotX API из командной строки с автоаутентификацией
 - **HTTP-сервер** с API для отправки и приёма вебхуков
-- **Alertmanager и Grafana** — готовые эндпоинты для мониторинга
+- **Alertmanager, Grafana и GitLab** — готовые эндпоинты для мониторинга; универсальный приёмник любых событий GitLab с фильтрами и шаблонами ([examples/gitlab/](examples/gitlab/))
 - **Асинхронная очередь** — RabbitMQ или Kafka для надёжной доставки
 - **Секреты** — поддержка переменных окружения и HashiCorp Vault
 - **Kubernetes-ready** — Docker, Helm chart, бинарник
@@ -93,6 +93,7 @@ curl -X POST http://localhost:8080/api/v1/send \
 | `POST` | `/api/v1/send` | Отправка сообщения |
 | `POST` | `/api/v1/alertmanager` | Вебхук Alertmanager |
 | `POST` | `/api/v1/grafana` | Вебхук Grafana |
+| `POST` | `/api/v1/gitlab` | Универсальный вебхук GitLab — любые события, фильтры + шаблоны (auth: `X-Gitlab-Token`) |
 
 Сервер автоматически добавляет заголовок `X-Request-ID` к каждому ответу (если клиент не передал свой, генерируется уникальный). Все HTTP-запросы логируются в stderr (метод, путь, статус, время выполнения).
 
@@ -166,7 +167,7 @@ chats:
 
 ## Интеграции
 
-В режиме веб-сервера есть методы для интеграции с alertmanager и grafana.
+В режиме веб-сервера есть методы для интеграции с alertmanager, grafana и gitlab (универсальный приёмник любых событий GitLab с фильтрами `only`/`exclude`, шаблонами по типам и `error_events`).
 
 Пример конфига alertmanager:
 
@@ -228,7 +229,7 @@ helm install express-botx oci://ghcr.io/lavr/charts/express-botx -f values.yaml
 | [docs/install.md](docs/install.md) | Варианты установки |
 | [docs/commands.md](docs/commands.md) | Все команды и флаги |
 | [docs/configuration.md](docs/configuration.md) | Полный референс конфигурации |
-| [docs/integrations.md](docs/integrations.md) | Alertmanager, Grafana, примеры |
+| [docs/integrations.md](docs/integrations.md) | Alertmanager, Grafana, GitLab, примеры |
 | [docs/deployment.md](docs/deployment.md) | Docker, Helm, systemd, docker-compose |
 | [docs/async-queues.md](docs/async-queues.md) | RabbitMQ, Kafka, архитектура очередей |
 | [docs/quickstart.md](docs/quickstart.md) | Базовые сценарии настройки |

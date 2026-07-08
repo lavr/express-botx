@@ -542,6 +542,138 @@ paths:
               schema:
                 $ref: "#/components/schemas/ErrorResponse"
 
+  /gitlab:
+    post:
+      operationId: gitlab
+      summary: GitLab group/project webhook (universal)
+      description: |
+        Receives **any** GitLab group/project webhook notification and forwards
+        it to eXpress. There is no fixed list of supported events: the event key
+        is derived generically from the payload as `kind` or `kind.subtype`,
+        where `kind` is `object_kind` and the subtype depends on the kind:
+
+        - `merge_request`, `issue` → `object_attributes.action`
+        - `note` → `object_attributes.noteable_type`
+        - `pipeline` → `object_attributes.status`
+        - `build` (job) → `build_status` (a flat top-level field)
+        - `push`, `tag_push` → no subtype (bare kind)
+        - otherwise → `object_attributes.action`, then `object_attributes.status`,
+          then a flat top-level `status` (e.g. deployment events)
+
+        Delivery is controlled by application config:
+        - **Filter** (`server.gitlab.events.only` / `.exclude`): each entry matches
+          a full event key (`kind.subtype`), a bare `kind` (all subtypes), or a
+          `kind.*` wildcard. `only` empty admits everything; `exclude` always wins.
+          A filtered-out event returns `200 OK` with `{"ok":true,"ignored":true,"event":"<key>"}`
+          and no message is sent.
+        - **Templates** (`server.gitlab.templates` / `.template_files`): the message
+          is rendered by selecting the template for the exact event key, then the
+          bare kind, then a generic `default` — so every event always renders.
+        - **error_events** (`server.gitlab.error_events`): event keys matching this
+          list are delivered with BotX `notification.status=error`; everything else
+          is `ok`. Matched with the same rules as the filter.
+        - **routes** (`server.gitlab.routes`): an optional ordered list of routing
+          rules. When configured (and no explicit `?chat_id=` overrides them), an
+          incoming event fans out to the chats of **every** matching rule (their
+          chats are unioned and de-duplicated, preserving order); a matching rule
+          with `stop:true` ends the scan. Each rule matches on selectors —
+          reserved names (`kind`/`event`/`action`/`project`/`branch`/`user`/`title`/`url`)
+          or a dotted raw-payload path — against glob (`group/backend/*`) or
+          `/regex/` patterns (the `event` selector uses event-key matching instead).
+          When no rule matches, delivery falls back to the single default chat, and
+          if none is configured the event is ignored (`200`). Fan-out is
+          best-effort: the response is `200` with a `GitlabFanoutResponse` when at
+          least one delivery succeeds (partial failures are listed in `errors`), or
+          `502` when they all fail.
+
+        Authentication uses the `X-Gitlab-Token` header (GitLab cannot send
+        `Authorization`/`X-API-Key`). This endpoint is registered only when
+        `server.gitlab` is configured.
+
+        Chat resolution priority:
+        1. `?chat_id=` query parameter (overrides routing entirely)
+        2. `server.gitlab.routes` (all matching rules, unioned + de-duplicated)
+        3. `default_chat_id` from webhook config
+        4. Global default chat (`default: true` in chats section)
+        5. Single chat alias from config
+      security:
+        - gitlabToken: []
+      parameters:
+        - name: chat_id
+          in: query
+          description: Target chat UUID or alias (overrides config default)
+          schema:
+            type: string
+        - name: bot
+          in: query
+          description: Bot name (required in multi-bot mode unless chat has a default bot binding)
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/GitlabWebhook"
+            example:
+              object_kind: merge_request
+              user:
+                name: Jane Developer
+                username: jane
+              project:
+                name: backend
+                web_url: https://gitlab.company.ru/team/backend
+              object_attributes:
+                action: open
+                title: "Add rate limiting to API"
+                url: https://gitlab.company.ru/team/backend/-/merge_requests/42
+                source_branch: feature/rate-limit
+                target_branch: main
+                detailed_merge_status: mergeable
+      responses:
+        "200":
+          description: |
+            Event processed. The body depends on how the event was delivered:
+            - Single-chat delivery (`?chat_id=`, or no `routes` configured):
+              a `SuccessResponse` (`ok` + `sync_id`).
+            - Fan-out via `routes`: a `GitlabFanoutResponse` with a `results`
+              entry per successful chat and an `errors` entry per failed chat
+              (`ok:true` when at least one delivery succeeded).
+            - Filtered out by `only`/`exclude`, or matched no route with no
+              default chat: a `GitlabIgnoredResponse` (`ok:true`, `ignored:true`,
+              `event:<key>`) and no message is sent.
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: "#/components/schemas/SuccessResponse"
+                  - $ref: "#/components/schemas/GitlabFanoutResponse"
+                  - $ref: "#/components/schemas/GitlabIgnoredResponse"
+        "400":
+          description: Invalid request (malformed JSON or template error)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "401":
+          description: Missing or invalid X-Gitlab-Token
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "502":
+          description: |
+            Upstream error. For single-chat delivery the body is an
+            `ErrorResponse`. For a `routes` fan-out where every target chat
+            failed, the body is a `GitlabFanoutResponse` (`ok:false`) whose
+            `errors` list the per-chat failures.
+          content:
+            application/json:
+              schema:
+                oneOf:
+                  - $ref: "#/components/schemas/ErrorResponse"
+                  - $ref: "#/components/schemas/GitlabFanoutResponse"
+
 components:
   securitySchemes:
     bearerAuth:
@@ -562,6 +694,11 @@ components:
       type: http
       scheme: bearer
       description: "JWT signed with bot secret (HS256). Used for callback endpoints from eXpress platform."
+    gitlabToken:
+      type: apiKey
+      in: header
+      name: X-Gitlab-Token
+      description: "X-Gitlab-Token: <secret token> — secret token configured on the GitLab webhook."
 
   schemas:
     SendRequest:
@@ -793,6 +930,86 @@ components:
           type: object
           additionalProperties: true
 
+    GitlabWebhook:
+      type: object
+      required: [object_kind]
+      description: |
+        A GitLab group/project webhook payload. Accepts **any** `object_kind`;
+        the endpoint decodes the payload generically and derives an event key
+        (`kind` / `kind.subtype`). The properties below are the common fields
+        surfaced to templates as `.Kind`/`.Action`/`.Project`/`.User`/`.Title`/`.URL`;
+        the full payload is available to templates via `.Raw` and the `get` helper.
+        `additionalProperties` is true — event-specific fields (`build_status`,
+        `ref`, `commits`, `builds`, …) are passed through untouched.
+      additionalProperties: true
+      properties:
+        object_kind:
+          type: string
+          example: merge_request
+          description: |
+            Event kind, e.g. `merge_request`, `note`, `push`, `tag_push`,
+            `pipeline`, `build`, `issue`, `release`, `wiki_page`, `deployment`.
+            Any value is accepted.
+        user:
+          type: object
+          description: Actor that triggered the event
+          properties:
+            name:
+              type: string
+            username:
+              type: string
+        project:
+          type: object
+          properties:
+            name:
+              type: string
+            web_url:
+              type: string
+              format: uri
+        object_attributes:
+          type: object
+          additionalProperties: true
+          properties:
+            action:
+              type: string
+              description: "merge_request/issue action: open, merge, update, close, ..."
+            status:
+              type: string
+              description: "pipeline status: pending, running, success, failed, ..."
+            title:
+              type: string
+            url:
+              type: string
+              format: uri
+            source_branch:
+              type: string
+            target_branch:
+              type: string
+            detailed_merge_status:
+              type: string
+            noteable_type:
+              type: string
+              description: "note events: MergeRequest, Commit, Issue, ..."
+            note:
+              type: string
+              description: Comment text (note events)
+            system:
+              type: boolean
+              description: True for system-generated notes (forwarded like any other note)
+        merge_request:
+          type: object
+          description: Nested merge request block present on note events about MRs
+          properties:
+            title:
+              type: string
+            url:
+              type: string
+              format: uri
+            source_branch:
+              type: string
+            target_branch:
+              type: string
+
     SuccessResponse:
       type: object
       properties:
@@ -802,6 +1019,62 @@ components:
         sync_id:
           type: string
           example: "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+
+    GitlabIgnoredResponse:
+      type: object
+      description: >-
+        Returned by /gitlab when an event is not delivered: filtered out by
+        only/exclude, rendered to an empty message, or matched no route and has
+        no default chat configured.
+      properties:
+        ok:
+          type: boolean
+          example: true
+        ignored:
+          type: boolean
+          example: true
+        event:
+          type: string
+          description: The derived event key that was filtered out.
+          example: "merge_request.update"
+
+    GitlabFanoutResponse:
+      type: object
+      description: |
+        Returned by /gitlab when `server.gitlab.routes` fans an event out to one
+        or more chats. `ok` is true when at least one delivery succeeded (HTTP
+        200) and false when they all failed (HTTP 502). `results` lists each
+        successful delivery and `errors` each failed one; on a partial failure
+        both are present.
+      properties:
+        ok:
+          type: boolean
+          example: true
+        results:
+          type: array
+          description: Successful deliveries, one per chat.
+          items:
+            type: object
+            properties:
+              chat:
+                type: string
+                description: Target chat alias or UUID as configured in the rule.
+                example: backend-mrs
+              sync_id:
+                type: string
+                example: "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+        errors:
+          type: array
+          description: Failed deliveries, one per chat (chat/bot resolution or upstream send).
+          items:
+            type: object
+            properties:
+              chat:
+                type: string
+                example: frontend-mrs
+              error:
+                type: string
+                example: "upstream error: 502 Bad Gateway"
 
     BotEntry:
       type: object

@@ -64,7 +64,42 @@ server:
   grafana:                                  # опционально — endpoint включён по умолчанию
     default_chat_id: alerts
     error_states: [alerting]              # по умолчанию
+  gitlab:                                   # опционально — endpoint включён ТОЛЬКО с этой секцией
+    secret: env:GITLAB_WEBHOOK_TOKEN      # сверяется с заголовком X-Gitlab-Token (literal/env:/vault:)
+    default_chat_id: dev                  # UUID или алиас (опционально)
+    events:                               # фильтр событий (опционально)
+      only:    ["merge_request.*", "pipeline.failed", "build.failed", "push"]
+      exclude: ["merge_request.update"]
+    templates:                            # переопределение шаблонов по event-ключу (опционально)
+      "merge_request.open": "🆕 {{.Title}} — {{.User}}\n{{.URL}}"
+    # template_files:                     # шаблоны из файлов (ключ → путь); ключ не может быть и там, и там
+    #   "default": ./tmpl/gitlab-default.tmpl
+    error_events: ["pipeline.failed", "build.failed"]  # доставка со status=error (опционально)
+    routes:                               # роутинг события по нескольким чатам (опционально)
+      - match:                            # селектор → паттерны (glob или /regex/); event — по event-ключу
+          project: ["group/backend/*"]
+          event:   ["merge_request"]
+          branch:  ["main", "release/*"]
+        chats: [backend-mrs, releases]    # совпало → в оба чата (объединение+дедуп)
+        stop: true                        # совпав, оборвать перебор правил
 ```
+
+Секция `server.gitlab` (обязательна для включения эндпоинта `/api/v1/gitlab`).
+Эндпоинт универсальный: принимает любые group/project-вебхуки GitLab, сводит
+событие к event-ключу (`kind` или `kind.subtype`) и рендерит шаблоном. Подробнее
+про деривацию субтипов, фильтры и шаблоны — в
+[docs/integrations.md](integrations.md#gitlab-универсальный-приёмник-событий).
+
+| Поле | Описание |
+|---|---|
+| `secret` / `secret_token` | Ожидаемое значение заголовка `X-Gitlab-Token`. Ссылка `literal` / `env:VAR` / `vault:path#key`. Обязательно. |
+| `default_chat_id` | UUID или алиас чата по умолчанию (должен существовать в `chats`). |
+| `events.only` | Allowlist event-ключей. Запись матчит полный `kind.subtype`, голый `kind` или `kind.*`. Пустой → пропускать всё. |
+| `events.exclude` | Denylist event-ключей (та же грануляция). Всегда выигрывает над `only`. |
+| `templates` | Мапа `event-ключ → inline Go-шаблон`. Переопределяет встроенные дефолты. |
+| `template_files` | Мапа `event-ключ → путь к файлу шаблона`. Один ключ нельзя задать и в `templates`, и в `template_files`. |
+| `error_events` | Список event-ключей, доставляемых с `notification.status=error` (та же грануляция матчинга). |
+| `routes` | Опциональный упорядоченный список правил роутинга. Событие уходит в чаты **всех** совпавших правил (объединение+дедуп), `stop:true` обрывает перебор. Каждое правило: `match` (селектор → паттерны glob/`/regex/`; `event` — по event-ключу), `chats` (непустой список алиасов/UUID), `stop`. Без секции — прежнее поведение (один чат). Подробнее и приоритет чатов — в [docs/integrations.md](integrations.md#роутинг-событий-по-чатам-routes). |
 
 ## Переменные окружения
 
@@ -185,6 +220,7 @@ express-botx config chat list                             # покажет (defa
 Приоритет выбора чата в HTTP-сервере:
 - `/send`: `chat_id` из запроса → чат по умолчанию → ошибка
 - `/alertmanager`, `/grafana`: `?chat_id=` → `default_chat_id` из конфига вебхука → чат по умолчанию → единственный чат → ошибка
+- `/gitlab`: `?chat_id=` → `routes` (все совпавшие правила, объединение+дедуп) → `default_chat_id` → чат по умолчанию → единственный чат → `200 {ignored}`
 
 ## Формат host
 

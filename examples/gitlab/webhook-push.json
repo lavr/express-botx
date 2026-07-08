@@ -1,0 +1,19 @@
+{
+  "object_kind": "push",
+  "user_name": "Jane Developer",
+  "user_username": "jane",
+  "ref": "refs/heads/feature/rate-limit",
+  "project": {
+    "name": "backend",
+    "path_with_namespace": "team/backend",
+    "web_url": "https://gitlab.company.ru/team/backend"
+  },
+  "commits": [
+    {
+      "id": "0f1e2d3c4b5a69788796a5b4c3d2e1f0",
+      "message": "Add rate limiting to API\n",
+      "url": "https://gitlab.company.ru/team/backend/-/commit/0f1e2d3c"
+    }
+  ],
+  "total_commits_count": 1
+}

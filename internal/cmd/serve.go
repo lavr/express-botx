@@ -303,6 +303,21 @@ Options:
 	}
 	srvOpts = append(srvOpts, server.WithGrafana(grCfg))
 
+	// GitLab endpoint (only enabled when configured — it needs a secret token)
+	if gl := cfg.Server.Gitlab; gl != nil {
+		gitCfg, err := buildGitlabConfig(gl, cfg.ConfigPath())
+		if err != nil {
+			return err
+		}
+		if gitCfg.DefaultChatID == "" && len(cfg.Chats) == 1 {
+			for alias := range cfg.Chats {
+				gitCfg.FallbackChatID = alias
+				vlog.V1("gitlab: using single chat alias %q as fallback", alias)
+			}
+		}
+		srvOpts = append(srvOpts, server.WithGitlab(gitCfg))
+	}
+
 	// Callback endpoints
 	if cb := cfg.Server.Callbacks; cb != nil && len(cb.Rules) > 0 {
 		if err := cb.Validate(); err != nil {
@@ -463,6 +478,80 @@ func buildGrafanaConfig(gr *config.GrafanaYAMLConfig, configPath string) (*serve
 		DefaultChatID: gr.DefaultChatID,
 		ErrorStates:   states,
 		Template:      tmpl,
+	}, nil
+}
+
+func buildGitlabConfig(gl *config.GitlabYAMLConfig, configPath string) (*server.GitlabConfig, error) {
+	// Reject invalid event-key syntax and templates/template_files overlaps that
+	// offline `validate` would catch but LoadForServe does not run.
+	if err := gl.ValidateForServe(); err != nil {
+		return nil, fmt.Errorf("gitlab: %w", err)
+	}
+
+	// Resolve the shared secret token (accepts literal, env:, vault:). The
+	// `secret` key takes precedence over the `secret_token` alias.
+	tokenRef := gl.Secret
+	if tokenRef == "" {
+		tokenRef = gl.SecretToken
+	}
+	if tokenRef == "" {
+		return nil, fmt.Errorf("gitlab: secret token is required (set server.gitlab.secret)")
+	}
+	secretToken, err := secret.Resolve(tokenRef)
+	if err != nil {
+		return nil, fmt.Errorf("resolving gitlab secret: %w", err)
+	}
+	if secretToken == "" {
+		// A reference (e.g. vault:path#key) can resolve to an empty value.
+		// Fail startup rather than register an endpoint that rejects every
+		// request with 401.
+		return nil, fmt.Errorf("gitlab: resolved secret token is empty")
+	}
+
+	// Build the template registry. Start from the inline `templates` map, then
+	// overlay `template_files` (read from disk). Config validation guarantees a
+	// given key is not present in both. Built-in defaults are added by
+	// ParseGitlabTemplates for keys not overridden here.
+	inline := map[string]string{}
+	for k, v := range gl.Templates {
+		inline[k] = v
+	}
+	for k, p := range gl.TemplateFiles {
+		path := p
+		if !filepath.IsAbs(path) && configPath != "" {
+			path = filepath.Join(filepath.Dir(configPath), path)
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return nil, fmt.Errorf("reading gitlab template %s: %w", path, err)
+		}
+		inline[k] = string(data)
+		vlog.V1("gitlab: loaded template %q from %s", k, path)
+	}
+
+	tmpls, err := server.ParseGitlabTemplates(inline)
+	if err != nil {
+		return nil, err
+	}
+
+	// Compile routing rules (glob/regex/event patterns) up front so a malformed
+	// pattern fails startup rather than every matching request.
+	routes, err := server.CompileGitlabRoutes(gl.Routes)
+	if err != nil {
+		return nil, fmt.Errorf("gitlab routes: %w", err)
+	}
+	if len(routes) > 0 {
+		vlog.V1("gitlab: compiled %d routing rule(s)", len(routes))
+	}
+
+	return &server.GitlabConfig{
+		DefaultChatID: gl.DefaultChatID,
+		SecretToken:   secretToken,
+		Templates:     tmpls,
+		Only:          gl.Events.Only,
+		Exclude:       gl.Events.Exclude,
+		ErrorEvents:   gl.ErrorEvents,
+		Routes:        routes,
 	}, nil
 }
 

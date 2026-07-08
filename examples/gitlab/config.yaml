@@ -1,0 +1,64 @@
+# Example config for the universal GitLab webhook endpoint (/api/v1/gitlab).
+#
+# The endpoint is enabled ONLY when the `server.gitlab` section is present
+# (unlike alertmanager/grafana, which are on by default) because it requires
+# a secret token. Fields with "env:X" / "vault:path#key" are resolved at startup.
+#
+# It accepts ANY GitLab group/project event: the payload is decoded generically
+# and reduced to an event key ("kind" or "kind.subtype"), then filtered and
+# rendered by a per-event template registry (with built-in defaults + a generic
+# fallback). Adding a new event type needs no code changes.
+
+bots:
+  mybot:
+    host: "env:BOT_HOST"
+    id: "env:BOT_ID"
+    secret: "env:BOT_SECRET"
+
+chats:
+  dev:
+    id: "env:DEV_CHAT_ID"
+    bot: mybot
+    default: true
+
+server:
+  listen: ":8080"
+  base_path: /api/v1
+  gitlab:
+    # Compared against the X-Gitlab-Token header sent by GitLab.
+    # Set the same value as the webhook's "Secret token" in GitLab.
+    secret: "env:GITLAB_WEBHOOK_TOKEN"
+    default_chat_id: dev
+
+    # Event filter. Each entry matches a full key ("kind.subtype"), a bare kind
+    # (all subtypes), or a "kind.*" wildcard. `only` empty admits everything;
+    # `exclude` always wins. Filtered-out events return 200 {"ignored":true}.
+    events:
+      only:
+        - "merge_request.*"   # any MR action
+        - "note.MergeRequest" # comments on MRs
+        - "push"
+        - "tag_push"
+        - "pipeline.failed"
+        - "build.failed"       # failed jobs (delivered as status=error below)
+        - "issue.*"
+      exclude:
+        - "merge_request.update"
+
+    # Override built-in templates per event key (inline). Variables:
+    #   .Kind .Action .EventKey .Project .User .Title .URL .Raw
+    # Helpers: get (dotted path in .Raw), default.
+    templates:
+      "merge_request.open": "🆕 MR [{{ .Project }}]: {{ .Title }}\n  Автор: {{ .User }}\n{{ .URL }}"
+      "pipeline": "🚦 Pipeline [{{ .Project }}]: {{ .Action }}{{ with get .Raw \"object_attributes.ref\" }}\n  Ветка: {{ . }}{{ end }}\n{{ .URL }}"
+
+    # Or load a template from a file (a key may be in templates OR template_files,
+    # not both):
+    # template_files:
+    #   "default": ./gitlab-default.tmpl
+
+    # Events delivered with BotX notification.status=error (visually distinct in
+    # eXpress). Same matching rules as the filter.
+    error_events:
+      - "pipeline.failed"
+      - "build.failed"
