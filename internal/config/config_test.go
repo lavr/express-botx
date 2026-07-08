@@ -3168,3 +3168,215 @@ func TestValidate_GitlabRoutesKnownKeys(t *testing.T) {
 		t.Error("expected unknown-key warning for misspelled rule key \"stopp\"")
 	}
 }
+
+// gitlabSendersYAML wraps a server.gitlab YAML body in a minimal valid config
+// with one bot and two chat aliases.
+func gitlabSendersYAML(gitlabBody string) []byte {
+	return []byte(`
+bots:
+  main:
+    host: h
+    id: 00000000-0000-0000-0000-000000000001
+    secret: s
+chats:
+  alerts:
+    id: 00000000-0000-0000-0000-000000000003
+  releases:
+    id: 00000000-0000-0000-0000-000000000004
+server:
+  gitlab:` + gitlabBody + "\n")
+}
+
+func TestValidate_GitlabSenders(t *testing.T) {
+	tests := []struct {
+		name       string
+		gitlabBody string
+		wantErr    bool
+		wantPath   string // exact path expected on an error (when wantErr)
+		wantMsg    string // substring expected in the error message (when wantErr)
+	}{
+		{
+			name: "valid single-tenant with only secret",
+			gitlabBody: `
+    secret: tok`,
+			wantErr: false,
+		},
+		{
+			name: "valid senders without default secret",
+			gitlabBody: `
+    senders:
+      - secret: env:TEAM_A_TOKEN
+        chats: ["alerts"]
+      - secret_token: env:TEAM_B_TOKEN
+        chats: ["releases", "00000000-0000-0000-0000-000000000009"]`,
+			wantErr: false,
+		},
+		{
+			name: "valid mixed default secret and senders",
+			gitlabBody: `
+    secret: tok
+    default_chat_id: alerts
+    senders:
+      - secret: env:TEAM_A_TOKEN
+        chats: ["releases"]`,
+			wantErr: false,
+		},
+		{
+			name: "sender without secret",
+			gitlabBody: `
+    senders:
+      - chats: ["alerts"]`,
+			wantErr:  true,
+			wantPath: "server.gitlab.senders[0].secret",
+			wantMsg:  "secret or secret_token is required",
+		},
+		{
+			name: "sender with empty chats",
+			gitlabBody: `
+    senders:
+      - secret: env:TEAM_A_TOKEN
+        chats: []`,
+			wantErr:  true,
+			wantPath: "server.gitlab.senders[0].chats",
+			wantMsg:  "chats must not be empty",
+		},
+		{
+			name: "sender chat references unknown alias",
+			gitlabBody: `
+    senders:
+      - secret: env:TEAM_A_TOKEN
+        chats: ["alerts", "nope"]`,
+			wantErr:  true,
+			wantPath: "server.gitlab.senders[0].chats[1]",
+			wantMsg:  "unknown chat alias",
+		},
+		{
+			name: "neither secret nor senders",
+			gitlabBody: `
+    default_chat_id: alerts`,
+			wantErr:  true,
+			wantPath: "server.gitlab.secret",
+			wantMsg:  "secret, secret_token, or senders is required",
+		},
+		// Byte-identical config strings are detectable offline: the same literal
+		// or the same env:/vault: reference repeated is a guaranteed duplicate.
+		// Distinct references resolving to one value are only comparable after
+		// resolution, which happens at serve startup.
+		{
+			name: "duplicate literal sender tokens",
+			gitlabBody: `
+    senders:
+      - secret: same-tok
+        chats: ["alerts"]
+      - secret: same-tok
+        chats: ["releases"]`,
+			wantErr:  true,
+			wantPath: "server.gitlab.senders[1].secret",
+			wantMsg:  "duplicates the token value of server.gitlab.senders[0]",
+		},
+		{
+			name: "sender token duplicates literal default secret",
+			gitlabBody: `
+    secret: same-tok
+    senders:
+      - secret_token: same-tok
+        chats: ["alerts"]`,
+			wantErr:  true,
+			wantPath: "server.gitlab.senders[0].secret",
+			wantMsg:  "duplicates the token value of server.gitlab.secret",
+		},
+		{
+			name: "sender token duplicates default secret_token alias",
+			gitlabBody: `
+    secret_token: same-tok
+    senders:
+      - secret: same-tok
+        chats: ["alerts"]`,
+			wantErr:  true,
+			wantPath: "server.gitlab.senders[0].secret",
+			wantMsg:  "duplicates the token value of server.gitlab.secret",
+		},
+		{
+			name: "duplicate identical secret references",
+			gitlabBody: `
+    senders:
+      - secret: env:TEAM_A_TOKEN
+        chats: ["alerts"]
+      - secret: env:TEAM_A_TOKEN
+        chats: ["releases"]`,
+			wantErr:  true,
+			wantPath: "server.gitlab.senders[1].secret",
+			wantMsg:  "duplicates the token value of server.gitlab.senders[0]",
+		},
+		{
+			name: "sender reference duplicates default secret reference",
+			gitlabBody: `
+    secret: env:GITLAB_WEBHOOK_TOKEN
+    senders:
+      - secret: env:GITLAB_WEBHOOK_TOKEN
+        chats: ["alerts"]`,
+			wantErr:  true,
+			wantPath: "server.gitlab.senders[0].secret",
+			wantMsg:  "duplicates the token value of server.gitlab.secret",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			rawYAML := gitlabSendersYAML(tc.gitlabBody)
+			var cfg Config
+			if err := yaml.Unmarshal(rawYAML, &cfg); err != nil {
+				t.Fatalf("unmarshal: %v", err)
+			}
+			results := cfg.Validate(rawYAML)
+
+			var gotErr, gotMatch bool
+			for _, r := range results {
+				if r.Level == ValidationError && strings.HasPrefix(r.Path, "server.gitlab") {
+					gotErr = true
+					if r.Path == tc.wantPath && strings.Contains(r.Message, tc.wantMsg) {
+						gotMatch = true
+					}
+				}
+				// secret/secret_token/chats must be registered in knownKeys, so no
+				// unknown-key warnings should surface for the senders block.
+				if r.Level == ValidationWarning && strings.Contains(r.Message, "unknown key") &&
+					strings.HasPrefix(r.Path, "server.gitlab.senders") {
+					t.Errorf("unexpected unknown-key warning: %s: %s", r.Path, r.Message)
+				}
+			}
+			if gotErr != tc.wantErr {
+				t.Errorf("gitlab error present = %v, want %v; results: %+v", gotErr, tc.wantErr, results)
+			}
+			if tc.wantErr && !gotMatch {
+				t.Errorf("expected error at %q containing %q; results: %+v", tc.wantPath, tc.wantMsg, results)
+			}
+		})
+	}
+}
+
+// A misspelled key inside a sender entry must surface as an unknown-key
+// warning. This is the positive counterpart of the no-warnings assertion in
+// TestValidate_GitlabSenders: it fails if the "server.gitlab.senders.*"
+// knownKeys registration is dropped or its path misspelled (sequence items
+// would then silently skip key checking entirely).
+func TestValidate_GitlabSendersKnownKeys(t *testing.T) {
+	rawYAML := gitlabSendersYAML(`
+    senders:
+      - secret: tok
+        chatz: ["alerts"]`)
+	var cfg Config
+	if err := yaml.Unmarshal(rawYAML, &cfg); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	found := false
+	for _, r := range cfg.Validate(rawYAML) {
+		if r.Level == ValidationWarning && strings.Contains(r.Message, "unknown key") &&
+			strings.Contains(r.Path, "chatz") {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("expected unknown-key warning for misspelled sender key \"chatz\"")
+	}
+}

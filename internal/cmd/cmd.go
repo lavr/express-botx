@@ -211,7 +211,6 @@ func refreshToken(cfg *config.Config, cache token.Cache) (string, error) {
 	return tok, nil
 }
 
-
 func newCache(cfg config.CacheConfig) token.Cache {
 	switch cfg.Type {
 	case "file":

@@ -1,0 +1,68 @@
+# Example config for the universal GitLab webhook endpoint (/api/v1/gitlab)
+# with per-sender tokens (`server.gitlab.senders`) — team isolation.
+#
+# Several teams share one endpoint, each with its OWN X-Gitlab-Token bound to
+# its own chats. An event authenticated with a sender token is delivered ONLY
+# to that sender's chats: ?chat_id=, routes and default_chat_id are ignored
+# for it, so team A cannot post into team B's chats even on purpose. The
+# global events filter, templates and error_events still apply.
+#
+# The default `secret` stays fully functional (mixed mode): webhooks using it
+# keep the ordinary behaviour (?chat_id -> routes -> default_chat_id -> ...).
+# It may also be omitted entirely — then only the sender tokens authenticate.
+# At least one of `secret` / `senders` is required (the endpoint must not be
+# left without auth). Duplicate resolved token values (sender vs sender, or
+# sender vs the default secret) fail at startup.
+#
+# Token values are secret references (env:/vault:), so the shared YAML holds
+# only references and teams never see each other's secrets.
+
+bots:
+  mybot:
+    host: "env:BOT_HOST"
+    id: "env:BOT_ID"
+    secret: "env:BOT_SECRET"
+
+chats:
+  dev:
+    id: "env:DEV_CHAT_ID"
+    bot: mybot
+    default: true
+  team-a:
+    id: "env:TEAM_A_CHAT_ID"
+    bot: mybot
+  team-b:
+    id: "env:TEAM_B_CHAT_ID"
+    bot: mybot
+  team-b-alerts:
+    id: "env:TEAM_B_ALERTS_CHAT_ID"
+    bot: mybot
+
+server:
+  listen: ":8080"
+  base_path: /api/v1
+  gitlab:
+    # Shared default token — small teams keep using it as before.
+    secret: "env:GITLAB_WEBHOOK_TOKEN"
+    default_chat_id: dev
+
+    # Isolated per-team tokens. Each team sets its own value as the webhook's
+    # "Secret token" in GitLab; events for that token go only to its chats.
+    senders:
+      - secret: "env:TEAM_A_GITLAB_TOKEN"
+        chats: [team-a]
+      - secret: "env:TEAM_B_GITLAB_TOKEN"
+        chats: [team-b, team-b-alerts]   # fan-out to both, best-effort
+
+    # Global filter/templates/error_events apply to sender events too.
+    events:
+      only:
+        - "merge_request.*"
+        - "pipeline.failed"
+        - "build.failed"
+        - "push"
+      exclude:
+        - "merge_request.update"
+    error_events:
+      - "pipeline.failed"
+      - "build.failed"

@@ -16,7 +16,7 @@ func TestBuildGitlabConfig_DefaultTemplate(t *testing.T) {
 		DefaultChatID: "alerts",
 		Secret:        "s3cr3t",
 	}
-	cfg, err := buildGitlabConfig(gl, "")
+	cfg, err := buildGitlabConfig(gl, "", nil, false)
 	if err != nil {
 		t.Fatalf("buildGitlabConfig: %v", err)
 	}
@@ -54,7 +54,7 @@ func TestBuildGitlabConfig_InlineTemplate(t *testing.T) {
 		Secret:    "tok",
 		Templates: map[string]string{"default": "custom {{ .Event }}"},
 	}
-	cfg, err := buildGitlabConfig(gl, "")
+	cfg, err := buildGitlabConfig(gl, "", nil, false)
 	if err != nil {
 		t.Fatalf("buildGitlabConfig: %v", err)
 	}
@@ -76,7 +76,7 @@ func TestBuildGitlabConfig_TemplateFile(t *testing.T) {
 		Secret:        "tok",
 		TemplateFiles: map[string]string{"default": "gitlab.tmpl"}, // relative to config path dir
 	}
-	cfg, err := buildGitlabConfig(gl, configPath)
+	cfg, err := buildGitlabConfig(gl, configPath, nil, false)
 	if err != nil {
 		t.Fatalf("buildGitlabConfig: %v", err)
 	}
@@ -90,7 +90,7 @@ func TestBuildGitlabConfig_SecretTokenAlias(t *testing.T) {
 	gl := &config.GitlabYAMLConfig{
 		SecretToken: "aliased",
 	}
-	cfg, err := buildGitlabConfig(gl, "")
+	cfg, err := buildGitlabConfig(gl, "", nil, false)
 	if err != nil {
 		t.Fatalf("buildGitlabConfig: %v", err)
 	}
@@ -104,7 +104,7 @@ func TestBuildGitlabConfig_SecretResolvedFromEnv(t *testing.T) {
 	gl := &config.GitlabYAMLConfig{
 		Secret: "env:GITLAB_TEST_TOKEN",
 	}
-	cfg, err := buildGitlabConfig(gl, "")
+	cfg, err := buildGitlabConfig(gl, "", nil, false)
 	if err != nil {
 		t.Fatalf("buildGitlabConfig: %v", err)
 	}
@@ -117,7 +117,7 @@ func TestBuildGitlabConfig_MissingSecret(t *testing.T) {
 	gl := &config.GitlabYAMLConfig{
 		DefaultChatID: "alerts",
 	}
-	if _, err := buildGitlabConfig(gl, ""); err == nil {
+	if _, err := buildGitlabConfig(gl, "", nil, false); err == nil {
 		t.Fatal("expected error for missing secret token")
 	}
 }
@@ -128,7 +128,7 @@ func TestBuildGitlabConfig_SecretResolveError(t *testing.T) {
 	gl := &config.GitlabYAMLConfig{
 		Secret: "env:GITLAB_DEFINITELY_UNSET_TOKEN_XYZ",
 	}
-	if _, err := buildGitlabConfig(gl, ""); err == nil {
+	if _, err := buildGitlabConfig(gl, "", nil, false); err == nil {
 		t.Fatal("expected error when secret reference cannot be resolved")
 	}
 }
@@ -154,7 +154,7 @@ func TestBuildGitlabConfig_RejectsInvalidConfig(t *testing.T) {
 	}
 	for name, gl := range cases {
 		t.Run(name, func(t *testing.T) {
-			if _, err := buildGitlabConfig(gl, ""); err == nil {
+			if _, err := buildGitlabConfig(gl, "", nil, false); err == nil {
 				t.Fatalf("expected validation error for %s", name)
 			}
 		})
@@ -170,7 +170,7 @@ func TestBuildGitlabConfig_FiltersAndErrorEvents(t *testing.T) {
 		},
 		ErrorEvents: []string{"pipeline.failed", "build.failed"},
 	}
-	cfg, err := buildGitlabConfig(gl, "")
+	cfg, err := buildGitlabConfig(gl, "", nil, false)
 	if err != nil {
 		t.Fatalf("buildGitlabConfig: %v", err)
 	}
@@ -207,7 +207,7 @@ func TestBuildGitlabConfig_CompilesRoutes(t *testing.T) {
 			},
 		},
 	}
-	cfg, err := buildGitlabConfig(gl, "")
+	cfg, err := buildGitlabConfig(gl, "", nil, false)
 	if err != nil {
 		t.Fatalf("buildGitlabConfig: %v", err)
 	}
@@ -229,7 +229,7 @@ func TestBuildGitlabConfig_RejectsInvalidRouteRegex(t *testing.T) {
 			},
 		},
 	}
-	if _, err := buildGitlabConfig(gl, ""); err == nil {
+	if _, err := buildGitlabConfig(gl, "", nil, false); err == nil {
 		t.Fatal("expected error for invalid route regex")
 	}
 }
@@ -239,8 +239,311 @@ func TestBuildGitlabConfig_MissingTemplateFile(t *testing.T) {
 		Secret:        "tok",
 		TemplateFiles: map[string]string{"default": "/nonexistent/does-not-exist.tmpl"},
 	}
-	if _, err := buildGitlabConfig(gl, ""); err == nil {
+	if _, err := buildGitlabConfig(gl, "", nil, false); err == nil {
 		t.Fatal("expected error for missing template file")
+	}
+}
+
+// gitlabTestChats builds a chats map with the given aliases, standing in for
+// the config's chats section in sender tests (values are irrelevant here).
+func gitlabTestChats(aliases ...string) map[string]config.ChatConfig {
+	m := map[string]config.ChatConfig{}
+	for _, a := range aliases {
+		m[a] = config.ChatConfig{}
+	}
+	return m
+}
+
+// gitlabTestChatsWithBot builds a chats map where every alias is bound to bot.
+func gitlabTestChatsWithBot(bot string, aliases ...string) map[string]config.ChatConfig {
+	m := map[string]config.ChatConfig{}
+	for _, a := range aliases {
+		m[a] = config.ChatConfig{Bot: bot}
+	}
+	return m
+}
+
+func TestBuildGitlabConfig_Senders(t *testing.T) {
+	t.Setenv("GITLAB_TEAM_B_TOKEN", "tok-b-resolved")
+	gl := &config.GitlabYAMLConfig{
+		Secret: "default-tok",
+		Senders: []config.GitlabSenderYAMLConfig{
+			{Secret: "tok-a", Chats: []string{"team-a", "team-a-alerts"}},
+			{SecretToken: "env:GITLAB_TEAM_B_TOKEN", Chats: []string{"team-b"}},
+		},
+	}
+	cfg, err := buildGitlabConfig(gl, "", gitlabTestChats("team-a", "team-a-alerts", "team-b"), false)
+	if err != nil {
+		t.Fatalf("buildGitlabConfig: %v", err)
+	}
+	if cfg.SecretToken != "default-tok" {
+		t.Errorf("SecretToken = %q, want default-tok", cfg.SecretToken)
+	}
+	want := []server.GitlabSender{
+		{Secret: "tok-a", Chats: []string{"team-a", "team-a-alerts"}},
+		{Secret: "tok-b-resolved", Chats: []string{"team-b"}},
+	}
+	if !reflect.DeepEqual(cfg.Senders, want) {
+		t.Errorf("Senders = %+v, want %+v", cfg.Senders, want)
+	}
+}
+
+// Senders-only mode: the default secret is optional when at least one sender
+// is configured; the built config carries an empty SecretToken (which never
+// authenticates) and the sender scopes.
+func TestBuildGitlabConfig_SendersWithoutDefaultSecret(t *testing.T) {
+	gl := &config.GitlabYAMLConfig{
+		Senders: []config.GitlabSenderYAMLConfig{
+			{Secret: "tok-a", Chats: []string{"team-a"}},
+		},
+	}
+	cfg, err := buildGitlabConfig(gl, "", gitlabTestChats("team-a"), false)
+	if err != nil {
+		t.Fatalf("buildGitlabConfig: %v", err)
+	}
+	if cfg.SecretToken != "" {
+		t.Errorf("SecretToken = %q, want empty", cfg.SecretToken)
+	}
+	if len(cfg.Senders) != 1 || cfg.Senders[0].Secret != "tok-a" {
+		t.Errorf("Senders = %+v", cfg.Senders)
+	}
+}
+
+// Duplicate resolved token values make authentication ambiguous (which chat
+// scope wins?), so startup must fail. The comparison is on resolved values:
+// a literal and an env: reference that expand to the same string clash too.
+// The error must attribute the clash to the entry that already owns the value
+// (default secret or an earlier sender) so the operator knows which two of N
+// team tokens collided.
+func TestBuildGitlabConfig_DuplicateSenderTokens(t *testing.T) {
+	t.Setenv("GITLAB_DUP_TOKEN", "same-tok")
+	cases := map[string]struct {
+		gl        *config.GitlabYAMLConfig
+		wantOwner string
+	}{
+		"sender vs sender": {
+			gl: &config.GitlabYAMLConfig{
+				Secret: "default-tok",
+				Senders: []config.GitlabSenderYAMLConfig{
+					{Secret: "same-tok", Chats: []string{"team-a"}},
+					{Secret: "same-tok", Chats: []string{"team-b"}},
+				},
+			},
+			wantOwner: "server.gitlab.senders[0]",
+		},
+		"sender vs sender via env": {
+			gl: &config.GitlabYAMLConfig{
+				Senders: []config.GitlabSenderYAMLConfig{
+					{Secret: "same-tok", Chats: []string{"team-a"}},
+					{Secret: "env:GITLAB_DUP_TOKEN", Chats: []string{"team-b"}},
+				},
+			},
+			wantOwner: "server.gitlab.senders[0]",
+		},
+		"sender vs default": {
+			gl: &config.GitlabYAMLConfig{
+				Secret: "same-tok",
+				Senders: []config.GitlabSenderYAMLConfig{
+					{Secret: "same-tok", Chats: []string{"team-a"}},
+				},
+			},
+			wantOwner: "server.gitlab.secret",
+		},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			_, err := buildGitlabConfig(tc.gl, "", gitlabTestChats("team-a", "team-b"), false)
+			if err == nil {
+				t.Fatal("expected duplicate-token error")
+			}
+			if !strings.Contains(err.Error(), "same value as "+tc.wantOwner) {
+				t.Errorf("error = %v, want duplicate of %s", err, tc.wantOwner)
+			}
+		})
+	}
+}
+
+// The serve path does not run the full Config.Validate, so buildGitlabConfig
+// must reject broken senders itself: a sender without a secret, with an
+// unresolvable secret reference, with no chats, or with a chat alias that does
+// not exist in the chats section. (The "resolved secret is empty" guard is not
+// coverable here: env: references error on empty values, so only a vault:
+// reference can resolve to an empty string.)
+func TestBuildGitlabConfig_RejectsInvalidSenders(t *testing.T) {
+	t.Setenv("GITLAB_EMPTY_TOKEN", "")
+	cases := map[string]struct {
+		gl      *config.GitlabYAMLConfig
+		wantErr string
+	}{
+		"sender without secret": {
+			gl: &config.GitlabYAMLConfig{
+				Senders: []config.GitlabSenderYAMLConfig{
+					{Chats: []string{"team-a"}},
+				},
+			},
+			wantErr: "secret is required",
+		},
+		"sender secret env var unset": {
+			gl: &config.GitlabYAMLConfig{
+				Senders: []config.GitlabSenderYAMLConfig{
+					{Secret: "env:GITLAB_DEFINITELY_UNSET_TOKEN_XYZ", Chats: []string{"team-a"}},
+				},
+			},
+			wantErr: "is empty or not set",
+		},
+		"sender secret env var empty": {
+			gl: &config.GitlabYAMLConfig{
+				Senders: []config.GitlabSenderYAMLConfig{
+					{Secret: "env:GITLAB_EMPTY_TOKEN", Chats: []string{"team-a"}},
+				},
+			},
+			wantErr: "is empty or not set",
+		},
+		"sender without chats": {
+			gl: &config.GitlabYAMLConfig{
+				Senders: []config.GitlabSenderYAMLConfig{
+					{Secret: "tok-a"},
+				},
+			},
+			wantErr: "chats must not be empty",
+		},
+		// Pins the check order: chats are validated before the secret is
+		// resolved, so a broken secret reference (a vault: round-trip in real
+		// deployments) cannot mask the simpler chats misconfiguration.
+		"sender missing chats with unresolvable secret": {
+			gl: &config.GitlabYAMLConfig{
+				Senders: []config.GitlabSenderYAMLConfig{
+					{Secret: "env:GITLAB_DEFINITELY_UNSET_TOKEN_XYZ"},
+				},
+			},
+			wantErr: "chats must not be empty",
+		},
+		"sender chat references unknown alias": {
+			gl: &config.GitlabYAMLConfig{
+				Senders: []config.GitlabSenderYAMLConfig{
+					{Secret: "tok-a", Chats: []string{"team-a", "no-such-chat"}},
+				},
+			},
+			wantErr: `unknown chat alias "no-such-chat"`,
+		},
+	}
+	for name, tc := range cases {
+		t.Run(name, func(t *testing.T) {
+			_, err := buildGitlabConfig(tc.gl, "", gitlabTestChats("team-a"), false)
+			if err == nil {
+				t.Fatalf("expected error for %s", name)
+			}
+			if !strings.Contains(err.Error(), tc.wantErr) {
+				t.Errorf("error = %v, want substring %q", err, tc.wantErr)
+			}
+		})
+	}
+}
+
+// Sender chats accept raw UUIDs without a matching alias entry, mirroring how
+// default_chat_id and route chats are validated.
+func TestBuildGitlabConfig_SenderChatUUIDPassesWithoutAlias(t *testing.T) {
+	gl := &config.GitlabYAMLConfig{
+		Senders: []config.GitlabSenderYAMLConfig{
+			{Secret: "tok-a", Chats: []string{"00000000-0000-0000-0000-000000000042"}},
+		},
+	}
+	cfg, err := buildGitlabConfig(gl, "", nil, false)
+	if err != nil {
+		t.Fatalf("buildGitlabConfig: %v", err)
+	}
+	if len(cfg.Senders) != 1 || len(cfg.Senders[0].Chats) != 1 {
+		t.Errorf("Senders = %+v, want single sender with the UUID chat", cfg.Senders)
+	}
+}
+
+// In multi-bot mode a sender request always passes requestBot="" (?bot= is
+// ignored to stop a sender picking another bot's identity), so the only way a
+// delivery can get a bot is a binding on the chat itself. A raw UUID sender
+// chat has no such binding and would fail every delivery at runtime with "bot
+// is required" — buildGitlabConfig must reject it at startup instead.
+func TestBuildGitlabConfig_MultiBot_RejectsUUIDSenderChat(t *testing.T) {
+	gl := &config.GitlabYAMLConfig{
+		Senders: []config.GitlabSenderYAMLConfig{
+			{Secret: "tok-a", Chats: []string{"00000000-0000-0000-0000-000000000042"}},
+		},
+	}
+	_, err := buildGitlabConfig(gl, "", nil, true)
+	if err == nil {
+		t.Fatal("expected error for raw UUID sender chat in multi-bot mode")
+	}
+	if !strings.Contains(err.Error(), "raw chat UUID") {
+		t.Errorf("error = %v, want mention of raw chat UUID", err)
+	}
+}
+
+// Same as above, but for a chat alias that exists yet carries no `bot:`
+// binding — still unreachable for sender deliveries in multi-bot mode.
+func TestBuildGitlabConfig_MultiBot_RejectsUnboundSenderAlias(t *testing.T) {
+	gl := &config.GitlabYAMLConfig{
+		Senders: []config.GitlabSenderYAMLConfig{
+			{Secret: "tok-a", Chats: []string{"team-a"}},
+		},
+	}
+	_, err := buildGitlabConfig(gl, "", gitlabTestChats("team-a"), true)
+	if err == nil {
+		t.Fatal("expected error for unbound sender chat alias in multi-bot mode")
+	}
+	if !strings.Contains(err.Error(), "no bot binding") {
+		t.Errorf("error = %v, want mention of missing bot binding", err)
+	}
+}
+
+// A sender chat alias bound to a bot resolves fine in multi-bot mode: the
+// binding is the only source of a bot for that delivery.
+func TestBuildGitlabConfig_MultiBot_AcceptsBoundSenderAlias(t *testing.T) {
+	gl := &config.GitlabYAMLConfig{
+		Senders: []config.GitlabSenderYAMLConfig{
+			{Secret: "tok-a", Chats: []string{"team-a"}},
+		},
+	}
+	cfg, err := buildGitlabConfig(gl, "", gitlabTestChatsWithBot("bot-a", "team-a"), true)
+	if err != nil {
+		t.Fatalf("buildGitlabConfig: %v", err)
+	}
+	if len(cfg.Senders) != 1 || len(cfg.Senders[0].Chats) != 1 || cfg.Senders[0].Chats[0] != "team-a" {
+		t.Errorf("Senders = %+v", cfg.Senders)
+	}
+}
+
+// Duplicate chat entries within one sender would deliver the same event twice;
+// buildGitlabConfig de-duplicates them preserving order (mirroring the
+// union+dedup semantics of the routes path).
+func TestBuildGitlabConfig_SenderChatsDeduplicated(t *testing.T) {
+	gl := &config.GitlabYAMLConfig{
+		Senders: []config.GitlabSenderYAMLConfig{
+			{Secret: "tok-a", Chats: []string{"team-a", "team-a", "team-a-alerts", "team-a"}},
+		},
+	}
+	cfg, err := buildGitlabConfig(gl, "", gitlabTestChats("team-a", "team-a-alerts"), false)
+	if err != nil {
+		t.Fatalf("buildGitlabConfig: %v", err)
+	}
+	want := []string{"team-a", "team-a-alerts"}
+	if !reflect.DeepEqual(cfg.Senders[0].Chats, want) {
+		t.Errorf("Chats = %v, want %v", cfg.Senders[0].Chats, want)
+	}
+}
+
+// Within a sender entry, `secret` takes precedence over the `secret_token`
+// alias, mirroring the top-level rule.
+func TestBuildGitlabConfig_SenderSecretPrecedence(t *testing.T) {
+	gl := &config.GitlabYAMLConfig{
+		Senders: []config.GitlabSenderYAMLConfig{
+			{Secret: "primary", SecretToken: "aliased", Chats: []string{"team-a"}},
+		},
+	}
+	cfg, err := buildGitlabConfig(gl, "", gitlabTestChats("team-a"), false)
+	if err != nil {
+		t.Fatalf("buildGitlabConfig: %v", err)
+	}
+	if got := cfg.Senders[0].Secret; got != "primary" {
+		t.Errorf("Secret = %q, want primary (secret wins over secret_token)", got)
 	}
 }
 

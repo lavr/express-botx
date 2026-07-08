@@ -82,6 +82,11 @@ server:
           branch:  ["main", "release/*"]
         chats: [backend-mrs, releases]    # совпало → в оба чата (объединение+дедуп)
         stop: true                        # совпав, оборвать перебор правил
+    senders:                              # опционально — изоляция команд по своему X-Gitlab-Token
+      - secret: env:TEAM_A_GITLAB_TOKEN   # токен команды A (literal/env:/vault:)
+        chats: [team-a]                   # события по этому токену уходят ТОЛЬКО сюда
+      - secret: env:TEAM_B_GITLAB_TOKEN
+        chats: [team-b, team-b-alerts]
 ```
 
 Секция `server.gitlab` (обязательна для включения эндпоинта `/api/v1/gitlab`).
@@ -92,7 +97,7 @@ server:
 
 | Поле | Описание |
 |---|---|
-| `secret` / `secret_token` | Ожидаемое значение заголовка `X-Gitlab-Token`. Ссылка `literal` / `env:VAR` / `vault:path#key`. Обязательно. |
+| `secret` / `secret_token` | Ожидаемое значение заголовка `X-Gitlab-Token`. Ссылка `literal` / `env:VAR` / `vault:path#key`. Обязателен `secret` **или** непустой `senders` (иначе ручка осталась бы без auth). |
 | `default_chat_id` | UUID или алиас чата по умолчанию (должен существовать в `chats`). |
 | `events.only` | Allowlist event-ключей. Запись матчит полный `kind.subtype`, голый `kind` или `kind.*`. Пустой → пропускать всё. |
 | `events.exclude` | Denylist event-ключей (та же грануляция). Всегда выигрывает над `only`. |
@@ -100,6 +105,7 @@ server:
 | `template_files` | Мапа `event-ключ → путь к файлу шаблона`. Один ключ нельзя задать и в `templates`, и в `template_files`. |
 | `error_events` | Список event-ключей, доставляемых с `notification.status=error` (та же грануляция матчинга). |
 | `routes` | Опциональный упорядоченный список правил роутинга. Событие уходит в чаты **всех** совпавших правил (объединение+дедуп), `stop:true` обрывает перебор. Каждое правило: `match` (селектор → паттерны glob/`/regex/`; `event` — по event-ключу), `chats` (непустой список алиасов/UUID), `stop`. Без секции — прежнее поведение (один чат). Подробнее и приоритет чатов — в [docs/integrations.md](integrations.md#роутинг-событий-по-чатам-routes). |
+| `senders` | Опциональный список дополнительных входящих токенов с жёсткой привязкой к чатам (изоляция команд). Каждый элемент: `secret`/`secret_token` (ссылка `literal`/`env:`/`vault:`, обязателен) и непустой `chats` (алиасы/UUID существующих чатов). Совпал sender-токен → событие уходит **только** в его `chats`; `?chat_id`, `?bot`, `routes` и `default_chat_id` игнорируются. Глобальные `events.only/exclude`, `templates` и `error_events` применяются как обычно. Дубликаты разрезолвленных токенов (sender↔sender, sender↔`secret`) — ошибка на старте. Подробнее — в [docs/integrations.md](integrations.md#изоляция-команд-senders-несколько-токенов). |
 
 ## Переменные окружения
 
@@ -220,7 +226,7 @@ express-botx config chat list                             # покажет (defa
 Приоритет выбора чата в HTTP-сервере:
 - `/send`: `chat_id` из запроса → чат по умолчанию → ошибка
 - `/alertmanager`, `/grafana`: `?chat_id=` → `default_chat_id` из конфига вебхука → чат по умолчанию → единственный чат → ошибка
-- `/gitlab`: `?chat_id=` → `routes` (все совпавшие правила, объединение+дедуп) → `default_chat_id` → чат по умолчанию → единственный чат → `200 {ignored}`
+- `/gitlab`: `?chat_id=` → `routes` (все совпавшие правила, объединение+дедуп) → `default_chat_id` → чат по умолчанию → единственный чат → `200 {ignored}`; при совпадении sender-токена (`server.gitlab.senders`) цели — всегда `chats` этого sender'а, остальное игнорируется
 
 ## Формат host
 

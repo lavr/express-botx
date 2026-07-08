@@ -573,10 +573,10 @@ func runBotRm(args []string, deps Deps) error {
 }
 
 type botTokenResult struct {
-	Name    string `json:"name,omitempty"`
-	Token   string `json:"token,omitempty"`
-	Status  string `json:"status,omitempty"`
-	Error   string `json:"error,omitempty"`
+	Name   string `json:"name,omitempty"`
+	Token  string `json:"token,omitempty"`
+	Status string `json:"status,omitempty"`
+	Error  string `json:"error,omitempty"`
 }
 
 func runBotToken(args []string, deps Deps) error {

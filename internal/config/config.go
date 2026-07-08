@@ -169,6 +169,22 @@ type GitlabYAMLConfig struct {
 	// GitlabRouteYAMLConfig). When absent, the endpoint keeps its single-chat
 	// behaviour (default_chat_id / global default).
 	Routes []GitlabRouteYAMLConfig `yaml:"routes,omitempty"`
+	// Senders is an optional list of per-team secret tokens, each scoped to its
+	// own set of chats (see GitlabSenderYAMLConfig). When at least one sender is
+	// configured, the default Secret becomes optional.
+	Senders []GitlabSenderYAMLConfig `yaml:"senders,omitempty"`
+}
+
+// GitlabSenderYAMLConfig binds one X-Gitlab-Token value to a fixed set of
+// chats. Events authenticated by this token are delivered to Chats only:
+// ?chat_id, routes, and default_chat_id do not apply, which isolates teams
+// from each other. Global event filters and templates still apply.
+type GitlabSenderYAMLConfig struct {
+	// Secret is the expected X-Gitlab-Token value. Accepts a literal, env:VAR,
+	// or vault:path#key reference. SecretToken is an alias.
+	Secret      string   `yaml:"secret,omitempty"`
+	SecretToken string   `yaml:"secret_token,omitempty"`
+	Chats       []string `yaml:"chats"`
 }
 
 // GitlabRouteYAMLConfig is a single GitLab routing rule. Match maps a selector
@@ -1053,7 +1069,10 @@ var knownKeys = map[string]map[string]bool{
 	"server.gitlab": {
 		"default_chat_id": true, "secret": true, "secret_token": true,
 		"events": true, "templates": true, "template_files": true, "error_events": true,
-		"routes": true,
+		"routes": true, "senders": true,
+	},
+	"server.gitlab.senders.*": {
+		"secret": true, "secret_token": true, "chats": true,
 	},
 	"server.gitlab.events": {
 		"only": true, "exclude": true,
@@ -1257,14 +1276,62 @@ func (c *Config) validateRequiredFields() []ValidationResult {
 	}
 
 	// The GitLab endpoint authenticates via X-Gitlab-Token, so a configured
-	// server.gitlab section requires a secret token. Catch it here so `config
-	// validate` fails instead of deferring the error to `serve`.
-	if c.Server.Gitlab != nil && c.Server.Gitlab.Secret == "" && c.Server.Gitlab.SecretToken == "" {
-		results = append(results, ValidationResult{
-			Level:   ValidationError,
-			Path:    "server.gitlab.secret",
-			Message: "secret or secret_token is required",
-		})
+	// server.gitlab section requires a secret token: either the default secret
+	// or at least one per-sender secret (otherwise the endpoint would accept
+	// unauthenticated requests). Catch it here so `config validate` fails
+	// instead of deferring the error to `serve`.
+	if g := c.Server.Gitlab; g != nil {
+		if g.Secret == "" && g.SecretToken == "" && len(g.Senders) == 0 {
+			results = append(results, ValidationResult{
+				Level:   ValidationError,
+				Path:    "server.gitlab.secret",
+				Message: "secret, secret_token, or senders is required",
+			})
+		}
+		// Duplicate token values make authentication ambiguous. Full detection
+		// needs resolved values and runs at serve startup (buildGitlabConfig);
+		// byte-identical config strings — the same literal, or the same env:/
+		// vault: reference repeated — are guaranteed duplicates and are caught
+		// offline. Distinct references resolving to one value defer to startup.
+		seenTokens := map[string]string{}
+		defaultToken := g.Secret
+		if defaultToken == "" {
+			defaultToken = g.SecretToken
+		}
+		if defaultToken != "" {
+			seenTokens[defaultToken] = "server.gitlab.secret"
+		}
+		for i, sender := range g.Senders {
+			if sender.Secret == "" && sender.SecretToken == "" {
+				results = append(results, ValidationResult{
+					Level:   ValidationError,
+					Path:    fmt.Sprintf("server.gitlab.senders[%d].secret", i),
+					Message: "secret or secret_token is required",
+				})
+			}
+			if len(sender.Chats) == 0 {
+				results = append(results, ValidationResult{
+					Level:   ValidationError,
+					Path:    fmt.Sprintf("server.gitlab.senders[%d].chats", i),
+					Message: "chats must not be empty",
+				})
+			}
+			senderToken := sender.Secret
+			if senderToken == "" {
+				senderToken = sender.SecretToken
+			}
+			if senderToken != "" {
+				if owner, dup := seenTokens[senderToken]; dup {
+					results = append(results, ValidationResult{
+						Level:   ValidationError,
+						Path:    fmt.Sprintf("server.gitlab.senders[%d].secret", i),
+						Message: fmt.Sprintf("duplicates the token value of %s; tokens must be unique", owner),
+					})
+				} else {
+					seenTokens[senderToken] = fmt.Sprintf("server.gitlab.senders[%d]", i)
+				}
+			}
+		}
 	}
 
 	return results
@@ -1526,6 +1593,24 @@ func (c *Config) validateCrossReferences() []ValidationResult {
 					results = append(results, ValidationResult{
 						Level:   ValidationError,
 						Path:    fmt.Sprintf("server.gitlab.routes[%d].chats", i),
+						Message: fmt.Sprintf("references unknown chat alias %q", chatID),
+					})
+				}
+			}
+		}
+	}
+
+	// Gitlab sender chats must reference existing chat aliases (or be UUIDs).
+	if c.Server.Gitlab != nil {
+		for i, sender := range c.Server.Gitlab.Senders {
+			for j, chatID := range sender.Chats {
+				if IsUUID(chatID) {
+					continue
+				}
+				if _, ok := c.Chats[chatID]; !ok {
+					results = append(results, ValidationResult{
+						Level:   ValidationError,
+						Path:    fmt.Sprintf("server.gitlab.senders[%d].chats[%d]", i, j),
 						Message: fmt.Sprintf("references unknown chat alias %q", chatID),
 					})
 				}

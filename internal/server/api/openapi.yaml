@@ -588,14 +588,25 @@ paths:
 
         Authentication uses the `X-Gitlab-Token` header (GitLab cannot send
         `Authorization`/`X-API-Key`). This endpoint is registered only when
-        `server.gitlab` is configured.
+        `server.gitlab` is configured. The token may be one of several
+        (multi-tenant): besides the default `server.gitlab.secret`, each entry
+        of `server.gitlab.senders` defines its own token bound to an isolated
+        set of chats. A request authenticated with a sender token is delivered
+        **only** to that sender's chats (fan-out, `GitlabFanoutResponse`);
+        `?chat_id=`, `?bot=`, `routes` and `default_chat_id` are ignored for it, while
+        the `events` filter, templates and `error_events` apply as usual. The
+        response behaviour is otherwise unchanged; any token that matches
+        neither the default secret nor a sender secret gets `401`.
 
-        Chat resolution priority:
+        Chat resolution priority (default-token requests):
         1. `?chat_id=` query parameter (overrides routing entirely)
         2. `server.gitlab.routes` (all matching rules, unioned + de-duplicated)
         3. `default_chat_id` from webhook config
         4. Global default chat (`default: true` in chats section)
         5. Single chat alias from config
+
+        Sender-token requests skip this list: the targets are always the
+        sender's configured chats.
       security:
         - gitlabToken: []
       parameters:
@@ -636,9 +647,10 @@ paths:
             Event processed. The body depends on how the event was delivered:
             - Single-chat delivery (`?chat_id=`, or no `routes` configured):
               a `SuccessResponse` (`ok` + `sync_id`).
-            - Fan-out via `routes`: a `GitlabFanoutResponse` with a `results`
-              entry per successful chat and an `errors` entry per failed chat
-              (`ok:true` when at least one delivery succeeded).
+            - Fan-out via `routes` or a sender-token match
+              (`server.gitlab.senders`): a `GitlabFanoutResponse` with a
+              `results` entry per successful chat and an `errors` entry per
+              failed chat (`ok:true` when at least one delivery succeeded).
             - Filtered out by `only`/`exclude`, or matched no route with no
               default chat: a `GitlabIgnoredResponse` (`ok:true`, `ignored:true`,
               `event:<key>`) and no message is sent.
@@ -664,9 +676,9 @@ paths:
         "502":
           description: |
             Upstream error. For single-chat delivery the body is an
-            `ErrorResponse`. For a `routes` fan-out where every target chat
-            failed, the body is a `GitlabFanoutResponse` (`ok:false`) whose
-            `errors` list the per-chat failures.
+            `ErrorResponse`. For a `routes` or sender-token fan-out where
+            every target chat failed, the body is a `GitlabFanoutResponse`
+            (`ok:false`) whose `errors` list the per-chat failures.
           content:
             application/json:
               schema:
@@ -698,7 +710,7 @@ components:
       type: apiKey
       in: header
       name: X-Gitlab-Token
-      description: "X-Gitlab-Token: <secret token> — secret token configured on the GitLab webhook."
+      description: "X-Gitlab-Token: <secret token> — secret token configured on the GitLab webhook. Matched against the default `server.gitlab.secret` or any `server.gitlab.senders[].secret` (a sender token scopes delivery to that sender's chats)."
 
   schemas:
     SendRequest:
@@ -1041,7 +1053,8 @@ components:
     GitlabFanoutResponse:
       type: object
       description: |
-        Returned by /gitlab when `server.gitlab.routes` fans an event out to one
+        Returned by /gitlab when `server.gitlab.routes` or a sender-token match
+        (`server.gitlab.senders`) fans an event out to one
         or more chats. `ok` is true when at least one delivery succeeded (HTTP
         200) and false when they all failed (HTTP 502). `results` lists each
         successful delivery and `errors` each failed one; on a partial failure

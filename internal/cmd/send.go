@@ -8,9 +8,9 @@ import (
 	"flag"
 	"fmt"
 	"io"
-	"sync"
 	"os"
 	"path/filepath"
+	"sync"
 
 	"github.com/lavr/express-botx/internal/botapi"
 	"github.com/lavr/express-botx/internal/config"
