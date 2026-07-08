@@ -15,7 +15,7 @@ CLI и HTTP-сервер для отправки сообщений в корп�
 - **Отправка сообщений** из CLI, скриптов, пайплайнов CI/CD
 - **API-запросы** — произвольные вызовы eXpress BotX API из командной строки с автоаутентификацией
 - **HTTP-сервер** с API для отправки и приёма вебхуков
-- **Alertmanager, Grafana и GitLab** — готовые эндпоинты для мониторинга; универсальный приёмник любых событий GitLab с фильтрами и шаблонами ([examples/gitlab/](examples/gitlab/))
+- **Alertmanager, Grafana и GitLab** — готовые эндпоинты для мониторинга; универсальный приёмник любых событий GitLab с фильтрами, шаблонами и изоляцией команд по своим токенам ([examples/gitlab/](examples/gitlab/))
 - **Асинхронная очередь** — RabbitMQ или Kafka для надёжной доставки
 - **Секреты** — поддержка переменных окружения и HashiCorp Vault
 - **Kubernetes-ready** — Docker, Helm chart, бинарник
@@ -167,7 +167,7 @@ chats:
 
 ## Интеграции
 
-В режиме веб-сервера есть методы для интеграции с alertmanager, grafana и gitlab (универсальный приёмник любых событий GitLab с фильтрами `only`/`exclude`, шаблонами по типам и `error_events`).
+В режиме веб-сервера есть методы для интеграции с alertmanager, grafana и gitlab (универсальный приёмник любых событий GitLab с фильтрами `only`/`exclude`, шаблонами по типам и `error_events`). Несколько команд могут делить один GitLab-эндпоинт с изоляцией по своим `X-Gitlab-Token` — см. [senders](docs/integrations.md#изоляция-команд-senders-несколько-токенов) и пример [examples/gitlab/config-senders.yaml](examples/gitlab/config-senders.yaml).
 
 Пример конфига alertmanager:
 

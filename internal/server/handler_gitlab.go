@@ -60,6 +60,19 @@ type GitlabConfig struct {
 	// every matching rule (see gitlab_routing.go). Empty keeps the single-chat
 	// behaviour (DefaultChatID / FallbackChatID).
 	Routes []compiledRoute
+	// Senders optionally maps additional X-Gitlab-Token values to isolated
+	// per-team chat scopes. Secrets are already resolved (env:/vault: references
+	// expanded at startup). A request that authenticates via a sender token is
+	// delivered only to that sender's Chats; ?chat_id, Routes and DefaultChatID
+	// do not apply to it. May coexist with the default SecretToken.
+	Senders []GitlabSender
+}
+
+// GitlabSender is one isolated webhook sender: a resolved secret token bound to
+// a fixed set of target chats (aliases or UUIDs).
+type GitlabSender struct {
+	Secret string
+	Chats  []string
 }
 
 // gitlabView is the view-model passed to the message template. It is derived
@@ -238,15 +251,17 @@ func (s *Server) handleGitlab(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Verify X-Gitlab-Token (GitLab cannot set Authorization/X-API-Key).
-	// Reject empty tokens outright so a misconfigured empty SecretToken never
-	// authenticates an unauthenticated request via the constant-time compare.
-	token := r.Header.Get("X-Gitlab-Token")
-	if s.gitCfg.SecretToken == "" || token == "" ||
-		subtle.ConstantTimeCompare([]byte(token), []byte(s.gitCfg.SecretToken)) != 1 {
+	// Verify X-Gitlab-Token (GitLab cannot set Authorization/X-API-Key). The
+	// token may be the default SecretToken or one of the per-sender secrets;
+	// a sender match carries an isolated chat scope (used in delivery below).
+	senderChats, isSender, ok := s.resolveGitlabAuth(r.Header.Get("X-Gitlab-Token"))
+	if !ok {
 		vlog.V1("gitlab: token mismatch -> 401")
 		writeError(w, http.StatusUnauthorized, "invalid gitlab token")
 		return
+	}
+	if isSender {
+		vlog.V2("gitlab: authenticated as sender (scope: %v)", senderChats)
 	}
 
 	var raw map[string]any
@@ -291,6 +306,14 @@ func (s *Server) handleGitlab(w http.ResponseWriter, r *http.Request) {
 		status = "error"
 	}
 
+	// A sender-token request is delivered only to that sender's chat scope
+	// (team isolation): ?chat_id, ?bot, Routes and DefaultChatID do not apply.
+	// The filter/template/status logic above is shared with the default path.
+	if isSender {
+		s.gitlabFanout(w, r, "", senderChats, message, status, view.EventKey)
+		return
+	}
+
 	// An explicit ?chat_id overrides routing entirely; likewise, with no routes
 	// configured the endpoint keeps its original single-chat behaviour (routes is
 	// optional, so its absence must not change existing deployments).
@@ -322,7 +345,45 @@ func (s *Server) handleGitlab(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	s.gitlabFanout(w, r, targets, message, status, view.EventKey)
+	s.gitlabFanout(w, r, r.URL.Query().Get("bot"), targets, message, status, view.EventKey)
+}
+
+// resolveGitlabAuth authenticates an incoming X-Gitlab-Token value against the
+// per-sender secrets and the default SecretToken. Every configured secret is
+// compared with subtle.ConstantTimeCompare and no comparison is skipped after a
+// match, so match position does not affect response timing. (ConstantTimeCompare
+// itself returns immediately on a length mismatch, so the timing of a single
+// comparison can still reflect whether the token length matches a secret —
+// standard and acceptable for webhook tokens.)
+// Empty tokens and empty secrets never authenticate, so a misconfigured empty
+// secret cannot let an unauthenticated request through. A sender match returns
+// that sender's isolated chat scope with isSender=true; a default-token match
+// returns (nil, false, true); no match returns (nil, false, false). A token
+// matching both a sender and the default resolves as the sender (startup
+// deduplication in buildGitlabConfig rejects such configs anyway).
+func (s *Server) resolveGitlabAuth(token string) (chats []string, isSender, ok bool) {
+	if token == "" {
+		return nil, false, false
+	}
+	tokenBytes := []byte(token)
+	var matched *GitlabSender
+	for i := range s.gitCfg.Senders {
+		sender := &s.gitCfg.Senders[i]
+		hit := sender.Secret != "" &&
+			subtle.ConstantTimeCompare(tokenBytes, []byte(sender.Secret)) == 1
+		if hit && matched == nil {
+			matched = sender
+		}
+	}
+	defaultHit := s.gitCfg.SecretToken != "" &&
+		subtle.ConstantTimeCompare(tokenBytes, []byte(s.gitCfg.SecretToken)) == 1
+	if matched != nil {
+		return matched.Chats, true, true
+	}
+	if defaultHit {
+		return nil, false, true
+	}
+	return nil, false, false
 }
 
 // singleGitlabChat returns the single fallback delivery chat, following the
@@ -376,8 +437,9 @@ func (s *Server) gitlabSendSingle(w http.ResponseWriter, r *http.Request, target
 // resolving chat and bot per target and collecting successes and failures
 // independently. It responds 200 with the results (plus any partial errors) when
 // at least one delivery succeeds, or 502 with the errors when they all fail.
-func (s *Server) gitlabFanout(w http.ResponseWriter, r *http.Request, targets []string, message, status, eventKey string) {
-	requestBot := r.URL.Query().Get("bot")
+// requestBot is the ?bot= override; the sender-isolated path passes "" so a
+// sender token cannot pick another configured bot's identity.
+func (s *Server) gitlabFanout(w http.ResponseWriter, r *http.Request, requestBot string, targets []string, message, status, eventKey string) {
 	var results []gitlabFanoutResult
 	var errs []gitlabFanoutError
 	start := time.Now()

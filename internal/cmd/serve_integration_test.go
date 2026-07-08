@@ -24,8 +24,8 @@ import (
 
 type mockBotxAPI struct {
 	mu       sync.Mutex
-	calls    []capturedSend // captured /notifications/direct calls
-	tokenVal string         // token to return
+	calls    []capturedSend                         // captured /notifications/direct calls
+	tokenVal string                                 // token to return
 	users    map[string]struct{ huid, name string } // email -> user info for lookup
 }
 
