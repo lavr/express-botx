@@ -4,8 +4,7 @@ package server
 // send surface (/send, /alertmanager, /grafana, /gitlab and the CLI). The
 // contract is deliberately uniform: a chat_id may list several chats separated by
 // commas (chat_id=a,b,c), the message is delivered best-effort to each, and the
-// response is always a MultiSendResponse — even for a single chat. See
-// docs/plans/20260708-multi-chat-fanout.md for the rationale.
+// response is always a MultiSendResponse — even for a single chat.
 
 import (
 	"context"

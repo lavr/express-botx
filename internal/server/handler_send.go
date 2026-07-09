@@ -127,7 +127,7 @@ func (s *Server) handleSend(w http.ResponseWriter, r *http.Request) {
 		// alternative would give per-command retry: on a partial failure the retry
 		// re-sends to the chats that already succeeded (duplicates) or the failed
 		// chat is lost with the ack. The worker stays "one chat = one message" and
-		// is not touched. See docs/plans/20260708-multi-chat-fanout.md.
+		// is not touched.
 		targets := parseChatIDs(payload.ChatID)
 		if len(targets) == 0 {
 			writeError(w, http.StatusBadRequest, "chat_id is required")

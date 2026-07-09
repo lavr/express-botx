@@ -306,11 +306,31 @@ func (s *Server) handleGitlab(w http.ResponseWriter, r *http.Request) {
 		status = "error"
 	}
 
-	// A sender-token request is delivered only to that sender's chat scope
-	// (team isolation): ?chat_id, ?bot, Routes and DefaultChatID do not apply.
+	// A sender-token request stays inside that sender's chat scope (team
+	// isolation): ?bot, Routes and DefaultChatID never apply. ?chat_id acts as a
+	// filter *within* the allowed scope — omitted delivers to every sender chat
+	// (previous behaviour), a non-empty subset delivers only to those chats, and
+	// any chat outside the scope is refused (403) rather than silently ignored.
 	// The filter/template/status logic above is shared with the default path.
 	if isSender {
-		s.gitlabDeliver(w, r, "", senderChats, message, status, view.EventKey)
+		queryChats := parseChatIDs(r.URL.Query().Get("chat_id"))
+		// An explicitly-present but empty chat_id (?chat_id= / ?chat_id=,,) is a
+		// request error, not a fall-back to the full sender scope.
+		if len(queryChats) == 0 && r.URL.Query().Has("chat_id") {
+			writeError(w, http.StatusBadRequest, "chat_id is empty: provide at least one chat, or omit chat_id to deliver to all allowed chats")
+			return
+		}
+		targets := senderChats
+		if len(queryChats) > 0 {
+			canonical, bad, ok := s.senderScopeTargets(queryChats, senderChats)
+			if !ok {
+				vlog.V1("gitlab: sender requested out-of-scope chat %q -> 403", bad)
+				writeError(w, http.StatusForbidden, fmt.Sprintf("chat %q is outside this token's allowed chats", bad))
+				return
+			}
+			targets = canonical
+		}
+		s.gitlabDeliver(w, r, "", targets, message, status, view.EventKey)
 		return
 	}
 
@@ -393,6 +413,57 @@ func (s *Server) resolveGitlabAuth(token string) (chats []string, isSender, ok b
 		return nil, false, true
 	}
 	return nil, false, false
+}
+
+// senderScopeTargets checks that every requested chat_id stays within a sender's
+// allowed chat scope, treating aliases and the UUIDs they resolve to as
+// equivalent, and maps each in-scope request back to the sender.chats entry the
+// operator configured. Delivering via that configured entry (rather than the raw
+// request string) preserves the entry's bot binding in multi-bot mode, so a
+// request that names a chat by the UUID its alias resolves to still delivers to
+// the right bot instead of failing with "bot is required".
+//
+// It builds a lookup from every recognised key — each raw sender.chats value and
+// the UUID it resolves to — back to the configured entry (raw values that fail to
+// resolve are kept as-is). For each requested value it accepts the value itself,
+// or the UUID it resolves to, when either is a known key, and emits the matching
+// configured entry. Requests that collapse to the same entry are de-duplicated,
+// preserving first-request order.
+//
+// It returns the canonical targets with ok=true, or on the first out-of-scope
+// request (a value that fails to resolve and is not literally configured) returns
+// (nil, that value, false). This gives alias↔UUID equivalence regardless of
+// whether sender.Chats stores aliases or UUIDs.
+func (s *Server) senderScopeTargets(requested, allowed []string) (targets []string, bad string, ok bool) {
+	entryOf := make(map[string]string, len(allowed)*2)
+	for _, a := range allowed {
+		if _, seen := entryOf[a]; !seen {
+			entryOf[a] = a
+		}
+		if res, err := s.chats(a); err == nil && res.ChatID != "" {
+			if _, seen := entryOf[res.ChatID]; !seen {
+				entryOf[res.ChatID] = a
+			}
+		}
+	}
+	seen := make(map[string]struct{}, len(requested))
+	for _, q := range requested {
+		entry, in := entryOf[q]
+		if !in {
+			if res, err := s.chats(q); err == nil && res.ChatID != "" {
+				entry, in = entryOf[res.ChatID]
+			}
+		}
+		if !in {
+			return nil, q, false
+		}
+		if _, dup := seen[entry]; dup {
+			continue
+		}
+		seen[entry] = struct{}{}
+		targets = append(targets, entry)
+	}
+	return targets, "", true
 }
 
 // singleGitlabChat returns the single fallback delivery chat, following the

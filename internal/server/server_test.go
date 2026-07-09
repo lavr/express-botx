@@ -2221,6 +2221,46 @@ func TestSend_AsyncMode_MissingBotID(t *testing.T) {
 	}
 }
 
+// TestSend_AsyncMode_MultiChatValidationAllOrNothing: async routing validation is
+// request-level — if any target in a multi-chat request fails validation the whole
+// request is rejected with 400 and nothing is enqueued (no partial publish).
+func TestSend_AsyncMode_MultiChatValidationAllOrNothing(t *testing.T) {
+	var enqueued int
+	cfg := Config{
+		Listen:             ":0",
+		BasePath:           "/api/v1",
+		Keys:               []ResolvedKey{{Name: "t", Key: "k"}},
+		AsyncMode:          true,
+		DefaultRoutingMode: "direct",
+	}
+	sendFn := func(ctx context.Context, p *SendPayload) (string, error) {
+		enqueued++
+		return "req-id", nil
+	}
+	chatResolver := func(chatID string) (ChatResolveResult, error) {
+		return ChatResolveResult{ChatID: chatID}, nil
+	}
+	srv := New(cfg, sendFn, chatResolver)
+
+	// First chat is a valid UUID; second is not — direct mode rejects the second.
+	body := `{"bot_id":"00000000-0000-0000-0000-000000000001","chat_id":"00000000-0000-0000-0000-000000000002,not-a-uuid","message":"hi","routing_mode":"direct"}`
+	w := doRequest(srv, "POST", "/api/v1/send", strings.NewReader(body), map[string]string{
+		"X-API-Key":    "k",
+		"Content-Type": "application/json",
+	})
+
+	if w.Code != 400 {
+		t.Fatalf("status = %d, want 400 (whole request rejected); body: %s", w.Code, w.Body.String())
+	}
+	resp := parseResponse(t, w)
+	if resp.OK || !strings.Contains(resp.Error, "chat_id must be a valid UUID") {
+		t.Errorf("response = %+v, want ok:false naming the invalid chat", resp)
+	}
+	if enqueued != 0 {
+		t.Errorf("enqueued = %d, want 0 (nothing published on validation failure)", enqueued)
+	}
+}
+
 func TestSend_AsyncMode_Multipart(t *testing.T) {
 	var capturedPayload *SendPayload
 	cfg := Config{

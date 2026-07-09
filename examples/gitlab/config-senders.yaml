@@ -2,10 +2,18 @@
 # with per-sender tokens (`server.gitlab.senders`) — team isolation.
 #
 # Several teams share one endpoint, each with its OWN X-Gitlab-Token bound to
-# its own chats. An event authenticated with a sender token is delivered ONLY
-# to that sender's chats: ?chat_id=, routes and default_chat_id are ignored
-# for it, so team A cannot post into team B's chats even on purpose. The
+# its own chats. An event authenticated with a sender token is delivered to
+# that sender's chats: ?bot=, routes and default_chat_id are ignored for it, so
+# team A cannot post into team B's chats or as another bot even on purpose. The
 # global events filter, templates and error_events still apply.
+#
+# ?chat_id= works as a FILTER WITHIN the sender's allowed chats:
+#   - omitted            -> delivered to all of the sender's chats
+#   - ?chat_id=<subset>  -> delivered only to those chats (alias<->UUID equivalent)
+#   - chat outside scope -> 403 Forbidden, nothing sent
+#   - ?chat_id= (empty)  -> 400 Bad Request, nothing sent
+# So team B (chats: team-b, team-b-alerts) can send a specific webhook only to
+# team-b-alerts with ?chat_id=team-b-alerts, but ?chat_id=team-a gives 403.
 #
 # The default `secret` stays fully functional (mixed mode): webhooks using it
 # keep the ordinary behaviour (?chat_id -> routes -> default_chat_id -> ...).

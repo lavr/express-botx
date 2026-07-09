@@ -12,6 +12,117 @@ import (
 	"github.com/lavr/express-botx/internal/config"
 )
 
+// scopeTestServer builds a bare Server whose chat resolver maps a fixed set of
+// aliases to UUIDs. "bad-alias" returns a resolve error; other unknown values
+// pass through as themselves, mirroring how a UUID resolves to itself. It is used
+// to unit-test senderScopeTargets without going through the HTTP handler.
+func scopeTestServer(t *testing.T) *Server {
+	t.Helper()
+	aliases := map[string]string{
+		"team-a-alerts": "uuid-a",
+		"team-a-dev":    "uuid-b",
+		"team-b-alerts": "uuid-c",
+	}
+	chatFn := func(chatID string) (ChatResolveResult, error) {
+		if chatID == "bad-alias" {
+			return ChatResolveResult{}, fmt.Errorf("unknown chat alias %q", chatID)
+		}
+		if u, ok := aliases[chatID]; ok {
+			return ChatResolveResult{ChatID: u}, nil
+		}
+		return ChatResolveResult{ChatID: chatID}, nil
+	}
+	return New(Config{Listen: ":0", BasePath: "/api/v1"}, okSend, chatFn)
+}
+
+// TestSenderScopeTargets covers alias/UUID membership equivalence, out-of-scope
+// detection, and canonicalisation to the configured sender.chats entry for the
+// sender-scoped ?chat_id filter.
+func TestSenderScopeTargets(t *testing.T) {
+	s := scopeTestServer(t)
+	tests := []struct {
+		name        string
+		requested   []string
+		allowed     []string
+		wantTargets []string
+		wantBad     string
+		wantOK      bool
+	}{
+		{
+			name:        "alias matches same alias",
+			requested:   []string{"team-a-alerts"},
+			allowed:     []string{"team-a-alerts"},
+			wantTargets: []string{"team-a-alerts"},
+			wantOK:      true,
+		},
+		{
+			name:        "alias request against UUID in scope canonicalises to UUID",
+			requested:   []string{"team-a-alerts"},
+			allowed:     []string{"uuid-a"},
+			wantTargets: []string{"uuid-a"},
+			wantOK:      true,
+		},
+		{
+			name:        "UUID request against alias in scope canonicalises to alias",
+			requested:   []string{"uuid-a"},
+			allowed:     []string{"team-a-alerts"},
+			wantTargets: []string{"team-a-alerts"},
+			wantOK:      true,
+		},
+		{
+			name:      "foreign alias is a violation",
+			requested: []string{"team-b-alerts"},
+			allowed:   []string{"team-a-alerts"},
+			wantBad:   "team-b-alerts",
+			wantOK:    false,
+		},
+		{
+			name:      "foreign UUID is a violation",
+			requested: []string{"uuid-c"},
+			allowed:   []string{"team-a-alerts"},
+			wantBad:   "uuid-c",
+			wantOK:    false,
+		},
+		{
+			name:      "unresolvable requested chat is a violation",
+			requested: []string{"bad-alias"},
+			allowed:   []string{"team-a-alerts"},
+			wantBad:   "bad-alias",
+			wantOK:    false,
+		},
+		{
+			name:        "subset of several is allowed",
+			requested:   []string{"team-a-dev"},
+			allowed:     []string{"team-a-alerts", "team-a-dev"},
+			wantTargets: []string{"team-a-dev"},
+			wantOK:      true,
+		},
+		{
+			name:        "alias and its own UUID collapse to one target",
+			requested:   []string{"team-a-alerts", "uuid-a"},
+			allowed:     []string{"team-a-alerts"},
+			wantTargets: []string{"team-a-alerts"},
+			wantOK:      true,
+		},
+		{
+			name:      "one out-of-scope among valid returns that one",
+			requested: []string{"team-a-alerts", "team-b-alerts"},
+			allowed:   []string{"team-a-alerts", "team-a-dev"},
+			wantBad:   "team-b-alerts",
+			wantOK:    false,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			targets, bad, ok := s.senderScopeTargets(tt.requested, tt.allowed)
+			if ok != tt.wantOK || bad != tt.wantBad || !slices.Equal(targets, tt.wantTargets) {
+				t.Errorf("senderScopeTargets(%v, %v) = (%v, %q, %v), want (%v, %q, %v)",
+					tt.requested, tt.allowed, targets, bad, ok, tt.wantTargets, tt.wantBad, tt.wantOK)
+			}
+		})
+	}
+}
+
 // newGitlabTestServer builds a server with the gitlab endpoint enabled and a
 // send function that records the last SendPayload it received.
 func newGitlabTestServer(t *testing.T, cfg *GitlabConfig) (*Server, *captureSend) {
@@ -1317,21 +1428,181 @@ func TestGitlab_SenderFanout(t *testing.T) {
 	}
 }
 
-// TestGitlab_SenderIgnoresQueryChat: ?chat_id must not let a sender token break
-// out of its chat scope — delivery still goes only to the sender's chats.
-func TestGitlab_SenderIgnoresQueryChat(t *testing.T) {
+// TestGitlab_SenderChatFilterSubset: ?chat_id listing a subset of the sender's
+// own chats delivers to exactly that subset, not the full scope.
+func TestGitlab_SenderChatFilterSubset(t *testing.T) {
+	srv, cap := newGitlabFanoutServer(t, senderTestConfig(), okSend, nil)
+	w := doRequest(srv, "POST", "/api/v1/gitlab?chat_id=team-a-chat2", strings.NewReader(mrOpenPayload), gitlabHeaders("team-a-token"))
+	if w.Code != 200 {
+		t.Fatalf("status = %d, body: %s", w.Code, w.Body.String())
+	}
+	if cap.count() != 1 {
+		t.Fatalf("send count = %d, want 1 (filtered to the requested chat)", cap.count())
+	}
+	if got := cap.last().ChatID; got != "team-a-chat2" {
+		t.Errorf("chat = %q, want team-a-chat2", got)
+	}
+	var resp MultiSendResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode: %v (body: %s)", err, w.Body.String())
+	}
+	if !resp.OK || len(resp.Results) != 1 || resp.Results[0].Chat != "team-a-chat2" {
+		t.Errorf("response = %+v, want single team-a-chat2 result", resp)
+	}
+}
+
+// TestGitlab_SenderChatFilterOutOfScope: ?chat_id naming a chat the sender is not
+// allowed to reach is refused with 403 and delivers nothing (scope breakout).
+func TestGitlab_SenderChatFilterOutOfScope(t *testing.T) {
 	srv, cap := newGitlabFanoutServer(t, senderTestConfig(), okSend, nil)
 	w := doRequest(srv, "POST", "/api/v1/gitlab?chat_id=chat1", strings.NewReader(mrOpenPayload), gitlabHeaders("team-a-token"))
+	if w.Code != 403 {
+		t.Fatalf("status = %d, want 403 (out-of-scope chat); body: %s", w.Code, w.Body.String())
+	}
+	if cap.count() != 0 {
+		t.Fatalf("send count = %d, want 0 (nothing sent on scope violation)", cap.count())
+	}
+	var resp map[string]any
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode: %v (body: %s)", err, w.Body.String())
+	}
+	if ok, _ := resp["ok"].(bool); ok || !strings.Contains(fmt.Sprint(resp["error"]), "chat1") {
+		t.Errorf("response = %+v, want ok:false with an error naming chat1", resp)
+	}
+}
+
+// TestGitlab_SenderChatFilterPartialOutOfScope: one allowed + one foreign chat in
+// ?chat_id is refused wholesale (403), delivering to neither.
+func TestGitlab_SenderChatFilterPartialOutOfScope(t *testing.T) {
+	srv, cap := newGitlabFanoutServer(t, senderTestConfig(), okSend, nil)
+	w := doRequest(srv, "POST", "/api/v1/gitlab?chat_id=team-a-chat1,chat1", strings.NewReader(mrOpenPayload), gitlabHeaders("team-a-token"))
+	if w.Code != 403 {
+		t.Fatalf("status = %d, want 403 (partial out-of-scope); body: %s", w.Code, w.Body.String())
+	}
+	if cap.count() != 0 {
+		t.Fatalf("send count = %d, want 0 (all-or-nothing on scope violation)", cap.count())
+	}
+}
+
+// TestGitlab_SenderChatFilterEmpty: an explicitly-present but empty ?chat_id is a
+// 400 request error, not a silent fall-back to the full sender scope.
+func TestGitlab_SenderChatFilterEmpty(t *testing.T) {
+	for _, q := range []string{"?chat_id=", "?chat_id=,,", "?chat_id=+,+"} {
+		t.Run(q, func(t *testing.T) {
+			srv, cap := newGitlabFanoutServer(t, senderTestConfig(), okSend, nil)
+			w := doRequest(srv, "POST", "/api/v1/gitlab"+q, strings.NewReader(mrOpenPayload), gitlabHeaders("team-a-token"))
+			if w.Code != 400 {
+				t.Fatalf("status = %d, want 400 (empty chat_id); body: %s", w.Code, w.Body.String())
+			}
+			if cap.count() != 0 {
+				t.Fatalf("send count = %d, want 0 (nothing sent on empty chat_id)", cap.count())
+			}
+		})
+	}
+}
+
+// TestGitlab_SenderChatFilterAliasUUID: alias↔UUID equivalence — a sender scoped
+// by alias accepts the UUID it resolves to (and vice versa) in ?chat_id.
+func TestGitlab_SenderChatFilterAliasUUID(t *testing.T) {
+	aliases := map[string]string{"team-a-alerts": "uuid-a", "team-a-dev": "uuid-b"}
+	chatFn := func(chatID string) (ChatResolveResult, error) {
+		if u, ok := aliases[chatID]; ok {
+			return ChatResolveResult{ChatID: u}, nil
+		}
+		return ChatResolveResult{ChatID: chatID}, nil
+	}
+
+	t.Run("UUID request against alias scope", func(t *testing.T) {
+		cfg := &GitlabConfig{
+			SecretToken: "secret",
+			Senders:     []GitlabSender{{Secret: "team-a-token", Chats: []string{"team-a-alerts", "team-a-dev"}}},
+		}
+		srv, cap := newGitlabFanoutServer(t, cfg, okSend, chatFn)
+		w := doRequest(srv, "POST", "/api/v1/gitlab?chat_id=uuid-a", strings.NewReader(mrOpenPayload), gitlabHeaders("team-a-token"))
+		if w.Code != 200 {
+			t.Fatalf("status = %d, want 200 (UUID matches alias scope); body: %s", w.Code, w.Body.String())
+		}
+		if cap.count() != 1 || cap.last().ChatID != "uuid-a" {
+			t.Fatalf("sends = %d, last = %q, want 1 to uuid-a", cap.count(), cap.last().ChatID)
+		}
+	})
+
+	t.Run("alias request against UUID scope", func(t *testing.T) {
+		cfg := &GitlabConfig{
+			SecretToken: "secret",
+			Senders:     []GitlabSender{{Secret: "team-a-token", Chats: []string{"uuid-a", "uuid-b"}}},
+		}
+		srv, cap := newGitlabFanoutServer(t, cfg, okSend, chatFn)
+		w := doRequest(srv, "POST", "/api/v1/gitlab?chat_id=team-a-alerts", strings.NewReader(mrOpenPayload), gitlabHeaders("team-a-token"))
+		if w.Code != 200 {
+			t.Fatalf("status = %d, want 200 (alias matches UUID scope); body: %s", w.Code, w.Body.String())
+		}
+		// gitlabDeliver resolves each target alias to its UUID before sending, so
+		// the recorded chat is the resolved uuid-a even though ?chat_id used the
+		// alias.
+		if cap.count() != 1 || cap.last().ChatID != "uuid-a" {
+			t.Fatalf("sends = %d, last = %q, want 1 to uuid-a", cap.count(), cap.last().ChatID)
+		}
+	})
+}
+
+// TestGitlab_SenderChatFilterMultiSubset: ?chat_id naming several in-scope chats
+// fans out to exactly those chats, in request order, leaving the rest untouched.
+func TestGitlab_SenderChatFilterMultiSubset(t *testing.T) {
+	cfg := &GitlabConfig{
+		SecretToken: "secret",
+		Senders:     []GitlabSender{{Secret: "team-a-token", Chats: []string{"team-a-c1", "team-a-c2", "team-a-c3"}}},
+	}
+	srv, cap := newGitlabFanoutServer(t, cfg, okSend, nil)
+	w := doRequest(srv, "POST", "/api/v1/gitlab?chat_id=team-a-c1,team-a-c3", strings.NewReader(mrOpenPayload), gitlabHeaders("team-a-token"))
 	if w.Code != 200 {
 		t.Fatalf("status = %d, body: %s", w.Code, w.Body.String())
 	}
 	if cap.count() != 2 {
-		t.Fatalf("send count = %d, want 2 (sender chats only)", cap.count())
+		t.Fatalf("send count = %d, want 2 (only the requested subset)", cap.count())
 	}
-	for _, p := range cap.calls {
-		if p.ChatID == "chat1" {
-			t.Errorf("delivered to %q via ?chat_id override; sender scope must ignore it", p.ChatID)
+	var resp MultiSendResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode: %v (body: %s)", err, w.Body.String())
+	}
+	got := []string{resp.Results[0].Chat, resp.Results[1].Chat}
+	if !slices.Equal(got, []string{"team-a-c1", "team-a-c3"}) {
+		t.Errorf("results = %v, want [team-a-c1 team-a-c3] in request order", got)
+	}
+}
+
+// TestGitlab_SenderChatFilterUUIDMultiBot: in multi-bot mode a sender scoped by a
+// bot-bound alias may name that chat by the UUID it resolves to; the request is
+// canonicalised back to the configured alias so its bot binding is preserved and
+// delivery succeeds (rather than failing with "bot is required").
+func TestGitlab_SenderChatFilterUUIDMultiBot(t *testing.T) {
+	cfg := &GitlabConfig{
+		Senders: []GitlabSender{{Secret: "team-a-token", Chats: []string{"team-a-alerts"}}},
+	}
+	tmpls, err := ParseGitlabTemplates(nil)
+	if err != nil {
+		t.Fatalf("parse default templates: %v", err)
+	}
+	cfg.Templates = tmpls
+	cap := &captureSend{}
+	send := func(ctx context.Context, p *SendPayload) (string, error) {
+		cap.record(p)
+		return "sync-1", nil
+	}
+	chatFn := func(chatID string) (ChatResolveResult, error) {
+		if chatID == "team-a-alerts" {
+			return ChatResolveResult{ChatID: "uuid-a", Bot: "bot-a"}, nil
 		}
+		return ChatResolveResult{ChatID: chatID}, nil
+	}
+	srv := New(Config{Listen: ":0", BasePath: "/api/v1", BotNames: []string{"bot-a", "bot-b"}}, send, chatFn, WithGitlab(cfg))
+
+	w := doRequest(srv, "POST", "/api/v1/gitlab?chat_id=uuid-a", strings.NewReader(mrOpenPayload), gitlabHeaders("team-a-token"))
+	if w.Code != 200 {
+		t.Fatalf("status = %d, want 200 (UUID canonicalises to bound alias); body: %s", w.Code, w.Body.String())
+	}
+	if cap.count() != 1 || cap.last().ChatID != "uuid-a" || cap.last().Bot != "bot-a" {
+		t.Fatalf("send = %+v, want single delivery to uuid-a via bot-a", cap.last())
 	}
 }
 
