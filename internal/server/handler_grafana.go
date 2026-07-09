@@ -88,53 +88,45 @@ func (s *Server) handleGrafana(w http.ResponseWriter, r *http.Request) {
 	// Determine status
 	status := s.resolveGrafanaStatus(webhook)
 
-	// Resolve chat: query param > default_chat_id > global default chat > single chat from config
-	targetChat := s.grCfg.DefaultChatID
-	if targetChat == "" {
-		targetChat = s.cfg.DefaultChatAlias
+	// Resolve target chats: ?chat_id (now comma-separated, fan-out) > default_chat_id
+	// > global default chat > single chat from config. With no ?chat_id the endpoint
+	// keeps its single-default behaviour; the response is the uniform
+	// MultiSendResponse in every case (results[0] for a single chat).
+	targets := parseChatIDs(r.URL.Query().Get("chat_id"))
+	if len(targets) == 0 {
+		if single := s.grCfg.singleChat(s.cfg.DefaultChatAlias); single != "" {
+			targets = []string{single}
+		}
 	}
-	if targetChat == "" {
-		targetChat = s.grCfg.FallbackChatID
-	}
-	if q := r.URL.Query().Get("chat_id"); q != "" {
-		targetChat = q
-	}
-	if targetChat == "" {
+	if len(targets) == 0 {
 		writeError(w, http.StatusBadRequest, "chat_id is required: set default_chat_id in config, configure a single chat alias, or pass ?chat_id=")
-		return
-	}
-	chatResult, err := s.chats(targetChat)
-	if err != nil {
-		writeError(w, http.StatusBadRequest, "resolving chat: "+err.Error())
-		return
-	}
-
-	// Resolve bot: explicit ?bot= > chat-bound bot > auth bot
-	botName, errMsg := s.resolveRequestBot(r.Context(), r.URL.Query().Get("bot"), chatResult.Bot)
-	if errMsg != "" {
-		writeError(w, http.StatusBadRequest, errMsg)
 		return
 	}
 
 	start := time.Now()
-	syncID, err := s.send(r.Context(), &SendPayload{
-		Bot:     botName,
-		ChatID:  chatResult.ChatID,
-		Message: message,
-		Status:  status,
-	})
+	results, errs := s.fanoutSend(r.Context(), targets, r.URL.Query().Get("bot"), message, status)
 	elapsed := time.Since(start)
 
 	keyName := KeyName(r.Context())
-	if err != nil {
-		vlog.V1("grafana: send failed [key: %s] -> 502 (%dms)", keyName, elapsed.Milliseconds())
-		writeError(w, http.StatusBadGateway, "upstream error: "+err.Error())
-		return
+	if len(results) == 0 {
+		vlog.V1("grafana: fan-out to %d chats all failed [key: %s] -> 502 (%dms)", len(targets), keyName, elapsed.Milliseconds())
+	} else {
+		vlog.V1("grafana: sent %s to %d/%d chats [key: %s] (%dms)", webhook.Status, len(results), len(targets), keyName, elapsed.Milliseconds())
 	}
+	writeMultiSend(w, results, errs, http.StatusOK)
+}
 
-	vlog.V1("grafana: sent %s to %s [key: %s] -> 200 (%dms)", webhook.Status, targetChat, keyName, elapsed.Milliseconds())
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(sendResponse{OK: true, SyncID: syncID})
+// singleChat returns the fallback delivery chat for grafana, following the
+// precedence default_chat_id -> global default chat -> the sole configured chat
+// alias. It is empty when none is configured.
+func (c *GrafanaConfig) singleChat(globalDefault string) string {
+	if c.DefaultChatID != "" {
+		return c.DefaultChatID
+	}
+	if globalDefault != "" {
+		return globalDefault
+	}
+	return c.FallbackChatID
 }
 
 func (s *Server) resolveGrafanaStatus(webhook GrafanaWebhook) string {

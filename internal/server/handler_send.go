@@ -2,8 +2,10 @@ package server
 
 import (
 	"bytes"
+	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"mime"
@@ -49,12 +51,13 @@ type OptsPayload struct {
 	NoNotify bool `json:"no_notify"`
 }
 
+// sendResponse is the request-level error envelope for /send (400/415/500). The
+// success/partial-success body is MultiSendResponse; a per-chat outcome is a
+// SendResult. sendResponse now carries only ok/error — the earlier single-chat
+// sync_id/queued/request_id fields moved into MultiSendResponse.results[].
 type sendResponse struct {
-	OK        bool   `json:"ok"`
-	SyncID    string `json:"sync_id,omitempty"`
-	Queued    bool   `json:"queued,omitempty"`
-	RequestID string `json:"request_id,omitempty"`
-	Error     string `json:"error,omitempty"`
+	OK    bool   `json:"ok"`
+	Error string `json:"error,omitempty"`
 }
 
 func (s *Server) handleSend(w http.ResponseWriter, r *http.Request) {
@@ -114,6 +117,23 @@ func (s *Server) handleSend(w http.ResponseWriter, r *http.Request) {
 		// after catalog routing resolves the actual target bot. This ensures
 		// email lookups hit the correct eXpress host in multi-bot setups.
 		payload.NoParse = noParse
+
+		// Expand a comma-separated chat_id (chat_id=a,b,c) into N independent
+		// enqueues — one queued message per chat — rather than one queued message
+		// that fans out inside the worker. This is a deliberate choice: with one
+		// message per chat, retry/ack is per-chat and independent, so a transient
+		// failure on chat b never re-delivers to chat a (no duplicates) and never
+		// drops b. The "one message = whole command, fan out in worker"
+		// alternative would give per-command retry: on a partial failure the retry
+		// re-sends to the chats that already succeeded (duplicates) or the failed
+		// chat is lost with the ack. The worker stays "one chat = one message" and
+		// is not touched. See docs/plans/20260708-multi-chat-fanout.md.
+		targets := parseChatIDs(payload.ChatID)
+		if len(targets) == 0 {
+			writeError(w, http.StatusBadRequest, "chat_id is required")
+			return
+		}
+
 		// Async mode: for direct routing, bot_id is required.
 		// For catalog/mixed modes, bot_id or bot alias can be used.
 		rm := payload.RoutingMode
@@ -123,38 +143,14 @@ func (s *Server) handleSend(w http.ResponseWriter, r *http.Request) {
 		if rm == "" {
 			rm = "mixed"
 		}
-		switch rm {
-		case "catalog":
-			// Catalog mode: bot can come from bot_id, bot alias, or chat-bound bot.
-			// If no bot info is provided, chat_id must be a non-UUID alias
-			// so the bot can be derived from the chat binding.
-			if payload.BotID == "" && payload.Bot == "" && isUUID(payload.ChatID) {
-				writeError(w, http.StatusBadRequest, "bot_id or bot alias is required when chat_id is a UUID in catalog mode; use a chat alias with a catalog-bound bot, or provide bot_id/bot")
+		// Routing validation is request-level (400): apply the routing-mode
+		// requirements to every target chat before enqueuing any of them, so a
+		// multi-chat request is accepted or rejected as a whole.
+		for _, chat := range targets {
+			if msg := validateAsyncRouting(rm, payload.BotID, payload.Bot, chat); msg != "" {
+				writeError(w, http.StatusBadRequest, msg)
 				return
 			}
-		case "mixed":
-			// Mixed mode: bot can come from bot_id (direct), bot alias, or chat-bound bot.
-			if payload.BotID == "" && payload.Bot == "" && isUUID(payload.ChatID) {
-				writeError(w, http.StatusBadRequest, "bot_id or bot alias is required when chat_id is a UUID in mixed mode; provide bot_id for direct routing or bot alias for catalog resolution")
-				return
-			}
-		case "direct":
-			// Direct mode: bot_id is required and must be a UUID
-			if payload.BotID == "" {
-				writeError(w, http.StatusBadRequest, "bot_id is required for async direct mode")
-				return
-			}
-			if !isUUID(payload.BotID) {
-				writeError(w, http.StatusBadRequest, "bot_id must be a valid UUID for direct routing mode")
-				return
-			}
-			if !isUUID(payload.ChatID) {
-				writeError(w, http.StatusBadRequest, "chat_id must be a valid UUID for direct routing mode; use catalog or mixed mode for alias resolution")
-				return
-			}
-		default:
-			writeError(w, http.StatusBadRequest, fmt.Sprintf("invalid routing_mode %q: must be direct, catalog, or mixed", rm))
-			return
 		}
 
 		// Enforce max_file_size for async mode
@@ -172,69 +168,123 @@ func (s *Server) handleSend(w http.ResponseWriter, r *http.Request) {
 		}
 
 		start := time.Now()
-		requestID, err := s.send(r.Context(), &payload)
+		results, errs := fanout(r.Context(), targets, func(ctx context.Context, chat string) (SendResult, error) {
+			// Copy the shared payload and enqueue one message for this chat only.
+			p := payload
+			p.ChatID = chat
+			requestID, err := s.send(ctx, &p)
+			if err != nil {
+				return SendResult{}, err
+			}
+			return SendResult{Chat: chat, RequestID: requestID, Queued: true}, nil
+		})
 		elapsed := time.Since(start)
 
 		keyName := KeyName(r.Context())
-		if err != nil {
+		if len(results) == 0 {
 			vlog.V1("server: %s %s [key: %s] -> 502 (%dms)", r.Method, r.URL.Path, keyName, elapsed.Milliseconds())
-			writeError(w, http.StatusBadGateway, "enqueue error: "+err.Error())
-			return
+		} else {
+			vlog.V1("server: %s %s [key: %s] -> 202 (%dms)", r.Method, r.URL.Path, keyName, elapsed.Milliseconds())
 		}
-
-		vlog.V1("server: %s %s [key: %s] -> 202 (%dms)", r.Method, r.URL.Path, keyName, elapsed.Milliseconds())
-		w.Header().Set("Content-Type", "application/json")
-		w.WriteHeader(http.StatusAccepted)
-		json.NewEncoder(w).Encode(sendResponse{OK: true, Queued: true, RequestID: requestID})
+		writeMultiSend(w, results, errs, http.StatusAccepted)
 		return
 	}
 
-	// Sync mode: resolve chat alias and bot, send directly
-	// Resolve chat alias (before bot — chat may have a bound bot)
-	chatResult, err := s.chats(payload.ChatID)
-	if err != nil {
-		writeError(w, http.StatusBadRequest, err.Error())
+	// Sync mode: fan out to every target chat best-effort. chat_id may list
+	// several chats (chat_id=a,b,c); each target independently resolves its chat
+	// alias, then its bot, then parses mentions under that bot's own resolver —
+	// a chat-bound bot can differ per chat in multi-bot setups, so mentions must
+	// be resolved after the per-target bot is known. The shared payload (file,
+	// metadata, opts, status) is reused for every target; only chat/bot/message/
+	// mentions differ. The response is the uniform MultiSendResponse even for a
+	// single chat (results[0]).
+	targets := parseChatIDs(payload.ChatID)
+	if len(targets) == 0 {
+		writeError(w, http.StatusBadRequest, "chat_id is required")
 		return
-	}
-	payload.ChatID = chatResult.ChatID
-
-	// Resolve bot: explicit request bot > chat-bound bot > auth bot
-	resolvedBot, errMsg := s.resolveRequestBot(r.Context(), payload.Bot, chatResult.Bot)
-	if errMsg != "" {
-		writeError(w, http.StatusBadRequest, errMsg)
-		return
-	}
-	payload.Bot = resolvedBot
-
-	// Parse mentions after bot resolution so the correct per-bot resolver is used
-	// when the bot was derived from chat binding rather than the request payload.
-	resolver := s.mentionsResolver
-	if payload.Bot != "" && s.botMentionsResolvers != nil {
-		if br, ok := s.botMentionsResolvers[payload.Bot]; ok {
-			resolver = br
-		}
-	}
-	parseResult := mentions.Parse(r.Context(), payload.Message, payload.Mentions, !noParse, resolver)
-	payload.Message = parseResult.Message
-	payload.Mentions = parseResult.Mentions
-	if len(parseResult.Errors) > 0 {
-		vlog.V2("server: mentions parse: %d error(s)", len(parseResult.Errors))
 	}
 
 	start := time.Now()
-	syncID, err := s.send(r.Context(), &payload)
+	results, errs := fanout(r.Context(), targets, func(ctx context.Context, chat string) (SendResult, error) {
+		// Resolve chat alias (before bot — chat may have a bound bot).
+		chatResult, err := s.chats(chat)
+		if err != nil {
+			return SendResult{}, err
+		}
+		// Resolve bot: explicit request bot > chat-bound bot > auth bot.
+		resolvedBot, errMsg := s.resolveRequestBot(ctx, payload.Bot, chatResult.Bot)
+		if errMsg != "" {
+			return SendResult{}, errors.New(errMsg)
+		}
+		// Parse mentions after bot resolution so the correct per-bot resolver is
+		// used when the bot was derived from chat binding rather than the payload.
+		resolver := s.mentionsResolver
+		if resolvedBot != "" && s.botMentionsResolvers != nil {
+			if br, ok := s.botMentionsResolvers[resolvedBot]; ok {
+				resolver = br
+			}
+		}
+		parseResult := mentions.Parse(ctx, payload.Message, payload.Mentions, !noParse, resolver)
+		if len(parseResult.Errors) > 0 {
+			vlog.V2("server: mentions parse: %d error(s)", len(parseResult.Errors))
+		}
+		// Copy the shared payload and override the per-target fields.
+		p := payload
+		p.ChatID = chatResult.ChatID
+		p.Bot = resolvedBot
+		p.Message = parseResult.Message
+		p.Mentions = parseResult.Mentions
+		syncID, err := s.send(ctx, &p)
+		if err != nil {
+			return SendResult{}, err
+		}
+		return SendResult{Chat: chat, SyncID: syncID}, nil
+	})
 	elapsed := time.Since(start)
 
 	keyName := KeyName(r.Context())
-	if err != nil {
+	if len(results) == 0 {
 		vlog.V1("server: %s %s [key: %s] -> 502 (%dms)", r.Method, r.URL.Path, keyName, elapsed.Milliseconds())
-		writeError(w, http.StatusBadGateway, "upstream error: "+err.Error())
-		return
+	} else {
+		vlog.V1("server: %s %s [key: %s] -> 200 (%dms)", r.Method, r.URL.Path, keyName, elapsed.Milliseconds())
 	}
+	writeMultiSend(w, results, errs, http.StatusOK)
+}
 
-	vlog.V1("server: %s %s [key: %s] -> 200 (%dms)", r.Method, r.URL.Path, keyName, elapsed.Milliseconds())
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(sendResponse{OK: true, SyncID: syncID})
+// validateAsyncRouting checks a single target chat against the async routing-mode
+// requirements. It returns an empty string when the chat is acceptable, or a
+// request-level error message (HTTP 400) describing what is missing. When
+// chat_id lists several chats it is called once per chat so the whole request is
+// accepted or rejected together.
+func validateAsyncRouting(rm, botID, botAlias, chat string) string {
+	switch rm {
+	case "catalog":
+		// Catalog mode: bot can come from bot_id, bot alias, or chat-bound bot.
+		// If no bot info is provided, chat_id must be a non-UUID alias
+		// so the bot can be derived from the chat binding.
+		if botID == "" && botAlias == "" && isUUID(chat) {
+			return "bot_id or bot alias is required when chat_id is a UUID in catalog mode; use a chat alias with a catalog-bound bot, or provide bot_id/bot"
+		}
+	case "mixed":
+		// Mixed mode: bot can come from bot_id (direct), bot alias, or chat-bound bot.
+		if botID == "" && botAlias == "" && isUUID(chat) {
+			return "bot_id or bot alias is required when chat_id is a UUID in mixed mode; provide bot_id for direct routing or bot alias for catalog resolution"
+		}
+	case "direct":
+		// Direct mode: bot_id is required and must be a UUID.
+		if botID == "" {
+			return "bot_id is required for async direct mode"
+		}
+		if !isUUID(botID) {
+			return "bot_id must be a valid UUID for direct routing mode"
+		}
+		if !isUUID(chat) {
+			return "chat_id must be a valid UUID for direct routing mode; use catalog or mixed mode for alias resolution"
+		}
+	default:
+		return fmt.Sprintf("invalid routing_mode %q: must be direct, catalog, or mixed", rm)
+	}
+	return ""
 }
 
 func parseJSON(body io.ReadCloser, p *SendPayload) error {

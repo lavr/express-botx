@@ -88,12 +88,19 @@ cat image.png | express-botx send --file - --file-name image.png
 express-botx send --host express.company.ru --bot-id UUID --secret KEY --chat-id UUID "Hello"
 ```
 
-При успехе утилита завершается молча (exit 0). Ошибки выводятся в stderr (exit 1).
+При успехе (один чат) утилита завершается молча (exit 0). Ошибки выводятся в stderr (exit 1).
+
+**Несколько чатов.** `--chat-id` принимает список через запятую
+(`--chat-id a,b,c`) → сообщение отправляется во все чаты (fan-out, best-effort).
+В human-выводе печатается по строке на чат (`chat: sync_id` или `chat: ERROR ...`);
+`--format json` отдаёт единый `MultiSendResponse`
+(`{"ok":..,"results":[{chat,sync_id}],"errors":[{chat,error}]}`). Exit-код ≠0
+только если упали **все** чаты (частичный отказ — exit 0).
 
 ### Флаги
 
 ```
---chat-id       UUID или алиас целевого чата (опционально при наличии default)
+--chat-id       UUID или алиас чата; список через запятую (a,b,c) — fan-out; опционально при наличии default
 --body-from     прочитать сообщение из файла
 --file          путь к файлу-вложению (или - для stdin)
 --file-name     имя файла (обязательно при --file -)
@@ -234,7 +241,20 @@ express-botx enqueue --bot-id UUID --chat-id UUID "Привет, @mention[email:
 express-botx enqueue --no-parse --bot-id UUID --chat-id UUID "Текст с @mention[email:...] как есть"
 ```
 
-При успехе выводит `request_id` (text) или `{"ok":true,"queued":true,"request_id":"..."}` (json).
+При успехе выводит `request_id` по строке на чат (text) или единый
+`{"ok":..,"results":[{chat,request_id,queued:true}],"errors":[{chat,error}]}`
+(json). Exit-код ≠0 возвращается только если **ни один** чат не поставлен в
+очередь (аналогично 502 all-fail у сервера).
+
+**Несколько чатов.** `--chat-id` принимает список через запятую → в очередь
+кладётся **N отдельных сообщений** (по одному на чат, expand на стороне
+producer), выводится N `request_id`. Так каждый чат ретраится/подтверждается
+независимо, без дублей; worker при этом не меняется («один чат = одно
+сообщение»). Валидация/резолвинг маршрута — «всё или ничего»: если хоть один
+чат в списке не проходит (не UUID в direct-режиме, неизвестный alias), команда
+завершается ошибкой **до** публикации чего-либо, поэтому повтор не создаёт
+дублей на уже успешных чатах. Сама публикация — best-effort: сбой брокера на
+одном чате не отменяет остальные, а попадает в `errors[]`.
 
 ### Флаги
 
@@ -242,7 +262,7 @@ express-botx enqueue --no-parse --bot-id UUID --chat-id UUID "Текст с @men
 --routing-mode   direct | catalog | mixed (по умолчанию: mixed)
 --bot-id         UUID бота (direct routing)
 --bot            алиас бота из catalog (catalog/mixed)
---chat-id        UUID или алиас чата
+--chat-id        UUID или алиас чата; список через запятую (a,b,c) — N сообщений в очередь
 --body-from      прочитать сообщение из файла
 --file           путь к файлу-вложению (или - для stdin)
 --file-name      имя файла (обязательно при --file -)
@@ -306,10 +326,13 @@ express-botx serve --config config.yaml --api-key env:MY_API_KEY
 express-botx serve --enqueue --config config.yaml
 ```
 
-Ответ в async-режиме:
+Ответ в async-режиме — единый `MultiSendResponse` c кодом `202` (по одному
+`results`-элементу на чат; `chat_id` через запятую раскрывается в N сообщений в
+очереди):
 
 ```json
-{"ok": true, "queued": true, "request_id": "0d6d7f87-0a2f-4c5b-b0d4-4d0b705a77e2"}
+{"ok": true,
+ "results": [{"chat": "deploy", "request_id": "0d6d7f87-0a2f-4c5b-b0d4-4d0b705a77e2", "queued": true}]}
 ```
 
 HTTP payload расширяется полями `routing_mode` и `bot_id` для direct routing:

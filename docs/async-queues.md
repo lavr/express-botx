@@ -114,6 +114,9 @@ express-botx enqueue --routing-mode catalog --bot alerts --chat-id deploy "Deplo
 
 # Mixed mode (default)
 express-botx enqueue --chat-id deploy "Hello"
+
+# Несколько чатов — expand в N сообщений в очереди (по одному на чат)
+express-botx enqueue --chat-id deploy,ops-alerts "Hello"
 ```
 
 ### HTTP-сервер
@@ -123,10 +126,12 @@ express-botx enqueue --chat-id deploy "Hello"
 express-botx serve --enqueue --config config.yaml
 ```
 
-Ответ — `202 Accepted`:
+Ответ — `202 Accepted`, единый `MultiSendResponse` (по одному `results`-элементу
+на чат; `chat_id` через запятую → N сообщений в очереди):
 
 ```json
-{"ok": true, "queued": true, "request_id": "0d6d7f87-0a2f-4c5b-b0d4-4d0b705a77e2"}
+{"ok": true,
+ "results": [{"chat": "deploy", "request_id": "0d6d7f87-0a2f-4c5b-b0d4-4d0b705a77e2", "queued": true}]}
 ```
 
 HTTP payload расширяется полями для direct routing:

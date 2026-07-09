@@ -502,14 +502,47 @@ func TestGitlab_ChatOverride(t *testing.T) {
 	}
 }
 
+// TestGitlab_MultiChatOverride: ?chat_id may itself list several chats
+// (comma-separated) and fans the event out to each, deduplicating repeats.
+func TestGitlab_MultiChatOverride(t *testing.T) {
+	srv, cap := newGitlabTestServer(t, &GitlabConfig{DefaultChatID: "chat1", SecretToken: "secret"})
+	w := doRequest(srv, "POST", "/api/v1/gitlab?chat_id=chatA,+chatB+,chatA", strings.NewReader(mrOpenPayload), gitlabHeaders("secret"))
+	if w.Code != 200 {
+		t.Fatalf("status = %d, body: %s", w.Code, w.Body.String())
+	}
+	if cap.count() != 2 {
+		t.Fatalf("send count = %d, want 2 (deduped fan-out)", cap.count())
+	}
+	var resp MultiSendResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode: %v (body: %s)", err, w.Body.String())
+	}
+	if !resp.OK || len(resp.Results) != 2 || len(resp.Errors) != 0 {
+		t.Fatalf("response = %+v, want ok with 2 results, 0 errors", resp)
+	}
+	if resp.Results[0].Chat != "chatA" || resp.Results[1].Chat != "chatB" {
+		t.Errorf("results = %+v, want chatA then chatB in order", resp.Results)
+	}
+}
+
 func TestGitlab_ChatResolveError(t *testing.T) {
+	// A chat that fails to resolve is a per-chat delivery outcome, not a
+	// request-level error: with the single default chat unresolvable, every
+	// target fails -> 502 with the error in errors[] (unified contract).
 	srv, cap := newGitlabTestServer(t, &GitlabConfig{DefaultChatID: "unknown-alias", SecretToken: "secret"})
 	w := doRequest(srv, "POST", "/api/v1/gitlab", strings.NewReader(mrOpenPayload), gitlabHeaders("secret"))
-	if w.Code != 400 {
-		t.Fatalf("status = %d, want 400 (body: %s)", w.Code, w.Body.String())
+	if w.Code != 502 {
+		t.Fatalf("status = %d, want 502 (body: %s)", w.Code, w.Body.String())
 	}
 	if cap.count() != 0 {
 		t.Errorf("send count = %d, want 0", cap.count())
+	}
+	var resp MultiSendResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode: %v (body: %s)", err, w.Body.String())
+	}
+	if resp.OK || len(resp.Results) != 0 || len(resp.Errors) != 1 || resp.Errors[0].Chat != "unknown-alias" {
+		t.Errorf("response = %+v, want not-ok with single unknown-alias error", resp)
 	}
 }
 
@@ -1003,13 +1036,13 @@ func TestGitlab_QueryChatBypassesRoutes(t *testing.T) {
 	if cap.last().ChatID != "override" {
 		t.Errorf("chat = %q, want override", cap.last().ChatID)
 	}
-	// Single-chat path keeps the plain sendResponse shape (sync_id, no results).
-	var resp sendResponse
+	// Single-chat path returns the uniform MultiSendResponse (results[0].sync_id).
+	var resp MultiSendResponse
 	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
 		t.Fatalf("decode: %v (body: %s)", err, w.Body.String())
 	}
-	if !resp.OK || resp.SyncID != "sync-1" {
-		t.Errorf("response = %+v, want ok/sync-1", resp)
+	if !resp.OK || len(resp.Results) != 1 || resp.Results[0].Chat != "override" || resp.Results[0].SyncID != "sync-1" {
+		t.Errorf("response = %+v, want ok with single override->sync-1 result", resp)
 	}
 }
 
@@ -1026,7 +1059,7 @@ func TestGitlab_FanoutTwoChats(t *testing.T) {
 	if cap.count() != 2 {
 		t.Fatalf("send count = %d, want 2", cap.count())
 	}
-	var resp gitlabFanoutResponse
+	var resp MultiSendResponse
 	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
 		t.Fatalf("decode: %v (body: %s)", err, w.Body.String())
 	}
@@ -1126,7 +1159,7 @@ func TestGitlab_FanoutPartialFailure(t *testing.T) {
 	if cap.count() != 2 {
 		t.Fatalf("send count = %d, want 2 (both attempted)", cap.count())
 	}
-	var resp gitlabFanoutResponse
+	var resp MultiSendResponse
 	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
 		t.Fatalf("decode: %v (body: %s)", err, w.Body.String())
 	}
@@ -1154,7 +1187,7 @@ func TestGitlab_FanoutAllFail(t *testing.T) {
 	if cap.count() != 2 {
 		t.Fatalf("send count = %d, want 2 (both attempted)", cap.count())
 	}
-	var resp gitlabFanoutResponse
+	var resp MultiSendResponse
 	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
 		t.Fatalf("decode: %v (body: %s)", err, w.Body.String())
 	}
@@ -1182,7 +1215,7 @@ func TestGitlab_NoRouteMatchFallsBackToDefault(t *testing.T) {
 			return cap.last().ChatID
 		}())
 	}
-	var resp gitlabFanoutResponse
+	var resp MultiSendResponse
 	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
 		t.Fatalf("decode: %v (body: %s)", err, w.Body.String())
 	}
@@ -1234,7 +1267,7 @@ func TestGitlab_FanoutChatResolveError(t *testing.T) {
 	if cap.count() != 1 {
 		t.Fatalf("send count = %d, want 1 (only the resolvable chat)", cap.count())
 	}
-	var resp gitlabFanoutResponse
+	var resp MultiSendResponse
 	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
 		t.Fatalf("decode: %v (body: %s)", err, w.Body.String())
 	}
@@ -1268,7 +1301,7 @@ func TestGitlab_SenderFanout(t *testing.T) {
 	if cap.count() != 2 {
 		t.Fatalf("send count = %d, want 2 (both sender chats)", cap.count())
 	}
-	var resp gitlabFanoutResponse
+	var resp MultiSendResponse
 	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
 		t.Fatalf("decode: %v (body: %s)", err, w.Body.String())
 	}
@@ -1385,7 +1418,7 @@ func TestGitlab_SenderSingleChat(t *testing.T) {
 	if got := cap.last().ChatID; got != "team-b-chat" {
 		t.Errorf("chat = %q, want team-b-chat", got)
 	}
-	var resp gitlabFanoutResponse
+	var resp MultiSendResponse
 	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
 		t.Fatalf("decode: %v (body: %s)", err, w.Body.String())
 	}
@@ -1406,7 +1439,7 @@ func TestGitlab_SenderIgnoresQueryBot(t *testing.T) {
 	if cap.count() != 2 {
 		t.Fatalf("send count = %d, want 2 (both sender chats)", cap.count())
 	}
-	var resp gitlabFanoutResponse
+	var resp MultiSendResponse
 	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
 		t.Fatalf("decode: %v (body: %s)", err, w.Body.String())
 	}
@@ -1416,7 +1449,7 @@ func TestGitlab_SenderIgnoresQueryBot(t *testing.T) {
 }
 
 // TestGitlab_QueryBotHonoredOnRoutesFanout: mirror of SenderIgnoresQueryBot —
-// on the default-token path ?bot= must reach gitlabFanout. In this single-bot
+// on the default-token path ?bot= must reach gitlabDeliver. In this single-bot
 // harness (no SingleBotName) an honoured ?bot=other fails every delivery with
 // "bot ... is not available", so 502 here proves the query bot is threaded
 // through; if a refactor passed "" at the default call site, the request would
@@ -1434,7 +1467,7 @@ func TestGitlab_QueryBotHonoredOnRoutesFanout(t *testing.T) {
 	if cap.count() != 0 {
 		t.Fatalf("send count = %d, want 0 (bot resolution fails before send)", cap.count())
 	}
-	var resp gitlabFanoutResponse
+	var resp MultiSendResponse
 	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
 		t.Fatalf("decode: %v (body: %s)", err, w.Body.String())
 	}
@@ -1443,20 +1476,26 @@ func TestGitlab_QueryBotHonoredOnRoutesFanout(t *testing.T) {
 	}
 }
 
-// TestGitlab_QueryBotHonoredOnSinglePath: same guarantee for gitlabSendSingle —
-// ?bot= on the default-token single-chat path must be validated, yielding 400
-// in this harness rather than being silently dropped.
+// TestGitlab_QueryBotHonoredOnSinglePath: same guarantee for the single-chat
+// path — ?bot= on the default-token single-chat delivery must be validated. Bot
+// resolution failure is now a per-chat delivery outcome, so it surfaces as a 502
+// with the error in errors[] (the whole single-target fan-out failed) rather than
+// being silently dropped.
 func TestGitlab_QueryBotHonoredOnSinglePath(t *testing.T) {
 	srv, cap := newGitlabFanoutServer(t, &GitlabConfig{SecretToken: "secret", DefaultChatID: "chat1"}, okSend, nil)
 	w := doRequest(srv, "POST", "/api/v1/gitlab?bot=other", strings.NewReader(mrOpenPayload), gitlabHeaders("secret"))
-	if w.Code != 400 {
-		t.Fatalf("status = %d, want 400 (?bot honoured must fail bot resolution); body: %s", w.Code, w.Body.String())
+	if w.Code != 502 {
+		t.Fatalf("status = %d, want 502 (?bot honoured must fail bot resolution); body: %s", w.Code, w.Body.String())
 	}
 	if cap.count() != 0 {
 		t.Fatalf("send count = %d, want 0", cap.count())
 	}
-	if !strings.Contains(w.Body.String(), `bot \"other\" is not available`) {
-		t.Errorf("body = %s, want bot-not-available error", w.Body.String())
+	var resp MultiSendResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode: %v (body: %s)", err, w.Body.String())
+	}
+	if len(resp.Errors) != 1 || resp.Errors[0].Chat != "chat1" || !strings.Contains(resp.Errors[0].Error, `bot "other" is not available`) {
+		t.Errorf("errors = %+v, want single chat1 bot-not-available error", resp.Errors)
 	}
 }
 
@@ -1474,7 +1513,7 @@ func TestGitlab_SenderFanoutAllFail(t *testing.T) {
 	if cap.count() != 2 {
 		t.Fatalf("send count = %d, want 2 (both attempted)", cap.count())
 	}
-	var resp gitlabFanoutResponse
+	var resp MultiSendResponse
 	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
 		t.Fatalf("decode: %v (body: %s)", err, w.Body.String())
 	}
@@ -1500,7 +1539,7 @@ func TestGitlab_SenderFanoutPartialFailure(t *testing.T) {
 	if cap.count() != 2 {
 		t.Fatalf("send count = %d, want 2 (both attempted)", cap.count())
 	}
-	var resp gitlabFanoutResponse
+	var resp MultiSendResponse
 	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
 		t.Fatalf("decode: %v (body: %s)", err, w.Body.String())
 	}
@@ -1550,7 +1589,7 @@ func TestGitlab_SenderMultiBot(t *testing.T) {
 	if w.Code != 200 {
 		t.Fatalf("status = %d, want 200 (partial success — bound chat delivers); body: %s", w.Code, w.Body.String())
 	}
-	var resp gitlabFanoutResponse
+	var resp MultiSendResponse
 	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
 		t.Fatalf("decode: %v (body: %s)", err, w.Body.String())
 	}
@@ -1566,8 +1605,8 @@ func TestGitlab_SenderMultiBot(t *testing.T) {
 }
 
 // TestGitlab_DefaultTokenUnchangedWithSenders: with senders configured, the
-// default token keeps its original behaviour — single delivery to
-// default_chat_id, plain sendResponse shape, ?chat_id override still works.
+// default token keeps its original chat-selection behaviour — single delivery to
+// default_chat_id, uniform MultiSendResponse shape, ?chat_id override still works.
 func TestGitlab_DefaultTokenUnchangedWithSenders(t *testing.T) {
 	t.Run("default_chat", func(t *testing.T) {
 		srv, cap := newGitlabFanoutServer(t, senderTestConfig(), okSend, nil)
@@ -1581,12 +1620,12 @@ func TestGitlab_DefaultTokenUnchangedWithSenders(t *testing.T) {
 		if got := cap.last().ChatID; got != "chat1" {
 			t.Errorf("chat = %q, want chat1 (default)", got)
 		}
-		var resp sendResponse
+		var resp MultiSendResponse
 		if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
 			t.Fatalf("decode: %v (body: %s)", err, w.Body.String())
 		}
-		if !resp.OK || resp.SyncID != "sync-1" {
-			t.Errorf("response = %+v, want ok/sync-1", resp)
+		if !resp.OK || len(resp.Results) != 1 || resp.Results[0].Chat != "chat1" || resp.Results[0].SyncID != "sync-1" {
+			t.Errorf("response = %+v, want ok with single chat1->sync-1 result", resp)
 		}
 	})
 	t.Run("query_chat_override", func(t *testing.T) {

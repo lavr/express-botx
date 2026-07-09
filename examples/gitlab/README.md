@@ -79,10 +79,13 @@ for the filter rules, template registry, template variables/helpers, and
 fans a single event out to one or more chats by project, event key, and branch
 (glob or `/regex/` patterns). All matching rules contribute their chats (unioned
 and de-duplicated); a rule with `stop: true` ends the scan; unmatched events fall
-back to `default_chat_id`. Delivery is best-effort: `200` with `{results,errors}`
-once at least one chat is delivered, `502` if they all fail. See the
+back to `default_chat_id`. Delivery is best-effort: the response is always a
+`MultiSendResponse` — `200` with `{"ok":true,"results":[…],"errors":[…]}` once at
+least one chat is delivered, `502` if they all fail. A comma-separated
+`?chat_id=a,b` fans out the same way. See the
 [routing section](../../docs/integrations.md#роутинг-событий-по-чатам-routes)
-for the full model and chat-selection priority.
+and [Мульти-чат](../../docs/integrations.md#мульти-чат-и-единый-ответ-multisendresponse)
+for the full model, response format and chat-selection priority.
 
 ## Per-team tokens (senders)
 

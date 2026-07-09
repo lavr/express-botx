@@ -126,8 +126,18 @@ Options:
 	if err != nil {
 		return err
 	}
-	if err := cfg.RequireChatID(); err != nil {
-		return err
+
+	// Determine target chats up front so an empty --chat-id fails fast (before
+	// authenticating or reading files). A comma-separated --chat-id (--chat-id a,b,c)
+	// fans the same message out to each chat; an empty value falls back to the
+	// single/default chat auto-selection. The chats are resolved to UUIDs later,
+	// per target, so a bad alias fails only that chat rather than the whole command.
+	chats := parseChatIDs(cfg.ChatID)
+	if len(chats) == 0 {
+		if err := cfg.RequireChatID(); err != nil {
+			return err
+		}
+		chats = []string{cfg.ChatID}
 	}
 
 	// Validate status
@@ -240,38 +250,135 @@ Options:
 		fmt.Fprintf(deps.Stderr, "warning: mention %s: %s\n", e.Kind, e.Cause)
 	}
 
-	// Build SendRequest
-	sr := botapi.BuildSendRequest(&botapi.SendParams{
-		ChatID:   cfg.ChatID,
-		Message:  parseResult.Message,
-		Status:   status,
-		File:     fileAttachment,
-		Metadata: meta,
-		Mentions: parseResult.Mentions,
-		Silent:   silent,
-		Stealth:  stealth,
-		ForceDND: forceDND,
-		NoNotify: noNotify,
-	})
-
-	// Send
-	err = client.Send(context.Background(), sr)
-	if err != nil {
-		if errors.Is(err, botapi.ErrUnauthorized) {
-			if cfg.BotToken != "" {
-				return fmt.Errorf("bot token rejected (401), re-configure token")
-			}
-			tok, err = refreshToken(cfg, cache)
-			if err != nil {
-				return fmt.Errorf("refreshing token: %w", err)
-			}
-			client.Token = tok
-			err = client.Send(context.Background(), sr)
+	// Fan out to every target chat via the single configured bot. The CLI uses one
+	// bot/token per command (unlike the sync /send handler, which resolves a bot
+	// per chat), so mentions are parsed once above and the resolved message is
+	// reused across chats with only the target chat swapped. Delivery is
+	// best-effort and per-chat independent: a failed chat is recorded, the rest
+	// still send, and the exit code is non-zero only if every chat failed.
+	results := make([]sendCmdResult, 0, len(chats))
+	for _, chat := range chats {
+		chatID, rerr := cfg.ResolveChatAlias(chat)
+		if rerr != nil {
+			results = append(results, sendCmdResult{Chat: chat, Error: rerr.Error()})
+			continue
 		}
-		if err != nil {
-			return fmt.Errorf("sending: %w", err)
+
+		sr := botapi.BuildSendRequest(&botapi.SendParams{
+			ChatID:   chatID,
+			Message:  parseResult.Message,
+			Status:   status,
+			File:     fileAttachment,
+			Metadata: meta,
+			Mentions: parseResult.Mentions,
+			Silent:   silent,
+			Stealth:  stealth,
+			ForceDND: forceDND,
+			NoNotify: noNotify,
+		})
+
+		syncID, serr := sendWithRefresh(client, cfg, cache, sr)
+		if serr != nil {
+			results = append(results, sendCmdResult{Chat: chat, Error: serr.Error()})
+			continue
+		}
+		results = append(results, sendCmdResult{Chat: chat, SyncID: syncID})
+	}
+
+	return printSendResults(deps.Stdout, cfg.Format, results)
+}
+
+// sendWithRefresh posts one SendRequest and returns its sync_id, refreshing the
+// token once on a 401 exactly as the original single-chat path did.
+func sendWithRefresh(client *botapi.Client, cfg *config.Config, cache token.Cache, sr *botapi.SendRequest) (string, error) {
+	syncID, err := client.SendWithSyncID(context.Background(), sr)
+	if err != nil && errors.Is(err, botapi.ErrUnauthorized) {
+		if cfg.BotToken != "" {
+			return "", fmt.Errorf("bot token rejected (401), re-configure token")
+		}
+		tok, rerr := refreshToken(cfg, cache)
+		if rerr != nil {
+			return "", fmt.Errorf("refreshing token: %w", rerr)
+		}
+		client.Token = tok
+		syncID, err = client.SendWithSyncID(context.Background(), sr)
+	}
+	if err != nil {
+		return "", fmt.Errorf("sending: %w", err)
+	}
+	return syncID, nil
+}
+
+// sendCmdResult is one per-chat sync send outcome: the target chat plus either
+// its sync_id (success) or an error string.
+type sendCmdResult struct {
+	Chat   string
+	SyncID string
+	Error  string
+}
+
+// printSendResults renders per-chat sync send outcomes. In json format it emits
+// the uniform multi-chat body
+// {"ok":..,"results":[{chat,sync_id}],"errors":[{chat,error}]}. In human format a
+// multi-chat send prints one "chat: sync_id" (or "chat: ERROR ..") line per target;
+// a single-chat send stays silent on success and surfaces a failure through the
+// returned error, preserving the previous CLI behavior. A non-nil error (non-zero
+// exit) is returned only when every target failed, mirroring the server's 502
+// all-fail semantics.
+func printSendResults(w io.Writer, format string, results []sendCmdResult) error {
+	okCount := 0
+	for _, r := range results {
+		if r.Error == "" {
+			okCount++
 		}
 	}
 
+	if format == "json" {
+		type jsonResult struct {
+			Chat   string `json:"chat"`
+			SyncID string `json:"sync_id,omitempty"`
+		}
+		type jsonError struct {
+			Chat  string `json:"chat"`
+			Error string `json:"error"`
+		}
+		type jsonResponse struct {
+			OK      bool         `json:"ok"`
+			Results []jsonResult `json:"results"`
+			Errors  []jsonError  `json:"errors,omitempty"`
+		}
+		resp := jsonResponse{OK: okCount > 0, Results: []jsonResult{}}
+		for _, r := range results {
+			if r.Error != "" {
+				resp.Errors = append(resp.Errors, jsonError{Chat: r.Chat, Error: r.Error})
+			} else {
+				resp.Results = append(resp.Results, jsonResult{Chat: r.Chat, SyncID: r.SyncID})
+			}
+		}
+		enc := json.NewEncoder(w)
+		enc.SetIndent("", "  ")
+		if err := enc.Encode(resp); err != nil {
+			return err
+		}
+	} else {
+		// Multi-chat: one line per chat. Single-chat: silent on success, error
+		// surfaced via the returned error below (previous behavior).
+		if len(results) > 1 {
+			for _, r := range results {
+				if r.Error != "" {
+					fmt.Fprintf(w, "%s: ERROR %s\n", r.Chat, r.Error)
+				} else {
+					fmt.Fprintf(w, "%s: %s\n", r.Chat, r.SyncID)
+				}
+			}
+		}
+	}
+
+	if okCount == 0 {
+		if len(results) == 1 {
+			return fmt.Errorf("%s", results[0].Error)
+		}
+		return fmt.Errorf("all %d chats failed", len(results))
+	}
 	return nil
 }

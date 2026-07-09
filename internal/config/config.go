@@ -675,6 +675,31 @@ func IsUUID(s string) bool {
 	return uuidRe.MatchString(s)
 }
 
+// ResolveChatAlias resolves a single chat value to its UUID without mutating the
+// config. A UUID passes through unchanged; an alias is looked up in the Chats map.
+// Fan-out send paths use it to resolve several comma-separated chats independently,
+// so a bad alias fails per chat rather than aborting the whole command.
+func (c *Config) ResolveChatAlias(chat string) (string, error) {
+	if chat == "" {
+		return "", fmt.Errorf("chat is required")
+	}
+	if IsUUID(chat) {
+		return chat, nil
+	}
+	if cc, ok := c.Chats[chat]; ok {
+		return cc.ID, nil
+	}
+	names := make([]string, 0, len(c.Chats))
+	for k := range c.Chats {
+		names = append(names, k)
+	}
+	sort.Strings(names)
+	if len(names) == 0 {
+		return "", fmt.Errorf("unknown chat %q (no aliases configured)", chat)
+	}
+	return "", fmt.Errorf("unknown chat alias %q, available: %s", chat, strings.Join(names, ", "))
+}
+
 // ResolveChatID resolves ChatID: if it looks like a UUID, use as-is;
 // otherwise look it up in the Chats alias map.
 func (c *Config) ResolveChatID() error {

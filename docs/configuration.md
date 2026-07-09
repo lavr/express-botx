@@ -211,6 +211,14 @@ curl /api/v1/send -d '{"bot":"alert-bot","chat_id":"deploy","message":"!"}'
 curl /api/v1/alertmanager?bot=deploy-bot
 ```
 
+## Несколько чатов (`chat_id` через запятую)
+
+`chat_id` можно задать списком через запятую (`chat_id=a,b,c` в теле `/send` или
+`?chat_id=a,b,c` в вебхуках/CLI) — сообщение рассылается во **все** перечисленные
+чаты (fan-out, best-effort). Ответ единый для всех эндпоинтов — `MultiSendResponse`
+с пер-чатовыми `results`/`errors`; подробности, коды ответа и **ломающее изменение
+формата** — в [docs/integrations.md](integrations.md#мульти-чат-и-единый-ответ-multisendresponse).
+
 ## Чат по умолчанию
 
 Один чат можно пометить как `default: true`. Он будет использоваться когда `--chat-id` (CLI) или `chat_id` (API) не указан:
@@ -223,10 +231,15 @@ express-botx config chat set general UUID --no-default   # снять помет
 express-botx config chat list                             # покажет (default)
 ```
 
-Приоритет выбора чата в HTTP-сервере:
-- `/send`: `chat_id` из запроса → чат по умолчанию → ошибка
-- `/alertmanager`, `/grafana`: `?chat_id=` → `default_chat_id` из конфига вебхука → чат по умолчанию → единственный чат → ошибка
+Приоритет выбора чата в HTTP-сервере (`chat_id` может быть списком через запятую —
+тогда фан-аут во все указанные чаты):
+- `/send`: `chat_id` из запроса → чат по умолчанию → пустой `chat_id` даёт `400`.
+  Резолв конкретного чата/бота, если он не удался, — пер-чатовая ошибка в
+  `errors[]` (а не общий `400`); если упали все чаты — `502`.
+- `/alertmanager`, `/grafana`: `?chat_id=` → `default_chat_id` из конфига вебхука → чат по умолчанию → единственный чат → пустой набор даёт `400`; пер-чатовые сбои — в `errors[]`, всё упало — `502`
 - `/gitlab`: `?chat_id=` → `routes` (все совпавшие правила, объединение+дедуп) → `default_chat_id` → чат по умолчанию → единственный чат → `200 {ignored}`; при совпадении sender-токена (`server.gitlab.senders`) цели — всегда `chats` этого sender'а, остальное игнорируется
+
+Ответ всех эндпоинтов — единый `MultiSendResponse` (см. [Мульти-чат](integrations.md#мульти-чат-и-единый-ответ-multisendresponse)).
 
 ## Формат host
 

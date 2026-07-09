@@ -426,6 +426,293 @@ bots:
 	}
 }
 
+// mockBotxSendMulti returns a per-chat sync_id ("sync-<group_chat_id>") and can be
+// told to fail specific group_chat_ids (HTTP 500) to exercise partial/total fan-out.
+type mockBotxSendMulti struct {
+	mu      sync.Mutex
+	chats   []string // group_chat_ids received, in call order
+	failFor map[string]bool
+	srv     *httptest.Server
+}
+
+func newMockBotxSendMulti(failFor map[string]bool) *mockBotxSendMulti {
+	m := &mockBotxSendMulti{failFor: failFor}
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /api/v4/botx/notifications/direct", func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get("Authorization") != "Bearer test-token" {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		body, _ := io.ReadAll(r.Body)
+		var req struct {
+			GroupChatID string `json:"group_chat_id"`
+		}
+		_ = json.Unmarshal(body, &req)
+		m.mu.Lock()
+		m.chats = append(m.chats, req.GroupChatID)
+		m.mu.Unlock()
+		if m.failFor[req.GroupChatID] {
+			w.WriteHeader(http.StatusInternalServerError)
+			fmt.Fprintf(w, `{"status":"error"}`)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusAccepted)
+		fmt.Fprintf(w, `{"status":"ok","result":{"sync_id":"sync-%s"}}`, req.GroupChatID)
+	})
+	m.srv = httptest.NewServer(mux)
+	return m
+}
+
+func (m *mockBotxSendMulti) close() { m.srv.Close() }
+
+func (m *mockBotxSendMulti) receivedChats() []string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	out := make([]string, len(m.chats))
+	copy(out, m.chats)
+	return out
+}
+
+const (
+	chatA = "00000000-0000-0000-0000-00000000000a"
+	chatB = "00000000-0000-0000-0000-00000000000b"
+	chatC = "00000000-0000-0000-0000-00000000000c"
+)
+
+func multiSendConfig(t *testing.T, host string) string {
+	return writeTestConfig(t, fmt.Sprintf(`
+bots:
+  default:
+    host: %s
+    id: 00000000-0000-0000-0000-000000000001
+    token: test-token
+`, host))
+}
+
+func TestSend_SingleChat_SilentSuccess(t *testing.T) {
+	mock := newMockBotxSendMulti(nil)
+	defer mock.close()
+
+	deps, stdout, _ := testDeps()
+	deps.IsTerminal = true
+
+	err := runSend([]string{
+		"--config", multiSendConfig(t, mock.srv.URL),
+		"--chat-id", chatA,
+		"hello",
+	}, deps)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	// Single-chat success stays silent in human output (previous behavior).
+	if out := stdout.String(); out != "" {
+		t.Errorf("expected empty stdout for single-chat success, got %q", out)
+	}
+	if chats := mock.receivedChats(); len(chats) != 1 || chats[0] != chatA {
+		t.Errorf("received chats = %v, want [%s]", chats, chatA)
+	}
+}
+
+func TestSend_SingleChat_Failure(t *testing.T) {
+	mock := newMockBotxSendMulti(map[string]bool{chatA: true}) // chatA delivery fails
+	defer mock.close()
+
+	deps, stdout, _ := testDeps()
+	deps.IsTerminal = true
+
+	err := runSend([]string{
+		"--config", multiSendConfig(t, mock.srv.URL),
+		"--chat-id", chatA,
+		"hello",
+	}, deps)
+	// Single-chat failure surfaces via a non-nil error (non-zero exit), not stdout —
+	// the legacy CLI contract for one chat.
+	if err == nil {
+		t.Fatal("expected error for single-chat delivery failure, got nil")
+	}
+	if out := stdout.String(); out != "" {
+		t.Errorf("expected empty stdout on single-chat failure, got %q", out)
+	}
+	if chats := mock.receivedChats(); len(chats) != 1 || chats[0] != chatA {
+		t.Errorf("received chats = %v, want [%s]", chats, chatA)
+	}
+}
+
+func TestSend_MultiChat_FanOut(t *testing.T) {
+	mock := newMockBotxSendMulti(nil)
+	defer mock.close()
+
+	deps, stdout, _ := testDeps()
+	deps.IsTerminal = true
+
+	err := runSend([]string{
+		"--config", multiSendConfig(t, mock.srv.URL),
+		"--chat-id", chatA + "," + chatB,
+		"fanned out",
+	}, deps)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	chats := mock.receivedChats()
+	if len(chats) != 2 || chats[0] != chatA || chats[1] != chatB {
+		t.Fatalf("received chats = %v, want [%s %s]", chats, chatA, chatB)
+	}
+
+	out := stdout.String()
+	if !strings.Contains(out, chatA+": sync-"+chatA) {
+		t.Errorf("missing line for chat A in %q", out)
+	}
+	if !strings.Contains(out, chatB+": sync-"+chatB) {
+		t.Errorf("missing line for chat B in %q", out)
+	}
+	if n := strings.Count(strings.TrimSpace(out), "\n"); n != 1 {
+		t.Errorf("expected 2 output lines, got %d: %q", n+1, out)
+	}
+}
+
+func TestSend_MultiChat_Dedup(t *testing.T) {
+	mock := newMockBotxSendMulti(nil)
+	defer mock.close()
+
+	deps, _, _ := testDeps()
+	deps.IsTerminal = true
+
+	err := runSend([]string{
+		"--config", multiSendConfig(t, mock.srv.URL),
+		"--chat-id", chatA + " , " + chatA + "," + chatB,
+		"dedup me",
+	}, deps)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if chats := mock.receivedChats(); len(chats) != 2 {
+		t.Errorf("expected 2 deduped sends, got %d: %v", len(chats), chats)
+	}
+}
+
+func TestSend_MultiChat_PartialFail(t *testing.T) {
+	mock := newMockBotxSendMulti(map[string]bool{chatB: true})
+	defer mock.close()
+
+	deps, stdout, _ := testDeps()
+	deps.IsTerminal = true
+
+	err := runSend([]string{
+		"--config", multiSendConfig(t, mock.srv.URL),
+		"--chat-id", chatA + "," + chatB,
+		"partial",
+	}, deps)
+	// At least one chat delivered -> exit code zero (best-effort).
+	if err != nil {
+		t.Fatalf("partial failure should not fail the command, got: %v", err)
+	}
+
+	out := stdout.String()
+	if !strings.Contains(out, chatA+": sync-"+chatA) {
+		t.Errorf("missing success line for chat A in %q", out)
+	}
+	if !strings.Contains(out, chatB+": ERROR") {
+		t.Errorf("missing error line for chat B in %q", out)
+	}
+}
+
+func TestSend_MultiChat_AllFail(t *testing.T) {
+	mock := newMockBotxSendMulti(map[string]bool{chatA: true, chatB: true})
+	defer mock.close()
+
+	deps, stdout, _ := testDeps()
+	deps.IsTerminal = true
+
+	err := runSend([]string{
+		"--config", multiSendConfig(t, mock.srv.URL),
+		"--chat-id", chatA + "," + chatB,
+		"all fail",
+	}, deps)
+	// Every chat failed -> non-zero exit (returned error).
+	if err == nil {
+		t.Fatal("expected error when all chats fail")
+	}
+
+	out := stdout.String()
+	if !strings.Contains(out, chatA+": ERROR") || !strings.Contains(out, chatB+": ERROR") {
+		t.Errorf("expected error lines for both chats in %q", out)
+	}
+}
+
+func TestSend_MultiChat_JSONOutput(t *testing.T) {
+	mock := newMockBotxSendMulti(map[string]bool{chatB: true})
+	defer mock.close()
+
+	deps, stdout, _ := testDeps()
+	deps.IsTerminal = true
+
+	err := runSend([]string{
+		"--config", multiSendConfig(t, mock.srv.URL),
+		"--chat-id", chatA + "," + chatB,
+		"--format", "json",
+		"json multi",
+	}, deps)
+	// Partial failure still exits zero, but emits the uniform response body.
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	var resp struct {
+		OK      bool `json:"ok"`
+		Results []struct {
+			Chat   string `json:"chat"`
+			SyncID string `json:"sync_id"`
+		} `json:"results"`
+		Errors []struct {
+			Chat  string `json:"chat"`
+			Error string `json:"error"`
+		} `json:"errors"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &resp); err != nil {
+		t.Fatalf("invalid JSON output: %v\nraw: %s", err, stdout.String())
+	}
+	if !resp.OK {
+		t.Errorf("ok = false, want true (chat A delivered)")
+	}
+	if len(resp.Results) != 1 || resp.Results[0].Chat != chatA || resp.Results[0].SyncID != "sync-"+chatA {
+		t.Errorf("results = %+v, want single success for chat A", resp.Results)
+	}
+	if len(resp.Errors) != 1 || resp.Errors[0].Chat != chatB {
+		t.Errorf("errors = %+v, want single error for chat B", resp.Errors)
+	}
+}
+
+func TestSend_MultiChat_UnknownAliasPerChat(t *testing.T) {
+	mock := newMockBotxSendMulti(nil)
+	defer mock.close()
+
+	// chatA is a valid UUID; "nope" is an unknown alias -> per-chat resolve error,
+	// but chatA still delivers (best-effort), so exit code stays zero.
+	deps, stdout, _ := testDeps()
+	deps.IsTerminal = true
+
+	err := runSend([]string{
+		"--config", multiSendConfig(t, mock.srv.URL),
+		"--chat-id", chatA + ",nope",
+		"mixed",
+	}, deps)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if chats := mock.receivedChats(); len(chats) != 1 || chats[0] != chatA {
+		t.Errorf("received chats = %v, want only [%s]", chats, chatA)
+	}
+	out := stdout.String()
+	if !strings.Contains(out, chatA+": sync-"+chatA) {
+		t.Errorf("missing success line for chat A in %q", out)
+	}
+	if !strings.Contains(out, "nope: ERROR") {
+		t.Errorf("missing resolve-error line for alias nope in %q", out)
+	}
+}
+
 func TestSend_MentionsNotArray(t *testing.T) {
 	deps, _, _ := testDeps()
 	deps.IsTerminal = true

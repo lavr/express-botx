@@ -2,12 +2,14 @@ package cmd
 
 import (
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -19,6 +21,11 @@ import (
 // Registered as "testfake" driver so runEnqueue can create publishers via factory.
 var testFakeQueue = queue.NewFake()
 
+// testFailQueue is a shared publisher that fails PublishWork for chats listed in
+// its failChats set. Registered as the "testfailpub" driver so enqueue tests can
+// exercise the best-effort phase-2 publish path (partial and all-fail).
+var testFailQueue = &failingPublisher{}
+
 func init() {
 	queue.Register("testfake", queue.DriverFactory{
 		NewPublisher: func(url, name string) (queue.Publisher, error) {
@@ -28,7 +35,64 @@ func init() {
 			return testFakeQueue, nil
 		},
 	})
+	queue.Register("testfailpub", queue.DriverFactory{
+		NewPublisher: func(url, name string) (queue.Publisher, error) {
+			return testFailQueue, nil
+		},
+		NewConsumer: func(url, name, group string) (queue.Consumer, error) {
+			return nil, fmt.Errorf("testfailpub has no consumer")
+		},
+	})
 }
+
+// failingPublisher records published work but returns an error for any chat in
+// failChats, so a comma-separated enqueue can be driven into a partial or total
+// publish failure.
+type failingPublisher struct {
+	mu        sync.Mutex
+	published []*queue.WorkMessage
+	failChats map[string]bool
+}
+
+func (p *failingPublisher) reset(failChats ...string) {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.published = nil
+	p.failChats = make(map[string]bool, len(failChats))
+	for _, c := range failChats {
+		p.failChats[c] = true
+	}
+}
+
+func (p *failingPublisher) publishedChats() []string {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	out := make([]string, 0, len(p.published))
+	for _, m := range p.published {
+		out = append(out, m.Routing.ChatID)
+	}
+	return out
+}
+
+func (p *failingPublisher) PublishWork(_ context.Context, msg *queue.WorkMessage) error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.failChats[msg.Routing.ChatID] {
+		return fmt.Errorf("broker down for %s", msg.Routing.ChatID)
+	}
+	p.published = append(p.published, msg)
+	return nil
+}
+
+func (p *failingPublisher) PublishResult(context.Context, string, *queue.WorkResult) error {
+	return nil
+}
+
+func (p *failingPublisher) PublishCatalog(context.Context, string, *queue.CatalogSnapshot) error {
+	return nil
+}
+
+func (p *failingPublisher) Close() error { return nil }
 
 func TestEnqueue_DirectMode_Success(t *testing.T) {
 	testFakeQueue.Reset()
@@ -113,9 +177,12 @@ queue:
 	}
 
 	var resp struct {
-		OK        bool   `json:"ok"`
-		Queued    bool   `json:"queued"`
-		RequestID string `json:"request_id"`
+		OK      bool `json:"ok"`
+		Results []struct {
+			Chat      string `json:"chat"`
+			RequestID string `json:"request_id"`
+			Queued    bool   `json:"queued"`
+		} `json:"results"`
 	}
 	if err := json.Unmarshal(stdout.Bytes(), &resp); err != nil {
 		t.Fatalf("invalid JSON output: %v\nraw: %s", err, stdout.String())
@@ -123,11 +190,17 @@ queue:
 	if !resp.OK {
 		t.Error("expected ok=true")
 	}
-	if !resp.Queued {
+	if len(resp.Results) != 1 {
+		t.Fatalf("results = %+v, want 1", resp.Results)
+	}
+	if !resp.Results[0].Queued {
 		t.Error("expected queued=true")
 	}
-	if resp.RequestID == "" {
+	if resp.Results[0].RequestID == "" {
 		t.Error("expected non-empty request_id")
+	}
+	if resp.Results[0].Chat != "00000000-0000-0000-0000-000000000c02" {
+		t.Errorf("chat = %q, want target chat", resp.Results[0].Chat)
 	}
 }
 
@@ -1070,5 +1143,307 @@ queue:
 	}
 	if !strings.Contains(err.Error(), "nothing to send") {
 		t.Errorf("expected 'nothing to send' error, got: %v", err)
+	}
+}
+
+// Task 5: --chat-id accepts a comma-separated list and expands into N
+// independent enqueues — one queued message per chat — printing one request_id
+// per chat. Uses direct mode with UUID chats so no catalog is needed.
+
+func TestEnqueue_MultiChat_Expands(t *testing.T) {
+	testFakeQueue.Reset()
+	cfgPath := writeTestConfig(t, `
+queue:
+  driver: testfake
+  url: fake://localhost
+  name: test-work
+`)
+	deps, stdout, _ := testDeps()
+	deps.Stdin = strings.NewReader("")
+	deps.IsTerminal = true
+
+	err := runEnqueue([]string{
+		"--config", cfgPath,
+		"--bot-id", "00000000-0000-0000-0000-000000000b01",
+		"--chat-id", "00000000-0000-0000-0000-00000000000a,00000000-0000-0000-0000-00000000000b,00000000-0000-0000-0000-00000000000c",
+		"--routing-mode", "direct",
+		"fanned out",
+	}, deps)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	// One work message per chat (expand), each carrying only its own chat.
+	msgs := testFakeQueue.WorkMessages()
+	if len(msgs) != 3 {
+		t.Fatalf("expected 3 work messages, got %d", len(msgs))
+	}
+	gotChats := map[string]bool{}
+	gotReqIDs := map[string]bool{}
+	for _, m := range msgs {
+		gotChats[m.Routing.ChatID] = true
+		gotReqIDs[m.RequestID] = true
+		if m.Payload.Message != "fanned out" {
+			t.Errorf("message = %q, want shared payload", m.Payload.Message)
+		}
+	}
+	for _, c := range []string{
+		"00000000-0000-0000-0000-00000000000a",
+		"00000000-0000-0000-0000-00000000000b",
+		"00000000-0000-0000-0000-00000000000c",
+	} {
+		if !gotChats[c] {
+			t.Errorf("missing enqueue for chat %q", c)
+		}
+	}
+	if len(gotReqIDs) != 3 {
+		t.Errorf("expected 3 distinct request_ids, got %d", len(gotReqIDs))
+	}
+
+	// Human output: one request_id per line.
+	lines := strings.Fields(strings.TrimSpace(stdout.String()))
+	if len(lines) != 3 {
+		t.Fatalf("expected 3 request_id lines, got %d: %q", len(lines), stdout.String())
+	}
+	for _, l := range lines {
+		if !gotReqIDs[l] {
+			t.Errorf("printed request_id %q not among enqueued %v", l, gotReqIDs)
+		}
+	}
+}
+
+func TestEnqueue_MultiChat_Dedup(t *testing.T) {
+	testFakeQueue.Reset()
+	cfgPath := writeTestConfig(t, `
+queue:
+  driver: testfake
+  url: fake://localhost
+  name: test-work
+`)
+	deps, _, _ := testDeps()
+	deps.Stdin = strings.NewReader("")
+	deps.IsTerminal = true
+
+	err := runEnqueue([]string{
+		"--config", cfgPath,
+		"--bot-id", "00000000-0000-0000-0000-000000000b01",
+		"--chat-id", "00000000-0000-0000-0000-00000000000a, 00000000-0000-0000-0000-00000000000a ,00000000-0000-0000-0000-00000000000b",
+		"--routing-mode", "direct",
+		"dedup me",
+	}, deps)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	msgs := testFakeQueue.WorkMessages()
+	if len(msgs) != 2 {
+		t.Fatalf("expected 2 deduped work messages, got %d", len(msgs))
+	}
+}
+
+func TestEnqueue_MultiChat_JSONOutput(t *testing.T) {
+	testFakeQueue.Reset()
+	cfgPath := writeTestConfig(t, `
+queue:
+  driver: testfake
+  url: fake://localhost
+  name: test-work
+`)
+	deps, stdout, _ := testDeps()
+	deps.Stdin = strings.NewReader("")
+	deps.IsTerminal = true
+
+	err := runEnqueue([]string{
+		"--config", cfgPath,
+		"--bot-id", "00000000-0000-0000-0000-000000000b01",
+		"--chat-id", "00000000-0000-0000-0000-00000000000a,00000000-0000-0000-0000-00000000000b",
+		"--routing-mode", "direct",
+		"--format", "json",
+		"json multi",
+	}, deps)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	var resp struct {
+		OK      bool `json:"ok"`
+		Results []struct {
+			Chat      string `json:"chat"`
+			RequestID string `json:"request_id"`
+			Queued    bool   `json:"queued"`
+		} `json:"results"`
+	}
+	if err := json.Unmarshal(stdout.Bytes(), &resp); err != nil {
+		t.Fatalf("invalid JSON output: %v\nraw: %s", err, stdout.String())
+	}
+	if !resp.OK || len(resp.Results) != 2 {
+		t.Fatalf("response = %+v, want ok with 2 results", resp)
+	}
+	if resp.Results[0].Chat != "00000000-0000-0000-0000-00000000000a" ||
+		resp.Results[1].Chat != "00000000-0000-0000-0000-00000000000b" {
+		t.Errorf("chats = %q/%q, want a then b", resp.Results[0].Chat, resp.Results[1].Chat)
+	}
+	for _, r := range resp.Results {
+		if !r.Queued || r.RequestID == "" {
+			t.Errorf("result = %+v, want queued with request_id", r)
+		}
+	}
+}
+
+func TestEnqueue_SingleChat_UnchangedHumanOutput(t *testing.T) {
+	testFakeQueue.Reset()
+	cfgPath := writeTestConfig(t, `
+queue:
+  driver: testfake
+  url: fake://localhost
+  name: test-work
+`)
+	deps, stdout, _ := testDeps()
+	deps.Stdin = strings.NewReader("")
+	deps.IsTerminal = true
+
+	err := runEnqueue([]string{
+		"--config", cfgPath,
+		"--bot-id", "00000000-0000-0000-0000-000000000b01",
+		"--chat-id", "00000000-0000-0000-0000-00000000000a",
+		"--routing-mode", "direct",
+		"single",
+	}, deps)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	msgs := testFakeQueue.WorkMessages()
+	if len(msgs) != 1 {
+		t.Fatalf("expected 1 work message, got %d", len(msgs))
+	}
+	// Single-chat human output is one line = the request_id (backward compatible).
+	out := strings.TrimSpace(stdout.String())
+	if out != msgs[0].RequestID {
+		t.Errorf("output = %q, want single request_id %q", out, msgs[0].RequestID)
+	}
+}
+
+// TestEnqueue_MultiChat_ValidationFailPublishesNothing locks in the all-or-nothing
+// phase-1 resolve pass: if any chat fails routing validation the command returns
+// before publishing anything, so a retry never double-publishes the good chats.
+func TestEnqueue_MultiChat_ValidationFailPublishesNothing(t *testing.T) {
+	testFakeQueue.Reset()
+	cfgPath := writeTestConfig(t, `
+queue:
+  driver: testfake
+  url: fake://localhost
+  name: test-work
+`)
+	deps, stdout, _ := testDeps()
+	deps.Stdin = strings.NewReader("")
+	deps.IsTerminal = true
+
+	// First chat is a valid UUID, second is not — direct mode rejects the second.
+	err := runEnqueue([]string{
+		"--config", cfgPath,
+		"--bot-id", "00000000-0000-0000-0000-000000000b01",
+		"--chat-id", "00000000-0000-0000-0000-00000000000a,not-a-uuid",
+		"--routing-mode", "direct",
+		"should not publish",
+	}, deps)
+	if err == nil {
+		t.Fatal("expected error for invalid second chat, got nil")
+	}
+	if msgs := testFakeQueue.WorkMessages(); len(msgs) != 0 {
+		t.Fatalf("expected 0 published messages on validation failure, got %d", len(msgs))
+	}
+	if out := strings.TrimSpace(stdout.String()); out != "" {
+		t.Errorf("expected no stdout on validation failure, got %q", out)
+	}
+}
+
+// TestEnqueue_MultiChat_PartialPublishFail verifies best-effort phase-2 publish:
+// a broker failure on one chat is recorded while the other chat still publishes,
+// and the command exits zero (at least one chat succeeded).
+func TestEnqueue_MultiChat_PartialPublishFail(t *testing.T) {
+	chatA := "00000000-0000-0000-0000-00000000000a"
+	chatB := "00000000-0000-0000-0000-00000000000b"
+	testFailQueue.reset(chatB) // chatB publish fails, chatA succeeds
+	cfgPath := writeTestConfig(t, `
+queue:
+  driver: testfailpub
+  url: fake://localhost
+  name: test-work
+`)
+	deps, stdout, _ := testDeps()
+	deps.Stdin = strings.NewReader("")
+	deps.IsTerminal = true
+
+	err := runEnqueue([]string{
+		"--config", cfgPath,
+		"--bot-id", "00000000-0000-0000-0000-000000000b01",
+		"--chat-id", chatA + "," + chatB,
+		"--routing-mode", "direct",
+		"--format", "json",
+		"partial",
+	}, deps)
+	if err != nil {
+		t.Fatalf("expected nil error when one chat succeeds, got %v", err)
+	}
+
+	// Only chatA reached the broker; chatB was not re-attempted or dropped silently.
+	if got := testFailQueue.publishedChats(); len(got) != 1 || got[0] != chatA {
+		t.Fatalf("published chats = %v, want [%s] only", got, chatA)
+	}
+
+	var resp struct {
+		OK      bool `json:"ok"`
+		Results []struct {
+			Chat      string `json:"chat"`
+			RequestID string `json:"request_id"`
+		} `json:"results"`
+		Errors []struct {
+			Chat  string `json:"chat"`
+			Error string `json:"error"`
+		} `json:"errors"`
+	}
+	if uerr := json.Unmarshal(stdout.Bytes(), &resp); uerr != nil {
+		t.Fatalf("invalid JSON output: %v\nraw: %s", uerr, stdout.String())
+	}
+	if !resp.OK {
+		t.Errorf("ok = false, want true (chatA succeeded)")
+	}
+	if len(resp.Results) != 1 || resp.Results[0].Chat != chatA || resp.Results[0].RequestID == "" {
+		t.Errorf("results = %+v, want single request_id for %s", resp.Results, chatA)
+	}
+	if len(resp.Errors) != 1 || resp.Errors[0].Chat != chatB {
+		t.Errorf("errors = %+v, want single error for %s", resp.Errors, chatB)
+	}
+}
+
+// TestEnqueue_MultiChat_AllPublishFail verifies the all-fail exit: when every
+// chat's publish fails the command returns a non-nil error (non-zero exit).
+func TestEnqueue_MultiChat_AllPublishFail(t *testing.T) {
+	chatA := "00000000-0000-0000-0000-00000000000a"
+	chatB := "00000000-0000-0000-0000-00000000000b"
+	testFailQueue.reset(chatA, chatB)
+	cfgPath := writeTestConfig(t, `
+queue:
+  driver: testfailpub
+  url: fake://localhost
+  name: test-work
+`)
+	deps, _, _ := testDeps()
+	deps.Stdin = strings.NewReader("")
+	deps.IsTerminal = true
+
+	err := runEnqueue([]string{
+		"--config", cfgPath,
+		"--bot-id", "00000000-0000-0000-0000-000000000b01",
+		"--chat-id", chatA + "," + chatB,
+		"--routing-mode", "direct",
+		"all fail",
+	}, deps)
+	if err == nil {
+		t.Fatal("expected non-nil error when every chat fails, got nil")
+	}
+	if got := testFailQueue.publishedChats(); len(got) != 0 {
+		t.Errorf("published chats = %v, want none", got)
 	}
 }
