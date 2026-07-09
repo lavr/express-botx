@@ -447,6 +447,30 @@ func LoadForServe(flags Flags) (*Config, error) {
 	return cfg, nil
 }
 
+// LoadForSend reads configuration for the send command. Like LoadForServe it
+// tolerates multi-bot configs by deferring bot resolution, so a multi-chat send
+// (--chat-id a,b,c) can resolve the bot bound to each target chat independently
+// instead of forcing a single bot for the whole command. In single-bot configs
+// (or with an explicit --bot / credentials) the bot is resolved as before.
+func LoadForSend(flags Flags) (*Config, error) {
+	return LoadForServe(flags)
+}
+
+// SingleOrDefaultChatAlias returns the alias of the sole configured chat, or the
+// default chat, so a bare send (no --chat-id) can resolve a target by alias and
+// still honour that chat's bot binding. ok is false when neither applies.
+func (c *Config) SingleOrDefaultChatAlias() (alias string, ok bool) {
+	if len(c.Chats) == 1 {
+		for a := range c.Chats {
+			return a, true
+		}
+	}
+	if a, chat := c.DefaultChat(); a != "" && chat.ID != "" {
+		return a, true
+	}
+	return "", false
+}
+
 // IsMultiBot returns true if the config was loaded in multi-bot serve mode.
 func (c *Config) IsMultiBot() bool {
 	return c.multiBot

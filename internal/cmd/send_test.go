@@ -738,3 +738,125 @@ bots:
 		t.Errorf("expected '--mentions must be a JSON array' error, got: %v", err)
 	}
 }
+
+// --- Bug fix: CLI multi-chat honours per-chat bot binding in multi-bot configs ---
+
+// mockBotxMultiBot accepts several bearer tokens and records, per group_chat_id,
+// which token was used — so a test can assert each chat was delivered via its
+// bound bot's credentials.
+type mockBotxMultiBot struct {
+	mu     sync.Mutex
+	byChat map[string]string // group_chat_id -> bearer token seen
+	tokens map[string]bool   // accepted bearer tokens
+	srv    *httptest.Server
+}
+
+func newMockBotxMultiBot(tokens map[string]bool) *mockBotxMultiBot {
+	m := &mockBotxMultiBot{byChat: map[string]string{}, tokens: tokens}
+	mux := http.NewServeMux()
+	mux.HandleFunc("POST /api/v4/botx/notifications/direct", func(w http.ResponseWriter, r *http.Request) {
+		tok := strings.TrimPrefix(r.Header.Get("Authorization"), "Bearer ")
+		if !m.tokens[tok] {
+			w.WriteHeader(http.StatusUnauthorized)
+			return
+		}
+		body, _ := io.ReadAll(r.Body)
+		var req struct {
+			GroupChatID string `json:"group_chat_id"`
+		}
+		_ = json.Unmarshal(body, &req)
+		m.mu.Lock()
+		m.byChat[req.GroupChatID] = tok
+		m.mu.Unlock()
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusAccepted)
+		fmt.Fprintf(w, `{"status":"ok","result":{"sync_id":"sync-%s"}}`, req.GroupChatID)
+	})
+	m.srv = httptest.NewServer(mux)
+	return m
+}
+
+func (m *mockBotxMultiBot) close() { m.srv.Close() }
+
+func (m *mockBotxMultiBot) tokenFor(chat string) string {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	return m.byChat[chat]
+}
+
+// multiBotConfig has two bots and two chat aliases, each bound to a different bot.
+func multiBotConfig(t *testing.T, host string) string {
+	return writeTestConfig(t, fmt.Sprintf(`
+bots:
+  bota:
+    host: %s
+    id: 00000000-0000-0000-0000-0000000000a1
+    token: token-a
+  botb:
+    host: %s
+    id: 00000000-0000-0000-0000-0000000000b1
+    token: token-b
+chats:
+  deploy:
+    id: %s
+    bot: bota
+  alerts:
+    id: %s
+    bot: botb
+`, host, host, chatA, chatB))
+}
+
+// A multi-bot config with --chat-id deploy,alerts must (1) not fail at config
+// load (the previous bug rejected the comma value as "multiple bots configured")
+// and (2) deliver each chat via its own bound bot's token.
+func TestSend_MultiBot_PerChatBot(t *testing.T) {
+	mock := newMockBotxMultiBot(map[string]bool{"token-a": true, "token-b": true})
+	defer mock.close()
+
+	deps, _, _ := testDeps()
+	deps.IsTerminal = true
+
+	err := runSend([]string{
+		"--config", multiBotConfig(t, mock.srv.URL),
+		"--chat-id", "deploy,alerts",
+		"hi",
+	}, deps)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got := mock.tokenFor(chatA); got != "token-a" {
+		t.Errorf("chat deploy (%s) delivered with token %q, want token-a", chatA, got)
+	}
+	if got := mock.tokenFor(chatB); got != "token-b" {
+		t.Errorf("chat alerts (%s) delivered with token %q, want token-b", chatB, got)
+	}
+}
+
+// In multi-bot mode a target with no bound bot (here a raw UUID) fails only that
+// chat; bound chats still deliver and the command does not error overall.
+func TestSend_MultiBot_UnboundChatFailsOnlyThatChat(t *testing.T) {
+	mock := newMockBotxMultiBot(map[string]bool{"token-a": true, "token-b": true})
+	defer mock.close()
+
+	deps, stdout, _ := testDeps()
+	deps.IsTerminal = true
+
+	err := runSend([]string{
+		"--config", multiBotConfig(t, mock.srv.URL),
+		"--chat-id", "deploy," + chatC, // chatC: raw UUID, no bot binding
+		"hi",
+	}, deps)
+	if err != nil {
+		t.Fatalf("partial success must not return an error, got: %v", err)
+	}
+	if got := mock.tokenFor(chatA); got != "token-a" {
+		t.Errorf("deploy should deliver via token-a, got %q", got)
+	}
+	if got := mock.tokenFor(chatC); got != "" {
+		t.Errorf("unbound chatC must not be delivered, but saw token %q", got)
+	}
+	out := stdout.String()
+	if !strings.Contains(out, chatC+": ERROR") {
+		t.Errorf("expected an ERROR line for unbound chatC, got %q", out)
+	}
+}

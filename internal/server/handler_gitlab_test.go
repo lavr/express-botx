@@ -1653,3 +1653,24 @@ func TestGitlab_DefaultTokenUnchangedWithSenders(t *testing.T) {
 		}
 	})
 }
+
+// TestGitlab_EmptyChatIDIsRequestError: an explicit-but-empty ?chat_id (?chat_id=
+// or ?chat_id=,,) is a 400 request error, not a silent fall-through to the routing
+// engine or default chat.
+func TestGitlab_EmptyChatIDIsRequestError(t *testing.T) {
+	routes := mustCompileRoutes(t, []config.GitlabRouteYAMLConfig{
+		{Match: map[string][]string{"project": {"myproj"}}, Chats: []string{"chatA"}},
+	})
+	for _, q := range []string{"?chat_id=", "?chat_id=,,"} {
+		t.Run(q, func(t *testing.T) {
+			srv, cap := newGitlabFanoutServer(t, &GitlabConfig{SecretToken: "secret", Routes: routes}, okSend, nil)
+			w := doRequest(srv, "POST", "/api/v1/gitlab"+q, strings.NewReader(mrOpenPayload), gitlabHeaders("secret"))
+			if w.Code != 400 {
+				t.Fatalf("status = %d, want 400 (body: %s)", w.Code, w.Body.String())
+			}
+			if cap.count() != 0 {
+				t.Errorf("send count = %d, want 0 (must not fall through to routes)", cap.count())
+			}
+		})
+	}
+}

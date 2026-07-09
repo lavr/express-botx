@@ -299,3 +299,30 @@ func TestWebhook_DefaultChatNoQuery(t *testing.T) {
 		}
 	}
 }
+
+// TestWebhook_EmptyChatIDIsRequestError: an explicitly-present but empty chat_id
+// (?chat_id= or ?chat_id=,,) is a 400 request error, not a silent fall-back to the
+// configured default chat.
+func TestWebhook_EmptyChatIDIsRequestError(t *testing.T) {
+	for _, s := range webhookSurfaces(t) {
+		for _, q := range []string{"?chat_id=", "?chat_id=,,", "?chat_id=+,+"} {
+			t.Run(s.name+" "+q, func(t *testing.T) {
+				cap := &captureSend{}
+				send := func(ctx context.Context, p *SendPayload) (string, error) {
+					cap.record(p)
+					return "sync-1", nil
+				}
+				// default-chat is configured, so a *missing* chat_id would deliver
+				// there; an explicit-but-empty chat_id must instead 400.
+				srv := s.newServer(t, "default-chat", "", send, selfChatResolver())
+				w := doRequest(srv, "POST", s.path+q, strings.NewReader(s.payload), webhookHeaders())
+				if w.Code != 400 {
+					t.Fatalf("status = %d, want 400 (body: %s)", w.Code, w.Body.String())
+				}
+				if cap.count() != 0 {
+					t.Errorf("send count = %d, want 0 (must not fall back to default)", cap.count())
+				}
+			})
+		}
+	}
+}

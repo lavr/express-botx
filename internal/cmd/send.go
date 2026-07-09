@@ -122,22 +122,24 @@ Options:
 		return fmt.Errorf("--secret and --token are mutually exclusive")
 	}
 
-	cfg, err := config.Load(flags)
+	cfg, err := config.LoadForSend(flags)
 	if err != nil {
 		return err
 	}
 
 	// Determine target chats up front so an empty --chat-id fails fast (before
 	// authenticating or reading files). A comma-separated --chat-id (--chat-id a,b,c)
-	// fans the same message out to each chat; an empty value falls back to the
-	// single/default chat auto-selection. The chats are resolved to UUIDs later,
-	// per target, so a bad alias fails only that chat rather than the whole command.
+	// fans the same message out to each chat. Tokens are kept as given (aliases, not
+	// yet resolved to UUIDs) so each chat's bot binding is honoured per target in
+	// multi-bot configs. An empty value falls back to the single/default configured
+	// chat by alias, preserving that chat's bot binding.
 	chats := parseChatIDs(cfg.ChatID)
 	if len(chats) == 0 {
-		if err := cfg.RequireChatID(); err != nil {
-			return err
+		alias, ok := cfg.SingleOrDefaultChatAlias()
+		if !ok {
+			return cfg.RequireChatID()
 		}
-		chats = []string{cfg.ChatID}
+		chats = []string{alias}
 	}
 
 	// Validate status
@@ -228,56 +230,73 @@ Options:
 		ment = raw
 	}
 
-	// Authenticate
-	tok, cache, err := authenticate(cfg)
-	if err != nil {
-		return err
+	// Fan out to every target chat, resolving the bot bound to each chat so a
+	// multi-bot config delivers each chat via its own bot/token (matching the
+	// sync /send handler). Per-bot state — token, HTTP client, and the inline
+	// mentions parse (email→huid lookups are per-host) — is built once per bot and
+	// reused across that bot's chats. Delivery is best-effort and per-chat
+	// independent: a failed chat is recorded, the rest still send, and a non-zero
+	// exit is returned only if every chat failed.
+	execs := make(map[string]*botExec)
+	getExec := func(botName string) (*botExec, error) {
+		if be, ok := execs[botName]; ok {
+			return be, nil
+		}
+		botCfg := *cfg
+		if cfg.IsMultiBot() {
+			if botName == "" {
+				return nil, fmt.Errorf("no bot is bound to this chat; add a bot binding in the chats section or pass --bot")
+			}
+			if aerr := (&botCfg).ApplyChatBot(botName); aerr != nil {
+				return nil, aerr
+			}
+		}
+		tok, cache, aerr := authenticate(&botCfg)
+		if aerr != nil {
+			return nil, aerr
+		}
+		client := botapi.NewClient(botCfg.Host, tok, botCfg.HTTPTimeout())
+		// Inline mentions parser (per-bot resolver; token refreshed on 401).
+		pr := mentions.Parse(
+			context.Background(),
+			message,
+			ment,
+			!noParse,
+			&refreshableClientResolver{client: client, cfg: &botCfg, cache: cache},
+		)
+		for _, e := range pr.Errors {
+			fmt.Fprintf(deps.Stderr, "warning: mention %s: %s\n", e.Kind, e.Cause)
+		}
+		be := &botExec{client: client, cfg: &botCfg, cache: cache, message: pr.Message, mentions: pr.Mentions}
+		execs[botName] = be
+		return be, nil
 	}
 
-	client := botapi.NewClient(cfg.Host, tok, cfg.HTTPTimeout())
-
-	// Run inline mentions parser.
-	// Use refreshableClientResolver so the token is refreshed on 401 — the
-	// cached token may have expired since it was stored.
-	parseResult := mentions.Parse(
-		context.Background(),
-		message,
-		ment,
-		!noParse,
-		&refreshableClientResolver{client: client, cfg: cfg, cache: cache},
-	)
-	for _, e := range parseResult.Errors {
-		fmt.Fprintf(deps.Stderr, "warning: mention %s: %s\n", e.Kind, e.Cause)
-	}
-
-	// Fan out to every target chat via the single configured bot. The CLI uses one
-	// bot/token per command (unlike the sync /send handler, which resolves a bot
-	// per chat), so mentions are parsed once above and the resolved message is
-	// reused across chats with only the target chat swapped. Delivery is
-	// best-effort and per-chat independent: a failed chat is recorded, the rest
-	// still send, and the exit code is non-zero only if every chat failed.
 	results := make([]sendCmdResult, 0, len(chats))
 	for _, chat := range chats {
-		chatID, rerr := cfg.ResolveChatAlias(chat)
+		chatID, botName, rerr := resolveSendTarget(cfg, chat)
 		if rerr != nil {
 			results = append(results, sendCmdResult{Chat: chat, Error: rerr.Error()})
 			continue
 		}
-
+		be, eerr := getExec(botName)
+		if eerr != nil {
+			results = append(results, sendCmdResult{Chat: chat, Error: eerr.Error()})
+			continue
+		}
 		sr := botapi.BuildSendRequest(&botapi.SendParams{
 			ChatID:   chatID,
-			Message:  parseResult.Message,
+			Message:  be.message,
 			Status:   status,
 			File:     fileAttachment,
 			Metadata: meta,
-			Mentions: parseResult.Mentions,
+			Mentions: be.mentions,
 			Silent:   silent,
 			Stealth:  stealth,
 			ForceDND: forceDND,
 			NoNotify: noNotify,
 		})
-
-		syncID, serr := sendWithRefresh(client, cfg, cache, sr)
+		syncID, serr := sendWithRefresh(be.client, be.cfg, be.cache, sr)
 		if serr != nil {
 			results = append(results, sendCmdResult{Chat: chat, Error: serr.Error()})
 			continue
@@ -286,6 +305,35 @@ Options:
 	}
 
 	return printSendResults(deps.Stdout, cfg.Format, results)
+}
+
+// botExec is a per-bot send context: an authenticated client plus the message and
+// mentions resolved with that bot's (per-host) mentions resolver.
+type botExec struct {
+	client   *botapi.Client
+	cfg      *config.Config
+	cache    token.Cache
+	message  string
+	mentions json.RawMessage
+}
+
+// resolveSendTarget maps a --chat-id token to its chat UUID and the bot bound to
+// it. A raw UUID, or any single-bot config, has no per-chat bot and returns
+// botName "" (the caller then uses the command's single bot). In multi-bot mode
+// an alias's bound bot is returned so each chat sends via its own bot; an alias
+// with no binding returns "" and getExec reports it as an error for that chat.
+func resolveSendTarget(cfg *config.Config, chat string) (chatID, botName string, err error) {
+	if config.IsUUID(chat) {
+		return chat, "", nil
+	}
+	chatID, err = cfg.ResolveChatAlias(chat)
+	if err != nil {
+		return "", "", err
+	}
+	if !cfg.IsMultiBot() {
+		return chatID, "", nil
+	}
+	return chatID, cfg.Chats[chat].Bot, nil
 }
 
 // sendWithRefresh posts one SendRequest and returns its sync_id, refreshing the

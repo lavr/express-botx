@@ -93,6 +93,12 @@ func (s *Server) handleGrafana(w http.ResponseWriter, r *http.Request) {
 	// keeps its single-default behaviour; the response is the uniform
 	// MultiSendResponse in every case (results[0] for a single chat).
 	targets := parseChatIDs(r.URL.Query().Get("chat_id"))
+	// An explicitly-present but empty chat_id (?chat_id= / ?chat_id=,,) is a
+	// request error, not a silent fall-back to the default chat.
+	if len(targets) == 0 && r.URL.Query().Has("chat_id") {
+		writeError(w, http.StatusBadRequest, "chat_id is empty: provide at least one chat, or omit chat_id to use the default")
+		return
+	}
 	if len(targets) == 0 {
 		if single := s.grCfg.singleChat(s.cfg.DefaultChatAlias); single != "" {
 			targets = []string{single}

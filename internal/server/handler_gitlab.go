@@ -319,6 +319,12 @@ func (s *Server) handleGitlab(w http.ResponseWriter, r *http.Request) {
 	// keeps its single-chat default behaviour (routes is optional, so its absence
 	// must not change existing deployments).
 	queryChats := parseChatIDs(r.URL.Query().Get("chat_id"))
+	// An explicitly-present but empty chat_id (?chat_id= / ?chat_id=,,) is a
+	// request error, not a silent fall-back to routes or the default chat.
+	if len(queryChats) == 0 && r.URL.Query().Has("chat_id") {
+		writeError(w, http.StatusBadRequest, "chat_id is empty: provide at least one chat, or omit chat_id to use routing/default")
+		return
+	}
 	if len(queryChats) > 0 || len(s.gitCfg.Routes) == 0 {
 		targets := queryChats
 		if len(targets) == 0 {
