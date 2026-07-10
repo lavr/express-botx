@@ -43,7 +43,7 @@ curl -X POST http://localhost:8080/api/v1/send \
     "message": "Hello from async mode!"
   }'
 
-# Ответ: {"ok":true,"queued":true,"request_id":"..."}
+# Ответ (202): {"ok":true,"results":[{"chat":"<CHAT_ID>","request_id":"...","queued":true}]}
 ```
 
 ## Мониторинг

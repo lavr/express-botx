@@ -212,6 +212,24 @@ func doPost(t *testing.T, url, apiKey, body string) (int, map[string]any) {
 	return resp.StatusCode, result
 }
 
+// firstChatError returns the error string of the first per-chat error in a
+// MultiSendResponse body ({"ok":false,"errors":[{"chat","error"}]}). Chat/bot
+// resolution now fails per-chat (HTTP 502) rather than request-level (400), so
+// integration tests read the failure from errors[] instead of the top-level
+// "error" field.
+func firstChatError(resp map[string]any) string {
+	errs, ok := resp["errors"].([]any)
+	if !ok || len(errs) == 0 {
+		return ""
+	}
+	e, ok := errs[0].(map[string]any)
+	if !ok {
+		return ""
+	}
+	msg, _ := e["error"].(string)
+	return msg
+}
+
 // --- integration tests ---
 
 func TestServeIntegration_SingleBot_Send(t *testing.T) {
@@ -335,13 +353,12 @@ server:
 
 	baseURL := fmt.Sprintf("http://%s/api/v1", listenAddr)
 
-	// Without bot — should fail
+	// Without bot — per-chat resolution failure (502 with errors[]).
 	code, resp := doPost(t, baseURL+"/send", "test-key", `{"chat_id":"c0000000-0000-0000-0000-000000000003","message":"hi"}`)
-	if code != 400 {
-		t.Fatalf("expected 400 without bot, got %d: %v", code, resp)
+	if code != 502 {
+		t.Fatalf("expected 502 without bot, got %d: %v", code, resp)
 	}
-	errMsg, _ := resp["error"].(string)
-	if !strings.Contains(errMsg, "bot is required") {
+	if errMsg := firstChatError(resp); !strings.Contains(errMsg, "bot is required") {
 		t.Errorf("expected 'bot is required', got %q", errMsg)
 	}
 
@@ -351,10 +368,10 @@ server:
 		t.Fatalf("expected 200 with bot=prod, got %d: %v", code, resp)
 	}
 
-	// With unknown bot
+	// With unknown bot — per-chat resolution failure (502).
 	code, resp = doPost(t, baseURL+"/send", "test-key", `{"bot":"staging","chat_id":"c0000000-0000-0000-0000-000000000003","message":"hi"}`)
-	if code != 400 {
-		t.Fatalf("expected 400 for unknown bot, got %d: %v", code, resp)
+	if code != 502 {
+		t.Fatalf("expected 502 for unknown bot, got %d: %v", code, resp)
 	}
 
 	calls := mock.getCalls()
@@ -400,10 +417,11 @@ server:
 	baseURL := fmt.Sprintf("http://%s/api/v1", listenAddr)
 	alertPayload := `{"version":"4","groupKey":"g","status":"firing","receiver":"x","groupLabels":{"alertname":"Test"},"alerts":[{"status":"firing","labels":{"alertname":"HighCPU","severity":"critical","instance":"web-01"},"annotations":{"summary":"CPU high"},"startsAt":"2026-01-01T00:00:00Z"}]}`
 
-	// Without ?bot= — should fail
+	// Without ?bot= — bot resolution is a per-chat delivery outcome now, so an
+	// ambiguous bot fails the single target and surfaces as 502 (unified contract).
 	code, resp := doPost(t, baseURL+"/alertmanager", "test-key", alertPayload)
-	if code != 400 {
-		t.Fatalf("expected 400 without bot, got %d: %v", code, resp)
+	if code != 502 {
+		t.Fatalf("expected 502 without bot, got %d: %v", code, resp)
 	}
 
 	// With ?bot=prod
@@ -455,10 +473,11 @@ server:
 	baseURL := fmt.Sprintf("http://%s/api/v1", listenAddr)
 	grafanaPayload := `{"version":"1","groupKey":"g","status":"firing","state":"alerting","title":"[FIRING] Test","receiver":"x","orgId":1,"groupLabels":{"alertname":"Test"},"alerts":[{"status":"firing","labels":{"alertname":"DiskFull","grafana_folder":"Prod"},"annotations":{"summary":"Disk full"},"startsAt":"2026-01-01T00:00:00Z"}]}`
 
-	// Without ?bot= — should fail
+	// Without ?bot= — bot resolution is a per-chat delivery outcome now, so an
+	// ambiguous bot fails the single target and surfaces as 502 (unified contract).
 	code, resp := doPost(t, baseURL+"/grafana", "test-key", grafanaPayload)
-	if code != 400 {
-		t.Fatalf("expected 400 without bot, got %d: %v", code, resp)
+	if code != 502 {
+		t.Fatalf("expected 502 without bot, got %d: %v", code, resp)
 	}
 
 	// With ?bot=test
@@ -515,10 +534,13 @@ server:
 		t.Errorf("expected resolved UUID, got %q", calls[0].GroupChatID)
 	}
 
-	// Unknown alias — 400
+	// Unknown alias — per-chat resolution failure (502 with errors[]).
 	code, resp := doPost(t, baseURL+"/send", "test-key", `{"chat_id":"unknown-alias","message":"hi"}`)
-	if code != 400 {
-		t.Fatalf("expected 400 for unknown alias, got %d: %v", code, resp)
+	if code != 502 {
+		t.Fatalf("expected 502 for unknown alias, got %d: %v", code, resp)
+	}
+	if errMsg := firstChatError(resp); !strings.Contains(errMsg, "unknown chat alias") {
+		t.Errorf("expected 'unknown chat alias', got %q", errMsg)
 	}
 
 	// Raw UUID passes through
@@ -624,10 +646,13 @@ server:
 		t.Fatalf("expected 200 for chat-bound bot, got %d: %v", code, resp)
 	}
 
-	// 2. Chat without bound bot — "bot" is required
+	// 2. Chat without bound bot — "bot" is required (per-chat failure, 502).
 	code, resp = doPost(t, baseURL+"/send", "test-key", `{"chat_id":"general","message":"hi"}`)
-	if code != 400 {
-		t.Fatalf("expected 400 for unbound chat without bot, got %d: %v", code, resp)
+	if code != 502 {
+		t.Fatalf("expected 502 for unbound chat without bot, got %d: %v", code, resp)
+	}
+	if errMsg := firstChatError(resp); !strings.Contains(errMsg, "bot is required") {
+		t.Errorf("expected 'bot is required', got %q", errMsg)
 	}
 
 	// 3. Explicit "bot" overrides chat binding

@@ -447,6 +447,30 @@ func LoadForServe(flags Flags) (*Config, error) {
 	return cfg, nil
 }
 
+// LoadForSend reads configuration for the send command. Like LoadForServe it
+// tolerates multi-bot configs by deferring bot resolution, so a multi-chat send
+// (--chat-id a,b,c) can resolve the bot bound to each target chat independently
+// instead of forcing a single bot for the whole command. In single-bot configs
+// (or with an explicit --bot / credentials) the bot is resolved as before.
+func LoadForSend(flags Flags) (*Config, error) {
+	return LoadForServe(flags)
+}
+
+// SingleOrDefaultChatAlias returns the alias of the sole configured chat, or the
+// default chat, so a bare send (no --chat-id) can resolve a target by alias and
+// still honour that chat's bot binding. ok is false when neither applies.
+func (c *Config) SingleOrDefaultChatAlias() (alias string, ok bool) {
+	if len(c.Chats) == 1 {
+		for a := range c.Chats {
+			return a, true
+		}
+	}
+	if a, chat := c.DefaultChat(); a != "" && chat.ID != "" {
+		return a, true
+	}
+	return "", false
+}
+
 // IsMultiBot returns true if the config was loaded in multi-bot serve mode.
 func (c *Config) IsMultiBot() bool {
 	return c.multiBot
@@ -673,6 +697,31 @@ var uuidRe = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[
 // IsUUID returns true if the string matches UUID v4 format.
 func IsUUID(s string) bool {
 	return uuidRe.MatchString(s)
+}
+
+// ResolveChatAlias resolves a single chat value to its UUID without mutating the
+// config. A UUID passes through unchanged; an alias is looked up in the Chats map.
+// Fan-out send paths use it to resolve several comma-separated chats independently,
+// so a bad alias fails per chat rather than aborting the whole command.
+func (c *Config) ResolveChatAlias(chat string) (string, error) {
+	if chat == "" {
+		return "", fmt.Errorf("chat is required")
+	}
+	if IsUUID(chat) {
+		return chat, nil
+	}
+	if cc, ok := c.Chats[chat]; ok {
+		return cc.ID, nil
+	}
+	names := make([]string, 0, len(c.Chats))
+	for k := range c.Chats {
+		names = append(names, k)
+	}
+	sort.Strings(names)
+	if len(names) == 0 {
+		return "", fmt.Errorf("unknown chat %q (no aliases configured)", chat)
+	}
+	return "", fmt.Errorf("unknown chat alias %q, available: %s", chat, strings.Join(names, ", "))
 }
 
 // ResolveChatID resolves ChatID: if it looks like a UUID, use as-is;

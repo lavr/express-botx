@@ -105,7 +105,7 @@ server:
 | `template_files` | Мапа `event-ключ → путь к файлу шаблона`. Один ключ нельзя задать и в `templates`, и в `template_files`. |
 | `error_events` | Список event-ключей, доставляемых с `notification.status=error` (та же грануляция матчинга). |
 | `routes` | Опциональный упорядоченный список правил роутинга. Событие уходит в чаты **всех** совпавших правил (объединение+дедуп), `stop:true` обрывает перебор. Каждое правило: `match` (селектор → паттерны glob/`/regex/`; `event` — по event-ключу), `chats` (непустой список алиасов/UUID), `stop`. Без секции — прежнее поведение (один чат). Подробнее и приоритет чатов — в [docs/integrations.md](integrations.md#роутинг-событий-по-чатам-routes). |
-| `senders` | Опциональный список дополнительных входящих токенов с жёсткой привязкой к чатам (изоляция команд). Каждый элемент: `secret`/`secret_token` (ссылка `literal`/`env:`/`vault:`, обязателен) и непустой `chats` (алиасы/UUID существующих чатов). Совпал sender-токен → событие уходит **только** в его `chats`; `?chat_id`, `?bot`, `routes` и `default_chat_id` игнорируются. Глобальные `events.only/exclude`, `templates` и `error_events` применяются как обычно. Дубликаты разрезолвленных токенов (sender↔sender, sender↔`secret`) — ошибка на старте. Подробнее — в [docs/integrations.md](integrations.md#изоляция-команд-senders-несколько-токенов). |
+| `senders` | Опциональный список дополнительных входящих токенов с жёсткой привязкой к чатам (изоляция команд). Каждый элемент: `secret`/`secret_token` (ссылка `literal`/`env:`/`vault:`, обязателен) и непустой `chats` (алиасы/UUID существующих чатов). Совпал sender-токен → событие уходит в его `chats`; `?bot`, `routes` и `default_chat_id` игнорируются. `?chat_id` работает как **фильтр внутри scope**: отсутствует → все `chats`; непустой subset → только эти чаты (эквивалентность alias↔UUID); чат вне `chats` → `403`; явно пустой (`?chat_id=`) → `400`. Глобальные `events.only/exclude`, `templates` и `error_events` применяются как обычно. Дубликаты разрезолвленных токенов (sender↔sender, sender↔`secret`) — ошибка на старте. Подробнее — в [docs/integrations.md](integrations.md#изоляция-команд-senders-несколько-токенов). |
 
 ## Переменные окружения
 
@@ -211,6 +211,14 @@ curl /api/v1/send -d '{"bot":"alert-bot","chat_id":"deploy","message":"!"}'
 curl /api/v1/alertmanager?bot=deploy-bot
 ```
 
+## Несколько чатов (`chat_id` через запятую)
+
+`chat_id` можно задать списком через запятую (`chat_id=a,b,c` в теле `/send` или
+`?chat_id=a,b,c` в вебхуках/CLI) — сообщение рассылается во **все** перечисленные
+чаты (fan-out, best-effort). Ответ единый для всех эндпоинтов — `MultiSendResponse`
+с пер-чатовыми `results`/`errors`; подробности, коды ответа и **ломающее изменение
+формата** — в [docs/integrations.md](integrations.md#мульти-чат-и-единый-ответ-multisendresponse).
+
 ## Чат по умолчанию
 
 Один чат можно пометить как `default: true`. Он будет использоваться когда `--chat-id` (CLI) или `chat_id` (API) не указан:
@@ -223,10 +231,15 @@ express-botx config chat set general UUID --no-default   # снять помет
 express-botx config chat list                             # покажет (default)
 ```
 
-Приоритет выбора чата в HTTP-сервере:
-- `/send`: `chat_id` из запроса → чат по умолчанию → ошибка
-- `/alertmanager`, `/grafana`: `?chat_id=` → `default_chat_id` из конфига вебхука → чат по умолчанию → единственный чат → ошибка
-- `/gitlab`: `?chat_id=` → `routes` (все совпавшие правила, объединение+дедуп) → `default_chat_id` → чат по умолчанию → единственный чат → `200 {ignored}`; при совпадении sender-токена (`server.gitlab.senders`) цели — всегда `chats` этого sender'а, остальное игнорируется
+Приоритет выбора чата в HTTP-сервере (`chat_id` может быть списком через запятую —
+тогда фан-аут во все указанные чаты):
+- `/send`: `chat_id` из запроса → чат по умолчанию → пустой `chat_id` даёт `400`.
+  Резолв конкретного чата/бота, если он не удался, — пер-чатовая ошибка в
+  `errors[]` (а не общий `400`); если упали все чаты — `502`.
+- `/alertmanager`, `/grafana`: `?chat_id=` → `default_chat_id` из конфига вебхука → чат по умолчанию → единственный чат → пустой набор даёт `400`; пер-чатовые сбои — в `errors[]`, всё упало — `502`
+- `/gitlab`: `?chat_id=` → `routes` (все совпавшие правила, объединение+дедуп) → `default_chat_id` → чат по умолчанию → единственный чат → `200 {ignored}`; при совпадении sender-токена (`server.gitlab.senders`) цели — `chats` этого sender'а, а `?chat_id=` фильтрует внутри них (subset → только они; вне scope → `403`; явно пустой → `400`), `?bot`/`routes`/`default_chat_id` игнорируются
+
+Ответ всех эндпоинтов — единый `MultiSendResponse` (см. [Мульти-чат](integrations.md#мульти-чат-и-единый-ответ-multisendresponse)).
 
 ## Формат host
 

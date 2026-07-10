@@ -12,6 +12,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/lavr/express-botx/internal/botapi"
@@ -104,59 +105,11 @@ Options:
 		return fmt.Errorf("--status must be ok or error, got %q", status)
 	}
 
-	// Determine effective routing mode and validate requirements
+	// Determine effective routing mode. Bot and chat resolution runs per target
+	// chat in the enqueue loop below, since a catalog lookup can bind a different
+	// bot per chat.
 	mode := cfg.Producer.RoutingMode
-	botID := cfg.BotID
 	botAlias := flags.Bot // --bot flag: alias for catalog resolution (not resolved via config)
-	chatID := cfg.ChatID
-
-	// Observability fields for work message
-	var routeHost, routeBotName, routeChatAlias, routeCatalogRevision string
-
-	switch config.RoutingMode(mode) {
-	case config.RoutingDirect:
-		if botID == "" {
-			return fmt.Errorf("--bot-id is required for direct routing mode")
-		}
-		if !config.IsUUID(botID) {
-			return fmt.Errorf("--bot-id must be a valid UUID for direct routing mode, got %q", botID)
-		}
-		if chatID == "" {
-			return fmt.Errorf("--chat-id is required for direct routing mode")
-		}
-		if !config.IsUUID(chatID) {
-			return fmt.Errorf("--chat-id must be a valid UUID for direct routing mode, got %q; use catalog or mixed mode for alias resolution", chatID)
-		}
-	case config.RoutingMixed:
-		// Mixed: use direct if bot_id and chat_id are both provided and both
-		// look like UUIDs. Otherwise fall back to catalog for alias resolution.
-		if botID != "" && chatID != "" && config.IsUUID(botID) && config.IsUUID(chatID) {
-			// Direct path — no catalog needed
-		} else {
-			// Need catalog for alias resolution
-			resolved, err := resolveViaCatalog(cfg, botID, botAlias, chatID)
-			if err != nil {
-				return err
-			}
-			botID = resolved.BotID
-			chatID = resolved.ChatID
-			routeHost = resolved.Host
-			routeBotName = resolved.BotName
-			routeChatAlias = resolved.ChatAlias
-			routeCatalogRevision = resolved.CatalogRevision
-		}
-	case config.RoutingCatalog:
-		resolved, err := resolveViaCatalog(cfg, botID, botAlias, chatID)
-		if err != nil {
-			return err
-		}
-		botID = resolved.BotID
-		chatID = resolved.ChatID
-		routeHost = resolved.Host
-		routeBotName = resolved.BotName
-		routeChatAlias = resolved.ChatAlias
-		routeCatalogRevision = resolved.CatalogRevision
-	}
 
 	// Read file attachment if requested
 	var fileAttachment *botapi.SendFile
@@ -257,67 +210,239 @@ Options:
 	}
 	defer pub.Close()
 
-	// Build work message
-	requestID := newRequestID()
-
-	msg := &queue.WorkMessage{
-		RequestID: requestID,
-		Routing: queue.Routing{
-			Host:            routeHost,
-			BotID:           botID,
-			ChatID:          chatID,
-			BotName:         routeBotName,
-			ChatAlias:       routeChatAlias,
-			CatalogRevision: routeCatalogRevision,
-		},
-		Payload: queue.Payload{
-			Message:  message,
-			Status:   status,
-			Metadata: meta,
-			Mentions: ment,
-			Opts: queue.DeliveryOpts{
-				Silent:   silent,
-				Stealth:  stealth,
-				ForceDND: forceDND,
-				NoNotify: noNotify,
-				NoParse:  noParse,
-			},
-		},
-		ReplyTo:    cfg.Queue.ReplyQueue,
-		EnqueuedAt: time.Now().UTC(),
+	// Expand a comma-separated --chat-id (--chat-id a,b,c) into N independent
+	// enqueues — one queued message per chat — rather than one message that fans
+	// out inside the worker. This mirrors the async /send handler and is a
+	// deliberate choice: with one message per chat, retry/ack is per-chat and
+	// independent, so a transient failure re-delivers only the failed chat and
+	// never produces duplicates on the chats that already succeeded (nor loses a
+	// failed chat with the ack). The "one message = whole command, fan out in the
+	// worker" alternative gives per-command retry, which on a partial failure
+	// re-sends to the already-delivered chats (duplicates) or drops the failed
+	// chat. The worker stays "one chat = one message" and is not touched.
+	chats := parseChatIDs(cfg.ChatID)
+	if len(chats) == 0 {
+		// Empty/whitespace/only-commas: fall through with the raw value so the
+		// per-mode "--chat-id is required" checks below produce their usual error.
+		chats = []string{cfg.ChatID}
 	}
 
-	if fileAttachment != nil {
-		msg.Payload.File = &queue.FileAttachment{
-			FileName: fileAttachment.FileName,
-			Data:     fileAttachment.Data,
+	// Phase 1 — resolve routing and build a work message for every target chat.
+	// This pass is all-or-nothing: if any chat fails routing validation or catalog
+	// resolution we return before publishing anything, so nothing lands on the
+	// queue for a request that a retry would re-run in full. This mirrors the async
+	// /send handler, which validates every target up front and accepts or rejects
+	// the request as a whole — and it is what makes the "never produces duplicates
+	// on the chats that already succeeded" guarantee above hold: a bad chat in the
+	// list can no longer partially publish the good chats before aborting.
+	type pendingEnqueue struct {
+		chat string
+		msg  *queue.WorkMessage
+	}
+	pending := make([]pendingEnqueue, 0, len(chats))
+	for _, chat := range chats {
+		// Resolve bot + chat per target; a catalog lookup can bind a different bot
+		// per chat, so each iteration starts from the original bot_id.
+		botID := cfg.BotID
+		chatID := chat
+		var routeHost, routeBotName, routeChatAlias, routeCatalogRevision string
+
+		switch config.RoutingMode(mode) {
+		case config.RoutingDirect:
+			if botID == "" {
+				return fmt.Errorf("--bot-id is required for direct routing mode")
+			}
+			if !config.IsUUID(botID) {
+				return fmt.Errorf("--bot-id must be a valid UUID for direct routing mode, got %q", botID)
+			}
+			if chatID == "" {
+				return fmt.Errorf("--chat-id is required for direct routing mode")
+			}
+			if !config.IsUUID(chatID) {
+				return fmt.Errorf("--chat-id must be a valid UUID for direct routing mode, got %q; use catalog or mixed mode for alias resolution", chatID)
+			}
+		case config.RoutingMixed:
+			// Mixed: use direct if bot_id and chat_id are both provided and both
+			// look like UUIDs. Otherwise fall back to catalog for alias resolution.
+			if botID != "" && chatID != "" && config.IsUUID(botID) && config.IsUUID(chatID) {
+				// Direct path — no catalog needed
+			} else {
+				// Need catalog for alias resolution
+				resolved, rerr := resolveViaCatalog(cfg, botID, botAlias, chatID)
+				if rerr != nil {
+					return rerr
+				}
+				botID = resolved.BotID
+				chatID = resolved.ChatID
+				routeHost = resolved.Host
+				routeBotName = resolved.BotName
+				routeChatAlias = resolved.ChatAlias
+				routeCatalogRevision = resolved.CatalogRevision
+			}
+		case config.RoutingCatalog:
+			resolved, rerr := resolveViaCatalog(cfg, botID, botAlias, chatID)
+			if rerr != nil {
+				return rerr
+			}
+			botID = resolved.BotID
+			chatID = resolved.ChatID
+			routeHost = resolved.Host
+			routeBotName = resolved.BotName
+			routeChatAlias = resolved.ChatAlias
+			routeCatalogRevision = resolved.CatalogRevision
 		}
+
+		// Build work message
+		requestID := newRequestID()
+
+		msg := &queue.WorkMessage{
+			RequestID: requestID,
+			Routing: queue.Routing{
+				Host:            routeHost,
+				BotID:           botID,
+				ChatID:          chatID,
+				BotName:         routeBotName,
+				ChatAlias:       routeChatAlias,
+				CatalogRevision: routeCatalogRevision,
+			},
+			Payload: queue.Payload{
+				Message:  message,
+				Status:   status,
+				Metadata: meta,
+				Mentions: ment,
+				Opts: queue.DeliveryOpts{
+					Silent:   silent,
+					Stealth:  stealth,
+					ForceDND: forceDND,
+					NoNotify: noNotify,
+					NoParse:  noParse,
+				},
+			},
+			ReplyTo:    cfg.Queue.ReplyQueue,
+			EnqueuedAt: time.Now().UTC(),
+		}
+
+		if fileAttachment != nil {
+			msg.Payload.File = &queue.FileAttachment{
+				FileName: fileAttachment.FileName,
+				Data:     fileAttachment.Data,
+			}
+		}
+
+		pending = append(pending, pendingEnqueue{chat: chat, msg: msg})
 	}
 
-	// Publish
-	if err := pub.PublishWork(context.Background(), msg); err != nil {
-		return fmt.Errorf("publishing to queue: %w", err)
+	// Phase 2 — publish each built message. Publishing is best-effort and per-chat
+	// independent: a broker failure on one chat is recorded and the remaining chats
+	// still publish, so a retry re-enqueues only the failed chats rather than
+	// double-publishing the ones that already landed. The exit code is non-zero
+	// only when every chat failed (see printEnqueueResults).
+	results := make([]enqueueResult, 0, len(pending))
+	for _, p := range pending {
+		if err := pub.PublishWork(context.Background(), p.msg); err != nil {
+			results = append(results, enqueueResult{Chat: p.chat, Error: fmt.Errorf("publishing to queue: %w", err).Error()})
+			continue
+		}
+		results = append(results, enqueueResult{Chat: p.chat, RequestID: p.msg.RequestID})
 	}
 
 	// Output
-	return printEnqueueResult(deps.Stdout, cfg.Format, requestID)
+	return printEnqueueResults(deps.Stdout, cfg.Format, results)
 }
 
-// printEnqueueResult outputs the request_id in the appropriate format.
-func printEnqueueResult(w io.Writer, format, requestID string) error {
-	type enqueueResponse struct {
-		OK        bool   `json:"ok"`
-		Queued    bool   `json:"queued"`
-		RequestID string `json:"request_id"`
+// enqueueResult is a single per-chat enqueue outcome: the target chat plus
+// either the request_id assigned to its queued message (success) or an error
+// string (publish failure).
+type enqueueResult struct {
+	Chat      string
+	RequestID string
+	Error     string
+}
+
+// parseChatIDs splits a raw --chat-id value on commas, trims whitespace, drops
+// empties, and deduplicates while preserving first-occurrence order. A blank or
+// whitespace-only input yields an empty slice. Mirrors the server-side helper so
+// the CLI and HTTP surfaces expand a comma-separated chat_id the same way.
+func parseChatIDs(raw string) []string {
+	parts := strings.Split(raw, ",")
+	out := make([]string, 0, len(parts))
+	seen := make(map[string]struct{}, len(parts))
+	for _, p := range parts {
+		chat := strings.TrimSpace(p)
+		if chat == "" {
+			continue
+		}
+		if _, dup := seen[chat]; dup {
+			continue
+		}
+		seen[chat] = struct{}{}
+		out = append(out, chat)
+	}
+	return out
+}
+
+// printEnqueueResults outputs one request_id per successfully enqueued chat. In
+// human format each request_id is printed on its own line (a single chat prints
+// one line, as before); when more than one chat is targeted, a per-chat publish
+// failure is printed as a "chat: ERROR .." line. In json format it emits the
+// uniform multi-chat response body
+// {"ok":..,"results":[{chat,request_id,queued:true}],"errors":[{chat,error}]}.
+// A non-nil error (non-zero exit) is returned only when every chat failed,
+// mirroring the sync send / server 502 all-fail semantics.
+func printEnqueueResults(w io.Writer, format string, results []enqueueResult) error {
+	okCount := 0
+	for _, r := range results {
+		if r.Error == "" {
+			okCount++
+		}
 	}
 
 	if format == "json" {
+		type jsonResult struct {
+			Chat      string `json:"chat"`
+			RequestID string `json:"request_id"`
+			Queued    bool   `json:"queued"`
+		}
+		type jsonError struct {
+			Chat  string `json:"chat"`
+			Error string `json:"error"`
+		}
+		type jsonResponse struct {
+			OK      bool         `json:"ok"`
+			Results []jsonResult `json:"results"`
+			Errors  []jsonError  `json:"errors,omitempty"`
+		}
+		resp := jsonResponse{OK: okCount > 0, Results: make([]jsonResult, 0, len(results))}
+		for _, r := range results {
+			if r.Error != "" {
+				resp.Errors = append(resp.Errors, jsonError{Chat: r.Chat, Error: r.Error})
+				continue
+			}
+			resp.Results = append(resp.Results, jsonResult{Chat: r.Chat, RequestID: r.RequestID, Queued: true})
+		}
 		enc := json.NewEncoder(w)
 		enc.SetIndent("", "  ")
-		return enc.Encode(enqueueResponse{OK: true, Queued: true, RequestID: requestID})
+		if err := enc.Encode(resp); err != nil {
+			return err
+		}
+	} else {
+		for _, r := range results {
+			if r.Error != "" {
+				if len(results) > 1 {
+					fmt.Fprintf(w, "%s: ERROR %s\n", r.Chat, r.Error)
+				}
+				continue
+			}
+			fmt.Fprintln(w, r.RequestID)
+		}
 	}
 
-	fmt.Fprintln(w, requestID)
+	if okCount == 0 {
+		if len(results) == 1 {
+			return fmt.Errorf("%s", results[0].Error)
+		}
+		return fmt.Errorf("all %d chats failed", len(results))
+	}
 	return nil
 }
 

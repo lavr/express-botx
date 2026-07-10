@@ -97,6 +97,12 @@ curl -X POST http://localhost:8080/api/v1/send \
 
 Сервер автоматически добавляет заголовок `X-Request-ID` к каждому ответу (если клиент не передал свой, генерируется уникальный). Все HTTP-запросы логируются в stderr (метод, путь, статус, время выполнения).
 
+> **Мульти-чат.** `chat_id` можно указать через запятую (`chat_id=a,b,c` в теле `/send`
+> или `?chat_id=a,b,c` в вебхуках) — сообщение рассылается во все чаты (fan-out).
+> Ответ всех эндпоинтов — единый `MultiSendResponse` с пер-чатовыми `results`/`errors`.
+> **⚠️ Это ломающее изменение формата ответа** (раньше `{"ok":true,"sync_id":"..."}`);
+> подробности — [docs/integrations.md](docs/integrations.md#мульти-чат-и-единый-ответ-multisendresponse).
+
 Подробнее: [docs/integrations.md](docs/integrations.md)
 
 
@@ -167,7 +173,7 @@ chats:
 
 ## Интеграции
 
-В режиме веб-сервера есть методы для интеграции с alertmanager, grafana и gitlab (универсальный приёмник любых событий GitLab с фильтрами `only`/`exclude`, шаблонами по типам и `error_events`). Несколько команд могут делить один GitLab-эндпоинт с изоляцией по своим `X-Gitlab-Token` — см. [senders](docs/integrations.md#изоляция-команд-senders-несколько-токенов) и пример [examples/gitlab/config-senders.yaml](examples/gitlab/config-senders.yaml).
+В режиме веб-сервера есть методы для интеграции с alertmanager, grafana и gitlab (универсальный приёмник любых событий GitLab с фильтрами `only`/`exclude`, шаблонами по типам и `error_events`). Несколько команд могут делить один GitLab-эндпоинт с изоляцией по своим `X-Gitlab-Token`; при этом `?chat_id=` работает как фильтр внутри разрешённого набора чатов sender'а (400 на пустой, 403 на выход за scope, эквивалентность alias/UUID) — см. [senders](docs/integrations.md#изоляция-команд-senders-несколько-токенов) и пример [examples/gitlab/config-senders.yaml](examples/gitlab/config-senders.yaml) ([Per-team tokens](examples/gitlab/README.md#per-team-tokens-senders)).
 
 Пример конфига alertmanager:
 
@@ -232,6 +238,7 @@ helm install express-botx oci://ghcr.io/lavr/charts/express-botx -f values.yaml
 | [docs/integrations.md](docs/integrations.md) | Alertmanager, Grafana, GitLab, примеры |
 | [docs/deployment.md](docs/deployment.md) | Docker, Helm, systemd, docker-compose |
 | [docs/async-queues.md](docs/async-queues.md) | RabbitMQ, Kafka, архитектура очередей |
+| [CHANGELOG.md](CHANGELOG.md) | История изменений (в т.ч. ломающие) |
 | [docs/quickstart.md](docs/quickstart.md) | Базовые сценарии настройки |
 
 ## Лицензия

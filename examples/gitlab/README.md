@@ -79,21 +79,49 @@ for the filter rules, template registry, template variables/helpers, and
 fans a single event out to one or more chats by project, event key, and branch
 (glob or `/regex/` patterns). All matching rules contribute their chats (unioned
 and de-duplicated); a rule with `stop: true` ends the scan; unmatched events fall
-back to `default_chat_id`. Delivery is best-effort: `200` with `{results,errors}`
-once at least one chat is delivered, `502` if they all fail. See the
+back to `default_chat_id`. Delivery is best-effort: the response is always a
+`MultiSendResponse` — `200` with `{"ok":true,"results":[…],"errors":[…]}` once at
+least one chat is delivered, `502` if they all fail. A comma-separated
+`?chat_id=a,b` fans out the same way. See the
 [routing section](../../docs/integrations.md#роутинг-событий-по-чатам-routes)
-for the full model and chat-selection priority.
+and [Мульти-чат](../../docs/integrations.md#мульти-чат-и-единый-ответ-multisendresponse)
+for the full model, response format and chat-selection priority.
 
 ## Per-team tokens (senders)
 
 `config-senders.yaml` adds `server.gitlab.senders` — extra incoming
 `X-Gitlab-Token` values, each hard-bound to its own chats. A request
-authenticated with a sender token is delivered **only** to that sender's chats
-(`?chat_id=`, `routes` and `default_chat_id` are ignored), so teams sharing one
-endpoint cannot post into each other's chats. The global `events` filter,
-templates and `error_events` apply as usual; the default `secret` keeps its
-ordinary behaviour and may be omitted when only senders are used. Token values
-are `env:`/`vault:` references — the shared YAML never contains plaintext
-secrets, and duplicate resolved tokens fail at startup. See the
+authenticated with a sender token is delivered to that sender's chats (`?bot=`,
+`routes` and `default_chat_id` are ignored), so teams sharing one endpoint
+cannot post into each other's chats or as another bot. The global `events`
+filter, templates and `error_events` apply as usual; the default `secret` keeps
+its ordinary behaviour and may be omitted when only senders are used. Token
+values are `env:`/`vault:` references — the shared YAML never contains plaintext
+secrets, and duplicate resolved tokens fail at startup.
+
+`?chat_id=` is honoured for sender tokens as a **filter within** the allowed
+chats: omit it to reach all of the sender's chats, or pass a subset to target
+only those (aliases and the UUIDs they resolve to are equivalent). A chat
+outside the sender's scope is refused with `403`, and an explicitly-empty
+`?chat_id=` is a `400` — in both cases nothing is sent:
+
+```bash
+# team-b token -> both team-b chats
+curl -X POST "http://localhost:8080/api/v1/gitlab" \
+  -H "X-Gitlab-Token: <team-b token>" -H "Content-Type: application/json" \
+  -d @webhook-merge-request-open.json
+
+# team-b token, only the alerts chat (subset of scope)
+curl -X POST "http://localhost:8080/api/v1/gitlab?chat_id=team-b-alerts" \
+  -H "X-Gitlab-Token: <team-b token>" -H "Content-Type: application/json" \
+  -d @webhook-pipeline-failed.json
+
+# team-b token targeting team-a -> 403 Forbidden, nothing sent
+curl -X POST "http://localhost:8080/api/v1/gitlab?chat_id=team-a" \
+  -H "X-Gitlab-Token: <team-b token>" -H "Content-Type: application/json" \
+  -d @webhook-push.json
+```
+
+See the
 [senders section](../../docs/integrations.md#изоляция-команд-senders-несколько-токенов)
 for details.

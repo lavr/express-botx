@@ -290,12 +290,6 @@ func BuildSendRequest(p *SendParams) *SendRequest {
 // ErrUnauthorized indicates the token is invalid or expired.
 var ErrUnauthorized = fmt.Errorf("unauthorized (HTTP 401)")
 
-// Send posts a notification (text and/or file) to a chat via BotX API.
-func (c *Client) Send(ctx context.Context, sr *SendRequest) error {
-	_, err := c.SendWithSyncID(ctx, sr)
-	return err
-}
-
 type sendAPIResponse struct {
 	Status string `json:"status"`
 	Result struct {

@@ -72,6 +72,15 @@ func parseResponse(t *testing.T, w *httptest.ResponseRecorder) sendResponse {
 	return resp
 }
 
+func parseMultiResponse(t *testing.T, w *httptest.ResponseRecorder) MultiSendResponse {
+	t.Helper()
+	var resp MultiSendResponse
+	if err := json.NewDecoder(w.Body).Decode(&resp); err != nil {
+		t.Fatalf("decode response: %v (body: %s)", err, w.Body.String())
+	}
+	return resp
+}
+
 // --- middleware ---
 
 func TestRequestID_Generated(t *testing.T) {
@@ -265,12 +274,12 @@ func TestSend_JSON_TextOnly(t *testing.T) {
 	if w.Code != 200 {
 		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
 	}
-	resp := parseResponse(t, w)
+	resp := parseMultiResponse(t, w)
 	if !resp.OK {
 		t.Fatalf("expected ok=true")
 	}
-	if resp.SyncID != "test-sync-id" {
-		t.Fatalf("expected sync_id=test-sync-id, got %q", resp.SyncID)
+	if len(resp.Results) != 1 || resp.Results[0].Chat != "chat-1" || resp.Results[0].SyncID != "test-sync-id" {
+		t.Fatalf("expected results[0]=chat-1->test-sync-id, got %+v", resp.Results)
 	}
 }
 
@@ -402,14 +411,21 @@ func TestSend_JSON_InvalidJSON(t *testing.T) {
 }
 
 func TestSend_JSON_ChatAlias_NotFound(t *testing.T) {
+	// Chat resolution is a per-chat delivery concern under the unified contract:
+	// a single unresolved chat means the whole fan-out failed -> 502 with the
+	// failure in errors[0], not a request-level 400.
 	srv := newTestServer([]ResolvedKey{{Name: "t", Key: "k"}})
 	body := `{"chat_id":"unknown-alias","message":"hi"}`
 	w := doRequest(srv, "POST", "/api/v1/send", strings.NewReader(body), map[string]string{
 		"X-API-Key":    "k",
 		"Content-Type": "application/json",
 	})
-	if w.Code != 400 {
-		t.Fatalf("expected 400, got %d", w.Code)
+	if w.Code != 502 {
+		t.Fatalf("expected 502, got %d", w.Code)
+	}
+	resp := parseMultiResponse(t, w)
+	if resp.OK || len(resp.Errors) != 1 || resp.Errors[0].Chat != "unknown-alias" {
+		t.Fatalf("expected not-ok with unknown-alias error, got %+v", resp)
 	}
 }
 
@@ -648,9 +664,12 @@ func TestSend_UpstreamError(t *testing.T) {
 	if w.Code != 502 {
 		t.Fatalf("expected 502, got %d", w.Code)
 	}
-	resp := parseResponse(t, w)
-	if !strings.Contains(resp.Error, "upstream error") {
-		t.Fatalf("expected upstream error, got: %s", resp.Error)
+	resp := parseMultiResponse(t, w)
+	if resp.OK || len(resp.Results) != 0 || len(resp.Errors) != 1 {
+		t.Fatalf("expected not-ok with 0 results, 1 error, got %+v", resp)
+	}
+	if resp.Errors[0].Chat != "chat-1" || !strings.Contains(resp.Errors[0].Error, "connection refused") {
+		t.Fatalf("expected chat-1 -> connection refused, got %+v", resp.Errors[0])
 	}
 }
 
@@ -1447,12 +1466,12 @@ func TestSend_MultiBot_RequiresBot(t *testing.T) {
 		"X-API-Key":    "k",
 		"Content-Type": "application/json",
 	})
-	if w.Code != 400 {
-		t.Fatalf("expected 400, got %d: %s", w.Code, w.Body.String())
+	if w.Code != 502 {
+		t.Fatalf("expected 502, got %d: %s", w.Code, w.Body.String())
 	}
-	resp := parseResponse(t, w)
-	if !strings.Contains(resp.Error, "bot is required") {
-		t.Errorf("expected 'bot is required', got: %s", resp.Error)
+	resp := parseMultiResponse(t, w)
+	if len(resp.Errors) != 1 || !strings.Contains(resp.Errors[0].Error, "bot is required") {
+		t.Errorf("expected 'bot is required' per-chat error, got: %+v", resp.Errors)
 	}
 }
 
@@ -1463,12 +1482,12 @@ func TestSend_MultiBot_UnknownBot(t *testing.T) {
 		"X-API-Key":    "k",
 		"Content-Type": "application/json",
 	})
-	if w.Code != 400 {
-		t.Fatalf("expected 400, got %d: %s", w.Code, w.Body.String())
+	if w.Code != 502 {
+		t.Fatalf("expected 502, got %d: %s", w.Code, w.Body.String())
 	}
-	resp := parseResponse(t, w)
-	if !strings.Contains(resp.Error, "unknown bot") {
-		t.Errorf("expected 'unknown bot', got: %s", resp.Error)
+	resp := parseMultiResponse(t, w)
+	if len(resp.Errors) != 1 || !strings.Contains(resp.Errors[0].Error, "unknown bot") {
+		t.Errorf("expected 'unknown bot' per-chat error, got: %+v", resp.Errors)
 	}
 }
 
@@ -1482,9 +1501,9 @@ func TestSend_MultiBot_ValidBot(t *testing.T) {
 	if w.Code != 200 {
 		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
 	}
-	resp := parseResponse(t, w)
-	if resp.SyncID != "sync-prod" {
-		t.Errorf("expected sync_id=sync-prod, got %q", resp.SyncID)
+	resp := parseMultiResponse(t, w)
+	if len(resp.Results) != 1 || resp.Results[0].SyncID != "sync-prod" {
+		t.Errorf("expected results[0].sync_id=sync-prod, got %+v", resp.Results)
 	}
 }
 
@@ -1574,12 +1593,12 @@ func TestSend_SingleBot_RejectsMismatchedChatBot(t *testing.T) {
 		"X-API-Key":    "k",
 		"Content-Type": "application/json",
 	})
-	if w.Code != 400 {
-		t.Fatalf("expected 400 for mismatched chat-bound bot, got %d: %s", w.Code, w.Body.String())
+	if w.Code != 502 {
+		t.Fatalf("expected 502 for mismatched chat-bound bot, got %d: %s", w.Code, w.Body.String())
 	}
-	resp := parseResponse(t, w)
-	if !strings.Contains(resp.Error, "not available") {
-		t.Errorf("expected 'not available' error, got: %s", resp.Error)
+	resp := parseMultiResponse(t, w)
+	if len(resp.Errors) != 1 || !strings.Contains(resp.Errors[0].Error, "not available") {
+		t.Errorf("expected 'not available' per-chat error, got: %+v", resp.Errors)
 	}
 
 	// Chat without binding → should pass
@@ -1620,12 +1639,12 @@ func TestSend_SingleBot_EnvFlags_RejectsChatBoundBot(t *testing.T) {
 		"X-API-Key":    "k",
 		"Content-Type": "application/json",
 	})
-	if w.Code != 400 {
-		t.Fatalf("expected 400 for chat-bound bot with unnamed sender, got %d: %s", w.Code, w.Body.String())
+	if w.Code != 502 {
+		t.Fatalf("expected 502 for chat-bound bot with unnamed sender, got %d: %s", w.Code, w.Body.String())
 	}
-	resp := parseResponse(t, w)
-	if !strings.Contains(resp.Error, "not available") {
-		t.Errorf("expected 'not available' error, got: %s", resp.Error)
+	resp := parseMultiResponse(t, w)
+	if len(resp.Errors) != 1 || !strings.Contains(resp.Errors[0].Error, "not available") {
+		t.Errorf("expected 'not available' per-chat error, got: %+v", resp.Errors)
 	}
 
 	// Chat without binding → should pass
@@ -1659,13 +1678,22 @@ func TestAlertmanager_MultiBot_RequiresBot(t *testing.T) {
 		Annotations: map[string]string{"summary": "test"},
 	})
 
-	// Without ?bot= — should fail
+	// Without ?bot= — bot resolution is now a per-chat delivery outcome, so an
+	// ambiguous bot fails the (single) target and surfaces as 502 with the error
+	// in errors[] (unified contract), not a request-level 400.
 	w := doRequest(srv, "POST", "/api/v1/alertmanager", strings.NewReader(body), map[string]string{
 		"X-API-Key":    "k",
 		"Content-Type": "application/json",
 	})
-	if w.Code != 400 {
-		t.Fatalf("expected 400, got %d: %s", w.Code, w.Body.String())
+	if w.Code != 502 {
+		t.Fatalf("expected 502, got %d: %s", w.Code, w.Body.String())
+	}
+	var resp MultiSendResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode: %v (body: %s)", err, w.Body.String())
+	}
+	if len(resp.Errors) != 1 || !strings.Contains(resp.Errors[0].Error, "bot is required") {
+		t.Errorf("errors = %+v, want single bot-required error", resp.Errors)
 	}
 
 	// With ?bot=prod — should succeed
@@ -1698,13 +1726,22 @@ func TestGrafana_MultiBot_RequiresBot(t *testing.T) {
 		Annotations: map[string]string{"summary": "test"},
 	})
 
-	// Without ?bot= — should fail
+	// Without ?bot= — bot resolution is now a per-chat delivery outcome, so an
+	// ambiguous bot fails the (single) target and surfaces as 502 with the error
+	// in errors[] (unified contract), not a request-level 400.
 	w := doRequest(srv, "POST", "/api/v1/grafana", strings.NewReader(body), map[string]string{
 		"X-API-Key":    "k",
 		"Content-Type": "application/json",
 	})
-	if w.Code != 400 {
-		t.Fatalf("expected 400, got %d: %s", w.Code, w.Body.String())
+	if w.Code != 502 {
+		t.Fatalf("expected 502, got %d: %s", w.Code, w.Body.String())
+	}
+	var resp MultiSendResponse
+	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
+		t.Fatalf("decode: %v (body: %s)", err, w.Body.String())
+	}
+	if len(resp.Errors) != 1 || !strings.Contains(resp.Errors[0].Error, "bot is required") {
+		t.Errorf("errors = %+v, want single bot-required error", resp.Errors)
 	}
 
 	// With ?bot=test — should succeed
@@ -1788,12 +1825,15 @@ func TestAuth_BotSignature_PrivilegeEscalation(t *testing.T) {
 		"X-Bot-Signature": "SIG_TEST",
 		"Content-Type":    "application/json",
 	})
-	if w.Code != 400 {
-		t.Fatalf("expected 400 for privilege escalation, got %d: %s", w.Code, w.Body.String())
+	// The escalation is still refused (send never attempted); under the unified
+	// contract a rejected per-chat bot resolution surfaces as a 502 with the
+	// reason in errors[], not a request-level 400.
+	if w.Code != 502 {
+		t.Fatalf("expected 502 for privilege escalation, got %d: %s", w.Code, w.Body.String())
 	}
-	resp := parseResponse(t, w)
-	if !strings.Contains(resp.Error, "does not match authenticated bot") {
-		t.Errorf("expected mismatch error, got: %s", resp.Error)
+	resp := parseMultiResponse(t, w)
+	if len(resp.Errors) != 1 || !strings.Contains(resp.Errors[0].Error, "does not match authenticated bot") {
+		t.Errorf("expected mismatch per-chat error, got: %+v", resp.Errors)
 	}
 }
 
@@ -2118,15 +2158,21 @@ func TestSend_AsyncMode_DirectPublish(t *testing.T) {
 		t.Fatalf("expected 202, got %d: %s", w.Code, w.Body.String())
 	}
 
-	resp := parseResponse(t, w)
+	resp := parseMultiResponse(t, w)
 	if !resp.OK {
 		t.Error("expected ok=true")
 	}
-	if !resp.Queued {
+	if len(resp.Results) != 1 || len(resp.Errors) != 0 {
+		t.Fatalf("response = %+v, want 1 result, 0 errors", resp)
+	}
+	if !resp.Results[0].Queued {
 		t.Error("expected queued=true")
 	}
-	if resp.RequestID != "test-request-id" {
-		t.Errorf("request_id = %q, want %q", resp.RequestID, "test-request-id")
+	if resp.Results[0].RequestID != "test-request-id" {
+		t.Errorf("request_id = %q, want %q", resp.Results[0].RequestID, "test-request-id")
+	}
+	if resp.Results[0].Chat != "00000000-0000-0000-0000-000000000002" {
+		t.Errorf("chat = %q, want target chat", resp.Results[0].Chat)
 	}
 
 	if capturedPayload == nil {
@@ -2172,6 +2218,46 @@ func TestSend_AsyncMode_MissingBotID(t *testing.T) {
 	resp := parseResponse(t, w)
 	if !strings.Contains(resp.Error, "bot_id is required") {
 		t.Errorf("expected 'bot_id is required' error, got: %s", resp.Error)
+	}
+}
+
+// TestSend_AsyncMode_MultiChatValidationAllOrNothing: async routing validation is
+// request-level — if any target in a multi-chat request fails validation the whole
+// request is rejected with 400 and nothing is enqueued (no partial publish).
+func TestSend_AsyncMode_MultiChatValidationAllOrNothing(t *testing.T) {
+	var enqueued int
+	cfg := Config{
+		Listen:             ":0",
+		BasePath:           "/api/v1",
+		Keys:               []ResolvedKey{{Name: "t", Key: "k"}},
+		AsyncMode:          true,
+		DefaultRoutingMode: "direct",
+	}
+	sendFn := func(ctx context.Context, p *SendPayload) (string, error) {
+		enqueued++
+		return "req-id", nil
+	}
+	chatResolver := func(chatID string) (ChatResolveResult, error) {
+		return ChatResolveResult{ChatID: chatID}, nil
+	}
+	srv := New(cfg, sendFn, chatResolver)
+
+	// First chat is a valid UUID; second is not — direct mode rejects the second.
+	body := `{"bot_id":"00000000-0000-0000-0000-000000000001","chat_id":"00000000-0000-0000-0000-000000000002,not-a-uuid","message":"hi","routing_mode":"direct"}`
+	w := doRequest(srv, "POST", "/api/v1/send", strings.NewReader(body), map[string]string{
+		"X-API-Key":    "k",
+		"Content-Type": "application/json",
+	})
+
+	if w.Code != 400 {
+		t.Fatalf("status = %d, want 400 (whole request rejected); body: %s", w.Code, w.Body.String())
+	}
+	resp := parseResponse(t, w)
+	if resp.OK || !strings.Contains(resp.Error, "chat_id must be a valid UUID") {
+		t.Errorf("response = %+v, want ok:false naming the invalid chat", resp)
+	}
+	if enqueued != 0 {
+		t.Errorf("enqueued = %d, want 0 (nothing published on validation failure)", enqueued)
 	}
 }
 
@@ -2245,9 +2331,12 @@ func TestSend_AsyncMode_EnqueueError(t *testing.T) {
 	if w.Code != 502 {
 		t.Fatalf("expected 502, got %d: %s", w.Code, w.Body.String())
 	}
-	resp := parseResponse(t, w)
-	if !strings.Contains(resp.Error, "enqueue error") {
-		t.Errorf("expected 'enqueue error', got: %s", resp.Error)
+	resp := parseMultiResponse(t, w)
+	if resp.OK || len(resp.Results) != 0 || len(resp.Errors) != 1 {
+		t.Fatalf("response = %+v, want not-ok with 0 results, 1 error", resp)
+	}
+	if !strings.Contains(resp.Errors[0].Error, "broker connection refused") {
+		t.Errorf("expected 'broker connection refused', got: %s", resp.Errors[0].Error)
 	}
 }
 

@@ -116,9 +116,29 @@ paths:
       operationId: send
       summary: Send a message
       description: |
-        Send a text message and/or file to an eXpress chat.
+        Send a text message and/or file to one or more eXpress chats.
         Supports JSON and multipart/form-data content types.
         At least one of `message` or `file` is required.
+
+        **Multi-chat fan-out.** `chat_id` may list several chats separated by
+        commas (`chat_id=a,b,c`). The message is delivered best-effort to every
+        listed chat; duplicates are collapsed, order is preserved. Chat and bot
+        are resolved per target, and inline `@mention[...]` tokens are parsed with
+        each target bot's own resolver.
+
+        **⚠️ Breaking change (response format).** The response is now always a
+        `MultiSendResponse` — a `results[]`/`errors[]` envelope — even for a single
+        chat (previously `{"ok":true,"sync_id":"..."}`). Per-chat success carries
+        `sync_id` (sync) or `request_id`+`queued:true` (async). HTTP status is
+        `200` when at least one sync delivery succeeded, `202` for async enqueue,
+        `502` when delivery to every chat failed. Request-level failures (bad JSON,
+        empty `chat_id`, invalid `status`, unsupported media type) keep the old
+        `{"ok":false,"error":"..."}` form with `400`/`415` and are NOT reported in
+        `errors[]`.
+
+        **Async expand.** In async mode (`serve --enqueue`) a multi-chat `chat_id`
+        is expanded into N independent queue messages (one per chat) so each chat
+        retries/acks on its own without duplicates; the worker is unchanged.
 
         `chat_id` is optional when a default chat is configured (`default: true` in chats section).
 
@@ -214,13 +234,44 @@ paths:
                   description: JSON string containing an array of mentions in BotX API wire format
       responses:
         "200":
-          description: Message sent
+          description: |
+            Delivered synchronously to at least one chat. Body is a
+            `MultiSendResponse`; each `results` entry carries a `sync_id`, and any
+            per-chat failures are listed in `errors`.
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/SuccessResponse"
+                $ref: "#/components/schemas/MultiSendResponse"
+              example:
+                ok: true
+                results:
+                  - chat: deploy
+                    sync_id: "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+                errors:
+                  - chat: missing-alias
+                    error: "resolving chat: unknown chat alias"
+        "202":
+          description: |
+            Accepted for asynchronous delivery (`serve --enqueue`). A multi-chat
+            `chat_id` is expanded into one queued message per chat; each `results`
+            entry carries `request_id` and `queued:true`.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MultiSendResponse"
+              example:
+                ok: true
+                results:
+                  - chat: a
+                    request_id: "0d6d7f87-0a2f-4c5b-b0d4-4d0b705a77e2"
+                    queued: true
+                  - chat: b
+                    request_id: "1e7e8f98-1b3f-5d6c-c1e5-5e1c816b88f3"
+                    queued: true
         "400":
-          description: Invalid request
+          description: |
+            Request-level error (empty `chat_id`, missing body, invalid `status`,
+            malformed JSON). Keeps the `{"ok":false,"error":"..."}` form.
           content:
             application/json:
               schema:
@@ -253,11 +304,18 @@ paths:
               schema:
                 $ref: "#/components/schemas/ErrorResponse"
         "502":
-          description: Upstream error (eXpress API)
+          description: |
+            Delivery to every listed chat failed. Body is a `MultiSendResponse`
+            with `ok:false` and one `errors` entry per chat.
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/ErrorResponse"
+                $ref: "#/components/schemas/MultiSendResponse"
+              example:
+                ok: false
+                errors:
+                  - chat: a
+                    error: "upstream error: 502 Bad Gateway"
 
   /alertmanager:
     post:
@@ -267,15 +325,20 @@ paths:
         Receives webhook notifications from Prometheus Alertmanager.
         Renders alerts through a Go template and sends the result to eXpress.
 
+        **Multi-chat fan-out.** `?chat_id=` may list several chats separated by
+        commas (`?chat_id=a,b,c`); the rendered alert is delivered best-effort to
+        each. The response is always a `MultiSendResponse` (see the breaking-change
+        note on `/send`), even for a single or default chat.
+
         Chat resolution priority:
-        1. `?chat_id=` query parameter
+        1. `?chat_id=` query parameter (comma-separated for fan-out)
         2. `default_chat_id` from webhook config
         3. Global default chat (`default: true` in chats section)
         4. Single chat alias from config
       parameters:
         - name: chat_id
           in: query
-          description: Target chat UUID or alias (overrides config default)
+          description: Target chat UUID or alias; comma-separated for multi-chat fan-out (overrides config default)
           schema:
             type: string
         - name: bot
@@ -315,13 +378,15 @@ paths:
                   generatorURL: http://prometheus:9090/graph
       responses:
         "200":
-          description: Alert processed and sent
+          description: |
+            Alert delivered to at least one chat. Body is a `MultiSendResponse`
+            (`results` with a per-chat `sync_id`; partial failures in `errors`).
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/SuccessResponse"
+                $ref: "#/components/schemas/MultiSendResponse"
         "400":
-          description: Invalid request
+          description: Request-level error (malformed JSON, no alerts, empty chat_id, template error)
           content:
             application/json:
               schema:
@@ -339,11 +404,11 @@ paths:
               schema:
                 $ref: "#/components/schemas/ErrorResponse"
         "502":
-          description: Upstream error
+          description: Delivery to every listed chat failed (`MultiSendResponse` with `ok:false`)
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/ErrorResponse"
+                $ref: "#/components/schemas/MultiSendResponse"
 
   /command:
     post:
@@ -456,15 +521,20 @@ paths:
         Receives webhook notifications from Grafana Alerting.
         Renders alerts through a Go template and sends the result to eXpress.
 
+        **Multi-chat fan-out.** `?chat_id=` may list several chats separated by
+        commas (`?chat_id=a,b,c`); the rendered alert is delivered best-effort to
+        each. The response is always a `MultiSendResponse` (see the breaking-change
+        note on `/send`), even for a single or default chat.
+
         Chat resolution priority:
-        1. `?chat_id=` query parameter
+        1. `?chat_id=` query parameter (comma-separated for fan-out)
         2. `default_chat_id` from webhook config
         3. Global default chat (`default: true` in chats section)
         4. Single chat alias from config
       parameters:
         - name: chat_id
           in: query
-          description: Target chat UUID or alias (overrides config default)
+          description: Target chat UUID or alias; comma-separated for multi-chat fan-out (overrides config default)
           schema:
             type: string
         - name: bot
@@ -512,13 +582,15 @@ paths:
               message: "**Firing**\n\nValue: B=95.2"
       responses:
         "200":
-          description: Alert processed and sent
+          description: |
+            Alert delivered to at least one chat. Body is a `MultiSendResponse`
+            (`results` with a per-chat `sync_id`; partial failures in `errors`).
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/SuccessResponse"
+                $ref: "#/components/schemas/MultiSendResponse"
         "400":
-          description: Invalid request
+          description: Request-level error (malformed JSON, no alerts, empty chat_id, template error)
           content:
             application/json:
               schema:
@@ -536,11 +608,11 @@ paths:
               schema:
                 $ref: "#/components/schemas/ErrorResponse"
         "502":
-          description: Upstream error
+          description: Delivery to every listed chat failed (`MultiSendResponse` with `ok:false`)
           content:
             application/json:
               schema:
-                $ref: "#/components/schemas/ErrorResponse"
+                $ref: "#/components/schemas/MultiSendResponse"
 
   /gitlab:
     post:
@@ -582,7 +654,7 @@ paths:
           `/regex/` patterns (the `event` selector uses event-key matching instead).
           When no rule matches, delivery falls back to the single default chat, and
           if none is configured the event is ignored (`200`). Fan-out is
-          best-effort: the response is `200` with a `GitlabFanoutResponse` when at
+          best-effort: the response is `200` with a `MultiSendResponse` when at
           least one delivery succeeds (partial failures are listed in `errors`), or
           `502` when they all fail.
 
@@ -592,32 +664,48 @@ paths:
         (multi-tenant): besides the default `server.gitlab.secret`, each entry
         of `server.gitlab.senders` defines its own token bound to an isolated
         set of chats. A request authenticated with a sender token is delivered
-        **only** to that sender's chats (fan-out, `GitlabFanoutResponse`);
-        `?chat_id=`, `?bot=`, `routes` and `default_chat_id` are ignored for it, while
-        the `events` filter, templates and `error_events` apply as usual. The
-        response behaviour is otherwise unchanged; any token that matches
-        neither the default secret nor a sender secret gets `401`.
+        to that sender's chats (fan-out, `MultiSendResponse`); `?bot=`, `routes`
+        and `default_chat_id` are ignored for it, while the `events` filter,
+        templates and `error_events` apply as usual. `?chat_id=` acts as a
+        **filter within the sender's allowed chats**: omitted delivers to every
+        sender chat; a non-empty comma-separated subset delivers only to those
+        chats (aliases and the UUIDs they resolve to are treated as equivalent);
+        any requested chat outside the sender's scope is refused with `403`
+        (nothing is sent); an explicitly-empty `?chat_id=` is a `400`. Any token
+        that matches neither the default secret nor a sender secret gets `401`.
 
         Chat resolution priority (default-token requests):
-        1. `?chat_id=` query parameter (overrides routing entirely)
+        1. `?chat_id=` query parameter (overrides routing entirely;
+           comma-separated for multi-chat fan-out)
         2. `server.gitlab.routes` (all matching rules, unioned + de-duplicated)
         3. `default_chat_id` from webhook config
         4. Global default chat (`default: true` in chats section)
         5. Single chat alias from config
 
-        Sender-token requests skip this list: the targets are always the
-        sender's configured chats.
+        Sender-token requests skip this list: the targets are the sender's
+        configured chats, optionally narrowed by `?chat_id=` to a subset of them
+        (a chat outside the scope yields `403`).
+
+        **⚠️ Breaking change (response format).** Every delivered event now returns
+        a `MultiSendResponse` (`results`/`errors` envelope), including single-chat
+        `?chat_id=` and single default-chat delivery (previously a bare
+        `SuccessResponse`). Filtered-out events still return `GitlabIgnoredResponse`.
       security:
         - gitlabToken: []
       parameters:
         - name: chat_id
           in: query
-          description: Target chat UUID or alias (overrides config default)
+          description: |
+            Target chat UUID or alias; comma-separated for multi-chat fan-out
+            (overrides config default). For a sender token it instead filters
+            within the sender's allowed chats: a subset delivers only to those
+            chats, a chat outside the scope yields `403`, and an explicitly-empty
+            value yields `400`.
           schema:
             type: string
         - name: bot
           in: query
-          description: Bot name (required in multi-bot mode unless chat has a default bot binding)
+          description: Bot name (required in multi-bot mode unless chat has a default bot binding). Ignored for sender-token requests.
           schema:
             type: string
       requestBody:
@@ -645,12 +733,10 @@ paths:
         "200":
           description: |
             Event processed. The body depends on how the event was delivered:
-            - Single-chat delivery (`?chat_id=`, or no `routes` configured):
-              a `SuccessResponse` (`ok` + `sync_id`).
-            - Fan-out via `routes` or a sender-token match
-              (`server.gitlab.senders`): a `GitlabFanoutResponse` with a
-              `results` entry per successful chat and an `errors` entry per
-              failed chat (`ok:true` when at least one delivery succeeded).
+            - Delivered to at least one chat (single `?chat_id=`, `routes`
+              fan-out, or a sender-token match on `server.gitlab.senders`): a
+              `MultiSendResponse` with a `results` entry per successful chat and
+              an `errors` entry per failed chat (`ok:true`).
             - Filtered out by `only`/`exclude`, or matched no route with no
               default chat: a `GitlabIgnoredResponse` (`ok:true`, `ignored:true`,
               `event:<key>`) and no message is sent.
@@ -658,11 +744,10 @@ paths:
             application/json:
               schema:
                 oneOf:
-                  - $ref: "#/components/schemas/SuccessResponse"
-                  - $ref: "#/components/schemas/GitlabFanoutResponse"
+                  - $ref: "#/components/schemas/MultiSendResponse"
                   - $ref: "#/components/schemas/GitlabIgnoredResponse"
         "400":
-          description: Invalid request (malformed JSON or template error)
+          description: Invalid request (malformed JSON, template error, or an explicitly-empty `?chat_id=`)
           content:
             application/json:
               schema:
@@ -673,18 +758,22 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ErrorResponse"
+        "403":
+          description: |
+            Sender token requested a `?chat_id=` outside its allowed chats
+            (`server.gitlab.senders[].chats`); nothing is sent.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
         "502":
           description: |
-            Upstream error. For single-chat delivery the body is an
-            `ErrorResponse`. For a `routes` or sender-token fan-out where
-            every target chat failed, the body is a `GitlabFanoutResponse`
+            Delivery to every target chat failed. Body is a `MultiSendResponse`
             (`ok:false`) whose `errors` list the per-chat failures.
           content:
             application/json:
               schema:
-                oneOf:
-                  - $ref: "#/components/schemas/ErrorResponse"
-                  - $ref: "#/components/schemas/GitlabFanoutResponse"
+                $ref: "#/components/schemas/MultiSendResponse"
 
 components:
   securitySchemes:
@@ -1050,15 +1139,17 @@ components:
           description: The derived event key that was filtered out.
           example: "merge_request.update"
 
-    GitlabFanoutResponse:
+    MultiSendResponse:
       type: object
       description: |
-        Returned by /gitlab when `server.gitlab.routes` or a sender-token match
-        (`server.gitlab.senders`) fans an event out to one
-        or more chats. `ok` is true when at least one delivery succeeded (HTTP
-        200) and false when they all failed (HTTP 502). `results` lists each
-        successful delivery and `errors` each failed one; on a partial failure
-        both are present.
+        The uniform multi-chat fan-out response shared by `/send`, `/alertmanager`,
+        `/grafana` and `/gitlab`. `ok` is true when at least one chat received the
+        message (HTTP `200` sync / `202` async) and false when delivery to every
+        chat failed (HTTP `502`). `results` lists each successful delivery and
+        `errors` each failed one; on a partial failure both are present. Order
+        follows the requested chats. Request-level failures (bad JSON, empty
+        `chat_id`, invalid status, unsupported media) are NOT reported here — they
+        keep the `{"ok":false,"error":"..."}` form with `400`/`415`.
       properties:
         ok:
           type: boolean
@@ -1071,11 +1162,20 @@ components:
             properties:
               chat:
                 type: string
-                description: Target chat alias or UUID as configured in the rule.
+                description: Target chat alias or UUID as requested.
                 example: backend-mrs
               sync_id:
                 type: string
+                description: Synchronous delivery id (present for sync sends).
                 example: "a1b2c3d4-e5f6-7890-abcd-ef1234567890"
+              request_id:
+                type: string
+                description: Enqueue request id (present for async/enqueue sends).
+                example: "0d6d7f87-0a2f-4c5b-b0d4-4d0b705a77e2"
+              queued:
+                type: boolean
+                description: True when the message was queued (async/enqueue).
+                example: true
         errors:
           type: array
           description: Failed deliveries, one per chat (chat/bot resolution or upstream send).

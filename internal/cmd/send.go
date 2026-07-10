@@ -122,12 +122,24 @@ Options:
 		return fmt.Errorf("--secret and --token are mutually exclusive")
 	}
 
-	cfg, err := config.Load(flags)
+	cfg, err := config.LoadForSend(flags)
 	if err != nil {
 		return err
 	}
-	if err := cfg.RequireChatID(); err != nil {
-		return err
+
+	// Determine target chats up front so an empty --chat-id fails fast (before
+	// authenticating or reading files). A comma-separated --chat-id (--chat-id a,b,c)
+	// fans the same message out to each chat. Tokens are kept as given (aliases, not
+	// yet resolved to UUIDs) so each chat's bot binding is honoured per target in
+	// multi-bot configs. An empty value falls back to the single/default configured
+	// chat by alias, preserving that chat's bot binding.
+	chats := parseChatIDs(cfg.ChatID)
+	if len(chats) == 0 {
+		alias, ok := cfg.SingleOrDefaultChatAlias()
+		if !ok {
+			return cfg.RequireChatID()
+		}
+		chats = []string{alias}
 	}
 
 	// Validate status
@@ -218,60 +230,203 @@ Options:
 		ment = raw
 	}
 
-	// Authenticate
-	tok, cache, err := authenticate(cfg)
-	if err != nil {
-		return err
-	}
-
-	client := botapi.NewClient(cfg.Host, tok, cfg.HTTPTimeout())
-
-	// Run inline mentions parser.
-	// Use refreshableClientResolver so the token is refreshed on 401 — the
-	// cached token may have expired since it was stored.
-	parseResult := mentions.Parse(
-		context.Background(),
-		message,
-		ment,
-		!noParse,
-		&refreshableClientResolver{client: client, cfg: cfg, cache: cache},
-	)
-	for _, e := range parseResult.Errors {
-		fmt.Fprintf(deps.Stderr, "warning: mention %s: %s\n", e.Kind, e.Cause)
-	}
-
-	// Build SendRequest
-	sr := botapi.BuildSendRequest(&botapi.SendParams{
-		ChatID:   cfg.ChatID,
-		Message:  parseResult.Message,
-		Status:   status,
-		File:     fileAttachment,
-		Metadata: meta,
-		Mentions: parseResult.Mentions,
-		Silent:   silent,
-		Stealth:  stealth,
-		ForceDND: forceDND,
-		NoNotify: noNotify,
-	})
-
-	// Send
-	err = client.Send(context.Background(), sr)
-	if err != nil {
-		if errors.Is(err, botapi.ErrUnauthorized) {
-			if cfg.BotToken != "" {
-				return fmt.Errorf("bot token rejected (401), re-configure token")
-			}
-			tok, err = refreshToken(cfg, cache)
-			if err != nil {
-				return fmt.Errorf("refreshing token: %w", err)
-			}
-			client.Token = tok
-			err = client.Send(context.Background(), sr)
+	// Fan out to every target chat, resolving the bot bound to each chat so a
+	// multi-bot config delivers each chat via its own bot/token (matching the
+	// sync /send handler). Per-bot state — token, HTTP client, and the inline
+	// mentions parse (email→huid lookups are per-host) — is built once per bot and
+	// reused across that bot's chats. Delivery is best-effort and per-chat
+	// independent: a failed chat is recorded, the rest still send, and a non-zero
+	// exit is returned only if every chat failed.
+	execs := make(map[string]*botExec)
+	getExec := func(botName string) (*botExec, error) {
+		if be, ok := execs[botName]; ok {
+			return be, nil
 		}
-		if err != nil {
-			return fmt.Errorf("sending: %w", err)
+		botCfg := *cfg
+		if cfg.IsMultiBot() {
+			if botName == "" {
+				return nil, fmt.Errorf("no bot is bound to this chat; add a bot binding in the chats section or pass --bot")
+			}
+			if aerr := (&botCfg).ApplyChatBot(botName); aerr != nil {
+				return nil, aerr
+			}
+		}
+		tok, cache, aerr := authenticate(&botCfg)
+		if aerr != nil {
+			return nil, aerr
+		}
+		client := botapi.NewClient(botCfg.Host, tok, botCfg.HTTPTimeout())
+		// Inline mentions parser (per-bot resolver; token refreshed on 401).
+		pr := mentions.Parse(
+			context.Background(),
+			message,
+			ment,
+			!noParse,
+			&refreshableClientResolver{client: client, cfg: &botCfg, cache: cache},
+		)
+		for _, e := range pr.Errors {
+			fmt.Fprintf(deps.Stderr, "warning: mention %s: %s\n", e.Kind, e.Cause)
+		}
+		be := &botExec{client: client, cfg: &botCfg, cache: cache, message: pr.Message, mentions: pr.Mentions}
+		execs[botName] = be
+		return be, nil
+	}
+
+	results := make([]sendCmdResult, 0, len(chats))
+	for _, chat := range chats {
+		chatID, botName, rerr := resolveSendTarget(cfg, chat)
+		if rerr != nil {
+			results = append(results, sendCmdResult{Chat: chat, Error: rerr.Error()})
+			continue
+		}
+		be, eerr := getExec(botName)
+		if eerr != nil {
+			results = append(results, sendCmdResult{Chat: chat, Error: eerr.Error()})
+			continue
+		}
+		sr := botapi.BuildSendRequest(&botapi.SendParams{
+			ChatID:   chatID,
+			Message:  be.message,
+			Status:   status,
+			File:     fileAttachment,
+			Metadata: meta,
+			Mentions: be.mentions,
+			Silent:   silent,
+			Stealth:  stealth,
+			ForceDND: forceDND,
+			NoNotify: noNotify,
+		})
+		syncID, serr := sendWithRefresh(be.client, be.cfg, be.cache, sr)
+		if serr != nil {
+			results = append(results, sendCmdResult{Chat: chat, Error: serr.Error()})
+			continue
+		}
+		results = append(results, sendCmdResult{Chat: chat, SyncID: syncID})
+	}
+
+	return printSendResults(deps.Stdout, cfg.Format, results)
+}
+
+// botExec is a per-bot send context: an authenticated client plus the message and
+// mentions resolved with that bot's (per-host) mentions resolver.
+type botExec struct {
+	client   *botapi.Client
+	cfg      *config.Config
+	cache    token.Cache
+	message  string
+	mentions json.RawMessage
+}
+
+// resolveSendTarget maps a --chat-id token to its chat UUID and the bot bound to
+// it. A raw UUID, or any single-bot config, has no per-chat bot and returns
+// botName "" (the caller then uses the command's single bot). In multi-bot mode
+// an alias's bound bot is returned so each chat sends via its own bot; an alias
+// with no binding returns "" and getExec reports it as an error for that chat.
+func resolveSendTarget(cfg *config.Config, chat string) (chatID, botName string, err error) {
+	if config.IsUUID(chat) {
+		return chat, "", nil
+	}
+	chatID, err = cfg.ResolveChatAlias(chat)
+	if err != nil {
+		return "", "", err
+	}
+	if !cfg.IsMultiBot() {
+		return chatID, "", nil
+	}
+	return chatID, cfg.Chats[chat].Bot, nil
+}
+
+// sendWithRefresh posts one SendRequest and returns its sync_id, refreshing the
+// token once on a 401 exactly as the original single-chat path did.
+func sendWithRefresh(client *botapi.Client, cfg *config.Config, cache token.Cache, sr *botapi.SendRequest) (string, error) {
+	syncID, err := client.SendWithSyncID(context.Background(), sr)
+	if err != nil && errors.Is(err, botapi.ErrUnauthorized) {
+		if cfg.BotToken != "" {
+			return "", fmt.Errorf("bot token rejected (401), re-configure token")
+		}
+		tok, rerr := refreshToken(cfg, cache)
+		if rerr != nil {
+			return "", fmt.Errorf("refreshing token: %w", rerr)
+		}
+		client.Token = tok
+		syncID, err = client.SendWithSyncID(context.Background(), sr)
+	}
+	if err != nil {
+		return "", fmt.Errorf("sending: %w", err)
+	}
+	return syncID, nil
+}
+
+// sendCmdResult is one per-chat sync send outcome: the target chat plus either
+// its sync_id (success) or an error string.
+type sendCmdResult struct {
+	Chat   string
+	SyncID string
+	Error  string
+}
+
+// printSendResults renders per-chat sync send outcomes. In json format it emits
+// the uniform multi-chat body
+// {"ok":..,"results":[{chat,sync_id}],"errors":[{chat,error}]}. In human format a
+// multi-chat send prints one "chat: sync_id" (or "chat: ERROR ..") line per target;
+// a single-chat send stays silent on success and surfaces a failure through the
+// returned error, preserving the previous CLI behavior. A non-nil error (non-zero
+// exit) is returned only when every target failed, mirroring the server's 502
+// all-fail semantics.
+func printSendResults(w io.Writer, format string, results []sendCmdResult) error {
+	okCount := 0
+	for _, r := range results {
+		if r.Error == "" {
+			okCount++
 		}
 	}
 
+	if format == "json" {
+		type jsonResult struct {
+			Chat   string `json:"chat"`
+			SyncID string `json:"sync_id,omitempty"`
+		}
+		type jsonError struct {
+			Chat  string `json:"chat"`
+			Error string `json:"error"`
+		}
+		type jsonResponse struct {
+			OK      bool         `json:"ok"`
+			Results []jsonResult `json:"results"`
+			Errors  []jsonError  `json:"errors,omitempty"`
+		}
+		resp := jsonResponse{OK: okCount > 0, Results: []jsonResult{}}
+		for _, r := range results {
+			if r.Error != "" {
+				resp.Errors = append(resp.Errors, jsonError{Chat: r.Chat, Error: r.Error})
+			} else {
+				resp.Results = append(resp.Results, jsonResult{Chat: r.Chat, SyncID: r.SyncID})
+			}
+		}
+		enc := json.NewEncoder(w)
+		enc.SetIndent("", "  ")
+		if err := enc.Encode(resp); err != nil {
+			return err
+		}
+	} else {
+		// Multi-chat: one line per chat. Single-chat: silent on success, error
+		// surfaced via the returned error below (previous behavior).
+		if len(results) > 1 {
+			for _, r := range results {
+				if r.Error != "" {
+					fmt.Fprintf(w, "%s: ERROR %s\n", r.Chat, r.Error)
+				} else {
+					fmt.Fprintf(w, "%s: %s\n", r.Chat, r.SyncID)
+				}
+			}
+		}
+	}
+
+	if okCount == 0 {
+		if len(results) == 1 {
+			return fmt.Errorf("%s", results[0].Error)
+		}
+		return fmt.Errorf("all %d chats failed", len(results))
+	}
 	return nil
 }

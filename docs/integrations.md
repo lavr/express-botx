@@ -2,6 +2,72 @@
 
 Подключение express-botx к системам мониторинга.
 
+## Мульти-чат и единый ответ (`MultiSendResponse`)
+
+Все точки отправки (`/send`, `/alertmanager`, `/grafana`, `/gitlab` и CLI)
+поддерживают **несколько чатов через запятую** в `chat_id` и возвращают **единый
+формат ответа**.
+
+### `chat_id` через запятую (фан-аут)
+
+`chat_id=a,b,c` (в теле `/send` или в query `?chat_id=a,b,c` у вебхуков)
+рассылает одно сообщение во **все** перечисленные чаты (fan-out). Дубликаты
+схлопываются, порядок сохраняется, чат и бот резолвятся для каждого таргета
+отдельно. Доставка **best-effort**: успех в один чат не блокируется падением
+другого.
+
+### Единый ответ `MultiSendResponse` (ломающее изменение)
+
+> **⚠️ Ломающее изменение формата ответа.** Раньше `/send`/`/alertmanager`/
+> `/grafana` отвечали `{"ok":true,"sync_id":"..."}`, а `/gitlab` — то одиночной,
+> то fan-out-формой. Теперь **все** эндпоинты, даже для одного чата, отвечают
+> единым конвертом. Клиентам, которым нужен старый контракт, следует остаться на
+> предыдущей версии.
+
+```json
+{"ok": true,
+ "results": [{"chat":"a","sync_id":"..."},
+             {"chat":"b","request_id":"...","queued":true}],
+ "errors":  [{"chat":"c","error":"resolving chat: ..."}]}
+```
+
+- Пер-чатовый успех: `sync_id` (sync-отправка) либо `request_id`+`queued:true`
+  (async/enqueue).
+- Пер-чатовые сбои доставки (резолв чата/бота, ошибка upstream) — в `errors[]`.
+- **Коды ответа:** `200` — sync, доставлено ≥1 чата; `202` — async (enqueue);
+  `502` — во все чаты не удалось.
+- **Request-level ошибки** (битый JSON, пустой `chat_id`, невалидный `status`,
+  неподдерживаемый media-type) сохраняют прежнюю форму `{"ok":false,"error":"..."}`
+  с кодами `400`/`415` и в `errors[]` **не** попадают.
+
+### Async: expand в N сообщений
+
+В async-режиме (`serve --enqueue`) `chat_id=a,b,c` раскрывается в **N отдельных
+сообщений в очереди** (по одному на чат) — так каждый чат ретраится/подтверждается
+независимо, без дублей; worker не меняется.
+
+### Переиспользуемый паттерн (для разработчиков)
+
+Мульти-чат — единый механизм на весь проект, а не копипаста по хендлерам. Любая
+новая точка отправки должна переиспользовать примитивы из
+[`internal/server/multisend.go`](../internal/server/multisend.go), а не
+реализовывать fan-out заново:
+
+- `parseChatIDs(raw)` — разбор `chat_id` через запятую (trim, dedup, порядок
+  сохранён, пустые отброшены).
+- `fanout(ctx, targets, deliver)` — best-effort обход таргетов: собирает
+  `[]SendResult` и `[]SendError`, порядок сохранён.
+- `(*Server).fanoutSend(...)` — готовый `deliver` с резолвом чата+бота для
+  простых поверхностей без mentions (`/alertmanager`, `/grafana`).
+- `MultiSendResponse` / `writeMultiSend(w, results, errs, successStatus)` —
+  единый конверт ответа и коды `200`/`202`/`502`.
+
+Request-level ошибки (битый вход, media-type) остаются вне `errors[]` в форме
+`{"ok":false,"error":"..."}`. Кастомный `deliver` нужен только там, где per-target
+логика отличается (например, per-bot mentions в `/send` sync).
+
+---
+
 ## Alertmanager
 
 ### Настройка express-botx
@@ -46,7 +112,11 @@ route:
 
 ### Несколько чатов
 
-Если нужно отправлять разные алерты в разные чаты, используйте разные receiver'ы с query-параметром `chat_id`:
+Один алерт можно разослать сразу в несколько чатов через запятую в `?chat_id=`
+(fan-out, единый ответ — см. [Мульти-чат](#мульти-чат-и-единый-ответ-multisendresponse)):
+`...?chat_id=infra-alerts,app-alerts`.
+
+Если же разные алерты должны идти в разные чаты, используйте разные receiver'ы с query-параметром `chat_id`:
 
 ```yaml
 receivers:
@@ -133,7 +203,8 @@ server:
 
 ### Несколько чатов
 
-Аналогично Alertmanager — создайте несколько contact point'ов с `?chat_id=`:
+Аналогично Alertmanager — либо один contact point с фан-аутом через запятую
+(`?chat_id=infra-alerts,app-alerts`), либо несколько contact point'ов с `?chat_id=`:
 
 - `http://express-botx:8080/api/v1/grafana?chat_id=infra-alerts`
 - `http://express-botx:8080/api/v1/grafana?chat_id=app-alerts`
@@ -355,10 +426,12 @@ server:
 `default_chat_id` → чат по умолчанию → единственный чат → `200 {ignored}`.
 
 **Фан-аут и коды ответа (best-effort):** сообщение отправляется в каждый целевой
-чат независимо. Ответ `200` c телом
-`{"ok":true,"results":[{"chat","sync_id"}],"errors":[{"chat","error"}]}`, если
-доставлено **хотя бы в один** чат (частичные сбои — в `errors`); `502`, если
-упали все. Явный `?chat_id=` сохраняет прежний одиночный ответ (`SuccessResponse`).
+чат независимо. Ответ — **единый** `MultiSendResponse`
+`{"ok":true,"results":[{"chat","sync_id"}],"errors":[{"chat","error"}]}` с кодом
+`200`, если доставлено **хотя бы в один** чат (частичные сбои — в `errors`);
+`502`, если упали все. Явный `?chat_id=` (в т.ч. с запятой — фан-аут в несколько
+чатов) и одиночный `default_chat_id` возвращают ту же форму (`results[0]` для
+одного чата) — см. [единый ответ и ломающее изменение](#единый-ответ-multisendresponse-ломающее-изменение).
 
 ```yaml
 server:
@@ -407,10 +480,11 @@ server:
 **Резолв аутентификации.** Входящий `X-Gitlab-Token` сверяется со всеми
 sender-токенами и с дефолтным `secret` (constant-time, без early-exit):
 
-- совпал **sender-токен** → событие уходит **только** в `chats` этого sender'а
-  (fan-out, best-effort — как у `routes`); `?chat_id=`, `?bot=`, `routes` и
-  `default_chat_id` **игнорируются** — команда A не может отправить в чаты
-  команды B или от имени чужого бота, даже подставив `?chat_id`/`?bot`;
+- совпал **sender-токен** → событие уходит в `chats` этого sender'а (fan-out,
+  best-effort — как у `routes`). `?chat_id=` при этом работает как **фильтр
+  внутри разрешённого набора** (см. ниже); `?bot=`, `routes` и `default_chat_id`
+  **игнорируются** — команда A не может отправить от имени чужого бота или в чат
+  вне своего scope, даже подставив `?bot`/`?chat_id`;
 - совпал **дефолтный `secret`** → прежнее поведение без изменений
   (`?chat_id` → `routes` → `default_chat_id` → …);
 - не совпал ни один → `401`.
@@ -419,6 +493,36 @@ sender-токенами и с дефолтным `secret` (constant-time, без
 применяются к sender-событиям как обычно (отфильтрованное событие → `200
 {ignored}` и для sender'а). Своих `routes`/фильтров/шаблонов у sender'а нет —
 его скоуп только чаты.
+
+**`?chat_id=` как фильтр внутри scope.** Один sender-токен остаётся изолированным
+в рамках команды, но команда может направлять конкретные вебхуки в нужный чат
+внутри своего разрешённого набора:
+
+- `?chat_id` **отсутствует** → событие уходит во **все** `chats` sender'а
+  (прежнее поведение);
+- `?chat_id=a,b` (непустой) → доставка **только** в перечисленные чаты, но
+  **только если каждый** входит в `chats` sender'а (синтаксис общий: список через
+  запятую, trim, dedup, сохранение порядка);
+- хотя бы один чат из `?chat_id` **вне** `chats` sender'а → `403 Forbidden`
+  (`{"ok":false,"error":"chat \"…\" is outside this token's allowed chats"}`),
+  ничего не отправляется — попытка выйти за scope, а не тихое игнорирование;
+- `?chat_id` **явно пустой** (`?chat_id=`, `?chat_id=,,`) → `400` request-level,
+  ничего не отправляется;
+- сравнение эквивалентно по **алиасу и UUID**: `chats: [team-a-alerts]` разрешает
+  и `?chat_id=team-a-alerts`, и UUID, в который этот алиас резолвится (но не чужой
+  алиас/UUID). Направление не важно — если в `chats` указан UUID, `?chat_id=`
+  можно передать алиасом, и наоборот.
+
+```
+# всё разрешённое (оба чата sender'а):
+POST /api/v1/gitlab                        X-Gitlab-Token: <team-a-token>
+# только один чат из scope:
+POST /api/v1/gitlab?chat_id=team-a-alerts  X-Gitlab-Token: <team-a-token>  → 200
+# чужой чат → отказ:
+POST /api/v1/gitlab?chat_id=team-b         X-Gitlab-Token: <team-a-token>  → 403
+# пустой chat_id → ошибка запроса:
+POST /api/v1/gitlab?chat_id=               X-Gitlab-Token: <team-a-token>  → 400
+```
 
 **Правила конфигурации:**
 
@@ -547,10 +651,12 @@ def handle_event():
 
 ## Произвольные вебхуки через /send
 
-Для систем без специальных эндпоинтов используйте `/send`:
+Для систем без специальных эндпоинтов используйте `/send`. `chat_id` можно
+указать через запятую для рассылки в несколько чатов; ответ — единый
+`MultiSendResponse` (см. [Мульти-чат](#мульти-чат-и-единый-ответ-multisendresponse)):
 
 ```bash
-# JSON
+# JSON — один чат
 curl -X POST http://express-botx:8080/api/v1/send \
   -H "Authorization: Bearer <api-key>" \
   -H "Content-Type: application/json" \
@@ -559,6 +665,17 @@ curl -X POST http://express-botx:8080/api/v1/send \
     "message": "Deploy v1.2.3 completed",
     "status": "ok"
   }'
+
+# JSON — несколько чатов (fan-out)
+curl -X POST http://express-botx:8080/api/v1/send \
+  -H "Authorization: Bearer <api-key>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "chat_id": "deploy,ops-alerts",
+    "message": "Deploy v1.2.3 completed"
+  }'
+# → {"ok":true,"results":[{"chat":"deploy","sync_id":"..."},
+#                         {"chat":"ops-alerts","sync_id":"..."}]}
 
 # С файлом (multipart)
 curl -X POST http://express-botx:8080/api/v1/send \

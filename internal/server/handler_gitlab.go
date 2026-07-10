@@ -306,28 +306,57 @@ func (s *Server) handleGitlab(w http.ResponseWriter, r *http.Request) {
 		status = "error"
 	}
 
-	// A sender-token request is delivered only to that sender's chat scope
-	// (team isolation): ?chat_id, ?bot, Routes and DefaultChatID do not apply.
+	// A sender-token request stays inside that sender's chat scope (team
+	// isolation): ?bot, Routes and DefaultChatID never apply. ?chat_id acts as a
+	// filter *within* the allowed scope — omitted delivers to every sender chat
+	// (previous behaviour), a non-empty subset delivers only to those chats, and
+	// any chat outside the scope is refused (403) rather than silently ignored.
 	// The filter/template/status logic above is shared with the default path.
 	if isSender {
-		s.gitlabFanout(w, r, "", senderChats, message, status, view.EventKey)
+		queryChats := parseChatIDs(r.URL.Query().Get("chat_id"))
+		// An explicitly-present but empty chat_id (?chat_id= / ?chat_id=,,) is a
+		// request error, not a fall-back to the full sender scope.
+		if len(queryChats) == 0 && r.URL.Query().Has("chat_id") {
+			writeError(w, http.StatusBadRequest, "chat_id is empty: provide at least one chat, or omit chat_id to deliver to all allowed chats")
+			return
+		}
+		targets := senderChats
+		if len(queryChats) > 0 {
+			canonical, bad, ok := s.senderScopeTargets(queryChats, senderChats)
+			if !ok {
+				vlog.V1("gitlab: sender requested out-of-scope chat %q -> 403", bad)
+				writeError(w, http.StatusForbidden, fmt.Sprintf("chat %q is outside this token's allowed chats", bad))
+				return
+			}
+			targets = canonical
+		}
+		s.gitlabDeliver(w, r, "", targets, message, status, view.EventKey)
 		return
 	}
 
-	// An explicit ?chat_id overrides routing entirely; likewise, with no routes
-	// configured the endpoint keeps its original single-chat behaviour (routes is
-	// optional, so its absence must not change existing deployments).
-	queryChat := r.URL.Query().Get("chat_id")
-	if queryChat != "" || len(s.gitCfg.Routes) == 0 {
-		targetChat := queryChat
-		if targetChat == "" {
-			targetChat = s.singleGitlabChat()
+	// An explicit ?chat_id overrides routing entirely (and may itself list several
+	// chats, comma-separated); likewise, with no routes configured the endpoint
+	// keeps its single-chat default behaviour (routes is optional, so its absence
+	// must not change existing deployments).
+	queryChats := parseChatIDs(r.URL.Query().Get("chat_id"))
+	// An explicitly-present but empty chat_id (?chat_id= / ?chat_id=,,) is a
+	// request error, not a silent fall-back to routes or the default chat.
+	if len(queryChats) == 0 && r.URL.Query().Has("chat_id") {
+		writeError(w, http.StatusBadRequest, "chat_id is empty: provide at least one chat, or omit chat_id to use routing/default")
+		return
+	}
+	if len(queryChats) > 0 || len(s.gitCfg.Routes) == 0 {
+		targets := queryChats
+		if len(targets) == 0 {
+			if single := s.singleGitlabChat(); single != "" {
+				targets = []string{single}
+			}
 		}
-		if targetChat == "" {
+		if len(targets) == 0 {
 			writeError(w, http.StatusBadRequest, "chat_id is required: set default_chat_id in config, configure a single chat alias, or pass ?chat_id=")
 			return
 		}
-		s.gitlabSendSingle(w, r, targetChat, message, status, view.EventKey)
+		s.gitlabDeliver(w, r, r.URL.Query().Get("bot"), targets, message, status, view.EventKey)
 		return
 	}
 
@@ -345,7 +374,7 @@ func (s *Server) handleGitlab(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	s.gitlabFanout(w, r, r.URL.Query().Get("bot"), targets, message, status, view.EventKey)
+	s.gitlabDeliver(w, r, r.URL.Query().Get("bot"), targets, message, status, view.EventKey)
 }
 
 // resolveGitlabAuth authenticates an incoming X-Gitlab-Token value against the
@@ -386,6 +415,57 @@ func (s *Server) resolveGitlabAuth(token string) (chats []string, isSender, ok b
 	return nil, false, false
 }
 
+// senderScopeTargets checks that every requested chat_id stays within a sender's
+// allowed chat scope, treating aliases and the UUIDs they resolve to as
+// equivalent, and maps each in-scope request back to the sender.chats entry the
+// operator configured. Delivering via that configured entry (rather than the raw
+// request string) preserves the entry's bot binding in multi-bot mode, so a
+// request that names a chat by the UUID its alias resolves to still delivers to
+// the right bot instead of failing with "bot is required".
+//
+// It builds a lookup from every recognised key — each raw sender.chats value and
+// the UUID it resolves to — back to the configured entry (raw values that fail to
+// resolve are kept as-is). For each requested value it accepts the value itself,
+// or the UUID it resolves to, when either is a known key, and emits the matching
+// configured entry. Requests that collapse to the same entry are de-duplicated,
+// preserving first-request order.
+//
+// It returns the canonical targets with ok=true, or on the first out-of-scope
+// request (a value that fails to resolve and is not literally configured) returns
+// (nil, that value, false). This gives alias↔UUID equivalence regardless of
+// whether sender.Chats stores aliases or UUIDs.
+func (s *Server) senderScopeTargets(requested, allowed []string) (targets []string, bad string, ok bool) {
+	entryOf := make(map[string]string, len(allowed)*2)
+	for _, a := range allowed {
+		if _, seen := entryOf[a]; !seen {
+			entryOf[a] = a
+		}
+		if res, err := s.chats(a); err == nil && res.ChatID != "" {
+			if _, seen := entryOf[res.ChatID]; !seen {
+				entryOf[res.ChatID] = a
+			}
+		}
+	}
+	seen := make(map[string]struct{}, len(requested))
+	for _, q := range requested {
+		entry, in := entryOf[q]
+		if !in {
+			if res, err := s.chats(q); err == nil && res.ChatID != "" {
+				entry, in = entryOf[res.ChatID]
+			}
+		}
+		if !in {
+			return nil, q, false
+		}
+		if _, dup := seen[entry]; dup {
+			continue
+		}
+		seen[entry] = struct{}{}
+		targets = append(targets, entry)
+	}
+	return targets, "", true
+}
+
 // singleGitlabChat returns the single fallback delivery chat, following the
 // precedence default_chat_id -> global default chat -> the sole configured chat
 // alias. It is empty when none is configured.
@@ -399,84 +479,25 @@ func (s *Server) singleGitlabChat() string {
 	return s.gitCfg.FallbackChatID
 }
 
-// gitlabSendSingle delivers a rendered event to exactly one chat, preserving the
-// endpoint's original response shape (sendResponse) and status codes: 400 on a
-// chat/bot resolution error, 502 on an upstream send failure, and 200 with the
-// sync_id on success. It backs the ?chat_id override and the no-routes default.
-func (s *Server) gitlabSendSingle(w http.ResponseWriter, r *http.Request, targetChat, message, status, eventKey string) {
-	chatResult, err := s.chats(targetChat)
-	if err != nil {
-		writeError(w, http.StatusBadRequest, "resolving chat: "+err.Error())
-		return
-	}
-	// Resolve bot: explicit ?bot= > chat-bound bot > auth bot.
-	botName, errMsg := s.resolveRequestBot(r.Context(), r.URL.Query().Get("bot"), chatResult.Bot)
-	if errMsg != "" {
-		writeError(w, http.StatusBadRequest, errMsg)
-		return
-	}
+// gitlabDeliver delivers a rendered event to every target chat best-effort using
+// the project-wide fan-out primitives (fanout + writeMultiSend). Chat and bot are
+// resolved per target and successes/failures are collected independently; the
+// response is always a MultiSendResponse — 200 with the results (plus any partial
+// errors) when at least one delivery succeeds, or 502 with the errors when they
+// all fail. A single target still returns the uniform shape (results[0]), so
+// /gitlab shares the contract of every other send surface. requestBot is the
+// ?bot= override; the sender-isolated path passes "" so a sender token cannot
+// pick another configured bot's identity.
+func (s *Server) gitlabDeliver(w http.ResponseWriter, r *http.Request, requestBot string, targets []string, message, status, eventKey string) {
 	start := time.Now()
-	syncID, err := s.send(r.Context(), &SendPayload{
-		Bot:     botName,
-		ChatID:  chatResult.ChatID,
-		Message: message,
-		Status:  status,
-	})
+	results, errs := s.fanoutSend(r.Context(), targets, requestBot, message, status)
 	elapsed := time.Since(start)
-	if err != nil {
-		vlog.V1("gitlab: send failed -> 502 (%dms)", elapsed.Milliseconds())
-		writeError(w, http.StatusBadGateway, "upstream error: "+err.Error())
-		return
-	}
-	vlog.V1("gitlab: sent %s to %s -> 200 (%dms)", eventKey, targetChat, elapsed.Milliseconds())
-	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(sendResponse{OK: true, SyncID: syncID})
-}
-
-// gitlabFanout delivers a rendered event to every target chat best-effort,
-// resolving chat and bot per target and collecting successes and failures
-// independently. It responds 200 with the results (plus any partial errors) when
-// at least one delivery succeeds, or 502 with the errors when they all fail.
-// requestBot is the ?bot= override; the sender-isolated path passes "" so a
-// sender token cannot pick another configured bot's identity.
-func (s *Server) gitlabFanout(w http.ResponseWriter, r *http.Request, requestBot string, targets []string, message, status, eventKey string) {
-	var results []gitlabFanoutResult
-	var errs []gitlabFanoutError
-	start := time.Now()
-	for _, target := range targets {
-		chatResult, err := s.chats(target)
-		if err != nil {
-			errs = append(errs, gitlabFanoutError{Chat: target, Error: "resolving chat: " + err.Error()})
-			continue
-		}
-		botName, errMsg := s.resolveRequestBot(r.Context(), requestBot, chatResult.Bot)
-		if errMsg != "" {
-			errs = append(errs, gitlabFanoutError{Chat: target, Error: errMsg})
-			continue
-		}
-		syncID, err := s.send(r.Context(), &SendPayload{
-			Bot:     botName,
-			ChatID:  chatResult.ChatID,
-			Message: message,
-			Status:  status,
-		})
-		if err != nil {
-			errs = append(errs, gitlabFanoutError{Chat: target, Error: err.Error()})
-			continue
-		}
-		results = append(results, gitlabFanoutResult{Chat: target, SyncID: syncID})
-	}
-	elapsed := time.Since(start)
-
-	w.Header().Set("Content-Type", "application/json")
 	if len(results) == 0 {
 		vlog.V1("gitlab: %s fan-out to %d chats all failed -> 502 (%dms)", eventKey, len(targets), elapsed.Milliseconds())
-		w.WriteHeader(http.StatusBadGateway)
-		json.NewEncoder(w).Encode(gitlabFanoutResponse{OK: false, Errors: errs})
-		return
+	} else {
+		vlog.V1("gitlab: %s delivered to %d/%d chats (%dms)", eventKey, len(results), len(targets), elapsed.Milliseconds())
 	}
-	vlog.V1("gitlab: %s fan-out delivered to %d/%d chats -> 200 (%dms)", eventKey, len(results), len(targets), elapsed.Milliseconds())
-	json.NewEncoder(w).Encode(gitlabFanoutResponse{OK: true, Results: results, Errors: errs})
+	writeMultiSend(w, results, errs, http.StatusOK)
 }
 
 // gitlabIgnoredResponse is returned with 200 OK when an event is filtered out
@@ -485,30 +506,6 @@ type gitlabIgnoredResponse struct {
 	OK      bool   `json:"ok"`
 	Ignored bool   `json:"ignored"`
 	Event   string `json:"event"`
-}
-
-// gitlabFanoutResponse is the routing endpoint's response when routes are
-// configured: a best-effort fan-out that reports each successful delivery in
-// results and each failed one in errors. OK is true when at least one delivery
-// succeeded (HTTP 200); it is false when they all failed (HTTP 502).
-type gitlabFanoutResponse struct {
-	OK      bool                 `json:"ok"`
-	Results []gitlabFanoutResult `json:"results,omitempty"`
-	Errors  []gitlabFanoutError  `json:"errors,omitempty"`
-}
-
-// gitlabFanoutResult is a single successful fan-out delivery: the target chat
-// (alias or UUID as configured in the rule) and the BotX sync_id.
-type gitlabFanoutResult struct {
-	Chat   string `json:"chat"`
-	SyncID string `json:"sync_id"`
-}
-
-// gitlabFanoutError is a single failed fan-out delivery: the target chat and the
-// error that prevented delivery (chat/bot resolution or the upstream send).
-type gitlabFanoutError struct {
-	Chat  string `json:"chat"`
-	Error string `json:"error"`
 }
 
 // DefaultGitlabTemplate is the generic fallback that renders any GitLab event
