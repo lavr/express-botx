@@ -2,6 +2,24 @@
 
 ## 0.34.0
 
+### ⚠️ Breaking: GitLab-конфигурация только через senders
+
+`server.gitlab` теперь содержит только непустой `senders`. Каждый sender
+владеет своими `name`, `secret`, `chats`, `events`, `error_events`, `templates`,
+`template_files` и `routes`. Для доставки без routes используйте `chats`, а
+для fallback при роутинге — явный последний `match: {}`.
+
+`?chat_id=` обходит routes, но остаётся в скоупе sender'а; `?bot=` всегда
+игнорируется. Запрос `?chat_id=` на чат вне скоупа — или на in-scope чат,
+названный алиасом с bot binding, отличным от цели сендера, — возвращает `403`.
+Все «проглоченные» события возвращают `200` с полем `reason`: `event filtered`,
+`empty message` или `no route matched`.
+
+`config validate` оффлайн зеркалит проверки старта `serve` для gitlab: алиас без
+`id`, две цели в один UUID, `route[].chats` вне скоупа и конфликт bot binding —
+ошибки; raw UUID / алиас без `bot` в multi-bot — предупреждения. Старт `serve`
+отвергает те же конфигурации.
+
 ### ⚠️ Breaking: единый формат ответа (`MultiSendResponse`) на всех точках отправки
 
 Все эндпоинты отправки (`/send`, `/alertmanager`, `/grafana`, `/gitlab`) и CLI

@@ -143,48 +143,19 @@ type GrafanaYAMLConfig struct {
 	TemplateFile  string   `yaml:"template_file,omitempty"`
 }
 
-// GitlabYAMLConfig holds YAML settings for the GitLab webhook endpoint.
-// Unlike alertmanager/grafana, the GitLab endpoint is only enabled when this
-// section is present, because it requires a secret token (GitLab cannot send
-// Authorization/X-API-Key headers, so it authenticates via X-Gitlab-Token).
 type GitlabYAMLConfig struct {
-	DefaultChatID string `yaml:"default_chat_id,omitempty"`
-	// Secret is the expected value of the X-Gitlab-Token header. Accepts a
-	// literal, env:VAR, or vault:path#key reference. SecretToken is an alias.
-	Secret      string `yaml:"secret,omitempty"`
-	SecretToken string `yaml:"secret_token,omitempty"`
-	// Events filters which GitLab events are delivered. See GitlabEventsConfig.
-	Events GitlabEventsConfig `yaml:"events,omitempty"`
-	// Templates maps an event key (kind, kind.subtype, or kind.*) to an inline
-	// Go text/template. Overrides built-in defaults.
-	Templates map[string]string `yaml:"templates,omitempty"`
-	// TemplateFiles maps an event key to a template file path. A given key may
-	// appear in Templates or TemplateFiles, but not both.
-	TemplateFiles map[string]string `yaml:"template_files,omitempty"`
-	// ErrorEvents lists event keys that are delivered with notification
-	// status=error (instead of ok). Matched with the same rules as filters.
-	ErrorEvents []string `yaml:"error_events,omitempty"`
-	// Routes is an optional ordered list of routing rules. When present, an
-	// incoming event fans out to the chats of every matching rule (see
-	// GitlabRouteYAMLConfig). When absent, the endpoint keeps its single-chat
-	// behaviour (default_chat_id / global default).
-	Routes []GitlabRouteYAMLConfig `yaml:"routes,omitempty"`
-	// Senders is an optional list of per-team secret tokens, each scoped to its
-	// own set of chats (see GitlabSenderYAMLConfig). When at least one sender is
-	// configured, the default Secret becomes optional.
-	Senders []GitlabSenderYAMLConfig `yaml:"senders,omitempty"`
+	Senders []GitlabSenderYAMLConfig `yaml:"senders"`
 }
 
-// GitlabSenderYAMLConfig binds one X-Gitlab-Token value to a fixed set of
-// chats. Events authenticated by this token are delivered to Chats only:
-// ?chat_id, routes, and default_chat_id do not apply, which isolates teams
-// from each other. Global event filters and templates still apply.
 type GitlabSenderYAMLConfig struct {
-	// Secret is the expected X-Gitlab-Token value. Accepts a literal, env:VAR,
-	// or vault:path#key reference. SecretToken is an alias.
-	Secret      string   `yaml:"secret,omitempty"`
-	SecretToken string   `yaml:"secret_token,omitempty"`
-	Chats       []string `yaml:"chats"`
+	Name          string                  `yaml:"name,omitempty"`
+	Secret        string                  `yaml:"secret,omitempty"`
+	Chats         []string                `yaml:"chats,omitempty"`
+	Events        GitlabEventsConfig      `yaml:"events,omitempty"`
+	ErrorEvents   []string                `yaml:"error_events,omitempty"`
+	Templates     map[string]string       `yaml:"templates,omitempty"`
+	TemplateFiles map[string]string       `yaml:"template_files,omitempty"`
+	Routes        []GitlabRouteYAMLConfig `yaml:"routes,omitempty"`
 }
 
 // GitlabRouteYAMLConfig is a single GitLab routing rule. Match maps a selector
@@ -707,21 +678,31 @@ func (c *Config) ResolveChatAlias(chat string) (string, error) {
 	if chat == "" {
 		return "", fmt.Errorf("chat is required")
 	}
-	if IsUUID(chat) {
-		return chat, nil
+	id, _, err := ResolveChatRef(c.Chats, chat)
+	return id, err
+}
+
+// ResolveChatRef resolves a chat reference (raw UUID or alias) against a chats
+// map and returns the canonical chat UUID plus the alias's bot binding. It is
+// the single source of alias->UUID semantics for callers that hold a chats map
+// rather than a full Config. An alias whose id is empty is rejected: it can
+// never identify a chat, and letting "" through would let distinct empty-id
+// aliases collide on the same canonical key.
+func ResolveChatRef(chats map[string]ChatConfig, ref string) (id, bot string, err error) {
+	if IsUUID(ref) {
+		return ref, "", nil
 	}
-	if cc, ok := c.Chats[chat]; ok {
-		return cc.ID, nil
+	cc, ok := chats[ref]
+	if !ok {
+		if len(chats) == 0 {
+			return "", "", fmt.Errorf("unknown chat %q (no aliases configured)", ref)
+		}
+		return "", "", fmt.Errorf("unknown chat alias %q, available: %s", ref, strings.Join(sortedMapKeys(chats), ", "))
 	}
-	names := make([]string, 0, len(c.Chats))
-	for k := range c.Chats {
-		names = append(names, k)
+	if cc.ID == "" {
+		return "", "", fmt.Errorf("chat alias %q has no id", ref)
 	}
-	sort.Strings(names)
-	if len(names) == 0 {
-		return "", fmt.Errorf("unknown chat %q (no aliases configured)", chat)
-	}
-	return "", fmt.Errorf("unknown chat alias %q, available: %s", chat, strings.Join(names, ", "))
+	return cc.ID, cc.Bot, nil
 }
 
 // ResolveChatID resolves ChatID: if it looks like a UUID, use as-is;
@@ -733,22 +714,15 @@ func (c *Config) ResolveChatID() error {
 
 // ResolveChatIDWithBot resolves ChatID and returns the bound bot name (if any).
 func (c *Config) ResolveChatIDWithBot() (botName string, err error) {
-	if c.ChatID == "" || uuidRe.MatchString(c.ChatID) {
+	if c.ChatID == "" {
 		return "", nil
 	}
-	if chat, ok := c.Chats[c.ChatID]; ok {
-		c.ChatID = chat.ID
-		return chat.Bot, nil
+	id, bot, err := ResolveChatRef(c.Chats, c.ChatID)
+	if err != nil {
+		return "", err
 	}
-	names := make([]string, 0, len(c.Chats))
-	for k := range c.Chats {
-		names = append(names, k)
-	}
-	sort.Strings(names)
-	if len(names) == 0 {
-		return "", fmt.Errorf("unknown chat %q (no aliases configured)", c.ChatID)
-	}
-	return "", fmt.Errorf("unknown chat alias %q, available: %s", c.ChatID, strings.Join(names, ", "))
+	c.ChatID = id
+	return bot, nil
 }
 
 // RequireChatID resolves aliases and returns an error if ChatID is empty.
@@ -771,12 +745,18 @@ func (c *Config) RequireChatIDWithBot() (botName string, err error) {
 	case 0:
 		return "", fmt.Errorf("chat is required: use --chat-id or configure aliases in config (chats section)")
 	case 1:
-		for _, chat := range c.Chats {
+		for alias, chat := range c.Chats {
+			if chat.ID == "" {
+				return "", fmt.Errorf("chat alias %q has no id", alias)
+			}
 			c.ChatID = chat.ID
 			return chat.Bot, nil
 		}
 	default:
 		if alias, chat := c.DefaultChat(); alias != "" {
+			if chat.ID == "" {
+				return "", fmt.Errorf("chat alias %q has no id", alias)
+			}
 			c.ChatID = chat.ID
 			return chat.Bot, nil
 		}
@@ -1116,23 +1096,23 @@ var knownKeys = map[string]map[string]bool{
 		"default_chat_id": true, "error_states": true, "template": true, "template_file": true,
 	},
 	"server.gitlab": {
-		"default_chat_id": true, "secret": true, "secret_token": true,
-		"events": true, "templates": true, "template_files": true, "error_events": true,
-		"routes": true, "senders": true,
+		"senders": true,
 	},
 	"server.gitlab.senders.*": {
-		"secret": true, "secret_token": true, "chats": true,
+		"name": true, "secret": true, "chats": true, "events": true,
+		"error_events": true, "templates": true, "template_files": true,
+		"routes": true,
 	},
-	"server.gitlab.events": {
+	"server.gitlab.senders.*.events": {
 		"only": true, "exclude": true,
 	},
-	"server.gitlab.routes.*": {
+	"server.gitlab.senders.*.routes.*": {
 		"match": true, "chats": true, "stop": true,
 	},
-	// server.gitlab.routes.*.match has no registered schema on purpose: its keys
-	// are arbitrary match selectors (reserved names or dotted raw-payload paths),
-	// so unknown-key checking is skipped for them (a nil known-set means "accept
-	// any key").
+	// server.gitlab.senders.*.routes.*.match has no registered schema on purpose:
+	// its keys are arbitrary match selectors (reserved names or dotted
+	// raw-payload paths), so unknown-key checking is skipped for them (a nil
+	// known-set means "accept any key").
 	"server.callbacks": {
 		"base_path": true, "verify_jwt": true, "rules": true,
 	},
@@ -1195,6 +1175,8 @@ func detectUnknownKeys(rawYAML []byte) []ValidationResult {
 	return checkMappingKeys(doc, "")
 }
 
+var indexedConfigPathRe = regexp.MustCompile(`\[[0-9]+\]`)
+
 // checkMappingKeys recursively checks mapping nodes for unknown keys.
 func checkMappingKeys(node *yaml.Node, parentPath string) []ValidationResult {
 	var results []ValidationResult
@@ -1203,12 +1185,12 @@ func checkMappingKeys(node *yaml.Node, parentPath string) []ValidationResult {
 	}
 
 	// Determine which known-key set to use
-	lookupKey := parentPath
+	lookupKey := indexedConfigPathRe.ReplaceAllString(parentPath, ".*")
 	known := knownKeys[lookupKey]
 	if known == nil {
 		// Try wildcard (e.g. "bots.*")
-		if i := strings.LastIndex(parentPath, "."); i >= 0 {
-			known = knownKeys[parentPath[:i]+".*"]
+		if i := strings.LastIndex(lookupKey, "."); i >= 0 {
+			known = knownKeys[lookupKey[:i]+".*"]
 		}
 	}
 
@@ -1225,10 +1207,19 @@ func checkMappingKeys(node *yaml.Node, parentPath string) []ValidationResult {
 		// Check if key is known at this level
 		if known != nil {
 			if !known[key] {
+				message := fmt.Sprintf("unknown key %q", key)
+				if parentPath == "server.gitlab" {
+					switch key {
+					case "secret", "events", "templates", "template_files", "error_events", "routes":
+						message = fmt.Sprintf("field %q moved inside senders[]", key)
+					case "default_chat_id":
+						message = "field \"default_chat_id\" was removed; use senders[].chats for delivery without routes or an explicit final catch-all route"
+					}
+				}
 				results = append(results, ValidationResult{
 					Level:   ValidationWarning,
 					Path:    childPath,
-					Message: fmt.Sprintf("unknown key %q", key),
+					Message: message,
 				})
 				continue // don't recurse into unknown keys
 			}
@@ -1259,17 +1250,12 @@ func checkMappingKeys(node *yaml.Node, parentPath string) []ValidationResult {
 			}
 		case yaml.SequenceNode:
 			// Handle sequences with known element schemas
-			if knownKeys[childPath+".*"] != nil {
+			schemaPath := indexedConfigPathRe.ReplaceAllString(childPath, ".*")
+			if knownKeys[schemaPath+".*"] != nil {
 				for j, item := range valNode.Content {
 					if item.Kind == yaml.MappingNode {
 						itemPath := fmt.Sprintf("%s[%d]", childPath, j)
-						subResults := checkMappingKeys(item, childPath+".*")
-						for k := range subResults {
-							if strings.HasPrefix(subResults[k].Path, childPath+".*") {
-								subResults[k].Path = strings.Replace(subResults[k].Path, childPath+".*", itemPath, 1)
-							}
-						}
-						results = append(results, subResults...)
+						results = append(results, checkMappingKeys(item, itemPath)...)
 					}
 				}
 			}
@@ -1324,65 +1310,94 @@ func (c *Config) validateRequiredFields() []ValidationResult {
 		}
 	}
 
-	// The GitLab endpoint authenticates via X-Gitlab-Token, so a configured
-	// server.gitlab section requires a secret token: either the default secret
-	// or at least one per-sender secret (otherwise the endpoint would accept
-	// unauthenticated requests). Catch it here so `config validate` fails
-	// instead of deferring the error to `serve`.
-	if g := c.Server.Gitlab; g != nil {
-		if g.Secret == "" && g.SecretToken == "" && len(g.Senders) == 0 {
+	// A chat alias with no id can never identify a chat. Requiring it here — as
+	// bots require id above — flags the misconfiguration once for every consumer
+	// (gitlab senders, alertmanager/grafana default_chat_id, CLI send), rather
+	// than surfacing it per-consumer at request or serve time.
+	for _, name := range sortedMapKeys(c.Chats) {
+		if c.Chats[name].ID == "" {
 			results = append(results, ValidationResult{
 				Level:   ValidationError,
-				Path:    "server.gitlab.secret",
-				Message: "secret, secret_token, or senders is required",
+				Path:    "chats." + name + ".id",
+				Message: "id is required",
 			})
-		}
-		// Duplicate token values make authentication ambiguous. Full detection
-		// needs resolved values and runs at serve startup (buildGitlabConfig);
-		// byte-identical config strings — the same literal, or the same env:/
-		// vault: reference repeated — are guaranteed duplicates and are caught
-		// offline. Distinct references resolving to one value defer to startup.
-		seenTokens := map[string]string{}
-		defaultToken := g.Secret
-		if defaultToken == "" {
-			defaultToken = g.SecretToken
-		}
-		if defaultToken != "" {
-			seenTokens[defaultToken] = "server.gitlab.secret"
-		}
-		for i, sender := range g.Senders {
-			if sender.Secret == "" && sender.SecretToken == "" {
-				results = append(results, ValidationResult{
-					Level:   ValidationError,
-					Path:    fmt.Sprintf("server.gitlab.senders[%d].secret", i),
-					Message: "secret or secret_token is required",
-				})
-			}
-			if len(sender.Chats) == 0 {
-				results = append(results, ValidationResult{
-					Level:   ValidationError,
-					Path:    fmt.Sprintf("server.gitlab.senders[%d].chats", i),
-					Message: "chats must not be empty",
-				})
-			}
-			senderToken := sender.Secret
-			if senderToken == "" {
-				senderToken = sender.SecretToken
-			}
-			if senderToken != "" {
-				if owner, dup := seenTokens[senderToken]; dup {
-					results = append(results, ValidationResult{
-						Level:   ValidationError,
-						Path:    fmt.Sprintf("server.gitlab.senders[%d].secret", i),
-						Message: fmt.Sprintf("duplicates the token value of %s; tokens must be unique", owner),
-					})
-				} else {
-					seenTokens[senderToken] = fmt.Sprintf("server.gitlab.senders[%d]", i)
-				}
-			}
 		}
 	}
 
+	if g := c.Server.Gitlab; g != nil {
+		results = append(results, validateGitlabSenders(g)...)
+	}
+
+	return results
+}
+
+// gitlabSenderMessage prefixes a validation message with the sender name when
+// one is configured, so multi-sender errors identify their owner.
+func gitlabSenderMessage(name, text string) string {
+	if name == "" {
+		return text
+	}
+	return fmt.Sprintf("sender %q: %s", name, text)
+}
+
+// validateGitlabSenders checks the structural sender requirements shared by
+// offline validation (validateRequiredFields) and serve startup
+// (ValidateForServe): a non-empty senders list, a secret per sender, a
+// non-empty chats-or-routes scope, unique names, and unique literal secrets.
+// Byte-identical secrets (same literal or same env: reference) are guaranteed
+// duplicates and are caught here, offline; secrets that only resolve to the
+// same value are caught at serve startup after resolution.
+func validateGitlabSenders(g *GitlabYAMLConfig) []ValidationResult {
+	var results []ValidationResult
+	if len(g.Senders) == 0 {
+		results = append(results, ValidationResult{
+			Level:   ValidationError,
+			Path:    "server.gitlab.senders",
+			Message: "senders must not be empty",
+		})
+	}
+	seenNames := map[string]int{}
+	seenSecrets := map[string]int{}
+	for i, sender := range g.Senders {
+		prefix := fmt.Sprintf("server.gitlab.senders[%d]", i)
+		message := func(text string) string { return gitlabSenderMessage(sender.Name, text) }
+		switch {
+		case sender.Secret == "":
+			results = append(results, ValidationResult{
+				Level:   ValidationError,
+				Path:    prefix + ".secret",
+				Message: message("secret is required"),
+			})
+		default:
+			if first, duplicate := seenSecrets[sender.Secret]; duplicate {
+				results = append(results, ValidationResult{
+					Level:   ValidationError,
+					Path:    prefix + ".secret",
+					Message: message(fmt.Sprintf("secret duplicates server.gitlab.senders[%d]; secrets must be unique", first)),
+				})
+			} else {
+				seenSecrets[sender.Secret] = i
+			}
+		}
+		if len(sender.Chats) == 0 && len(sender.Routes) == 0 {
+			results = append(results, ValidationResult{
+				Level:   ValidationError,
+				Path:    prefix + ".chats",
+				Message: message("chats or routes must not be empty"),
+			})
+		}
+		if sender.Name != "" {
+			if first, duplicate := seenNames[sender.Name]; duplicate {
+				results = append(results, ValidationResult{
+					Level:   ValidationError,
+					Path:    prefix + ".name",
+					Message: message(fmt.Sprintf("name duplicates server.gitlab.senders[%d]", first)),
+				})
+			} else {
+				seenNames[sender.Name] = i
+			}
+		}
+	}
 	return results
 }
 
@@ -1617,51 +1632,136 @@ func (c *Config) validateCrossReferences() []ValidationResult {
 		}
 	}
 
-	// Gitlab default_chat_id must reference existing chat alias
-	if c.Server.Gitlab != nil && c.Server.Gitlab.DefaultChatID != "" {
-		chatID := c.Server.Gitlab.DefaultChatID
-		if !IsUUID(chatID) {
-			if _, ok := c.Chats[chatID]; !ok {
+	if c.Server.Gitlab != nil {
+		// Offline mirror of buildGitlabSender's delivery-target rules, so
+		// `config validate` rejects configs serve would refuse to boot.
+		// Multi-bot rules can only warn: whether serve actually runs multi-bot
+		// depends on the --bot flag and runtime credentials, not the file alone.
+		multiBotPossible := len(c.Bots) > 1
+		for i, sender := range c.Server.Gitlab.Senders {
+			prefix := fmt.Sprintf("server.gitlab.senders[%d]", i)
+			message := func(text string) string { return gitlabSenderMessage(sender.Name, text) }
+			addError := func(path, text string) {
 				results = append(results, ValidationResult{
 					Level:   ValidationError,
-					Path:    "server.gitlab.default_chat_id",
-					Message: fmt.Sprintf("references unknown chat alias %q", chatID),
+					Path:    path,
+					Message: message(text),
 				})
 			}
-		}
-	}
 
-	// Gitlab route chats must reference existing chat aliases (or be UUIDs).
-	if c.Server.Gitlab != nil {
-		for i, route := range c.Server.Gitlab.Routes {
-			for _, chatID := range route.Chats {
+			// classify mirrors config.ResolveChatRef for offline validation.
+			// bad=true means an error was already reported; canonical=="" with
+			// bad=false means the alias id is a secret reference (or a
+			// malformed id, flagged by validateFormats) and canonical checks
+			// are not decidable offline.
+			classify := func(chatID, path string) (canonical, bot string, bad bool) {
 				if IsUUID(chatID) {
-					continue
+					return chatID, "", false
 				}
-				if _, ok := c.Chats[chatID]; !ok {
+				cc, ok := c.Chats[chatID]
+				if !ok {
+					addError(path, fmt.Sprintf("references unknown chat alias %q", chatID))
+					return "", "", true
+				}
+				if cc.ID == "" {
+					// Reported once by validateRequiredFields (chats.<name>.id);
+					// skip this target's decidable checks without duplicating it.
+					return "", "", true
+				}
+				if !IsUUID(cc.ID) {
+					return "", cc.Bot, false
+				}
+				return cc.ID, cc.Bot, false
+			}
+			multiBotWarn := func(chatID, path string) {
+				if !multiBotPossible {
+					return
+				}
+				if IsUUID(chatID) {
 					results = append(results, ValidationResult{
-						Level:   ValidationError,
-						Path:    fmt.Sprintf("server.gitlab.routes[%d].chats", i),
-						Message: fmt.Sprintf("references unknown chat alias %q", chatID),
+						Level:   ValidationWarning,
+						Path:    path,
+						Message: message(fmt.Sprintf("%q is a raw chat UUID; in multi-bot serve mode this sender will fail to start (use a bot-bound chat alias)", chatID)),
+					})
+					return
+				}
+				if cc, ok := c.Chats[chatID]; ok && cc.Bot == "" {
+					results = append(results, ValidationResult{
+						Level:   ValidationWarning,
+						Path:    path,
+						Message: message(fmt.Sprintf("chat alias %q has no bot binding; in multi-bot serve mode this sender will fail to start", chatID)),
 					})
 				}
 			}
-		}
-	}
 
-	// Gitlab sender chats must reference existing chat aliases (or be UUIDs).
-	if c.Server.Gitlab != nil {
-		for i, sender := range c.Server.Gitlab.Senders {
-			for j, chatID := range sender.Chats {
-				if IsUUID(chatID) {
-					continue
+			type scopeEntry struct{ raw, bot string }
+			scope := map[string]scopeEntry{}
+			scopeComplete := true // false when any scope target is not offline-decidable
+			warnedMultiBot := map[string]struct{}{}
+			warnMultiBotOnce := func(chatID, path string) {
+				// The multi-bot warning is decidable from the alias bot binding
+				// alone, so it fires even when the chat id itself is not
+				// resolvable offline (secret-ref id); warn once per distinct
+				// reference so repeated targets do not duplicate it.
+				if _, done := warnedMultiBot[chatID]; done {
+					return
 				}
-				if _, ok := c.Chats[chatID]; !ok {
-					results = append(results, ValidationResult{
-						Level:   ValidationError,
-						Path:    fmt.Sprintf("server.gitlab.senders[%d].chats[%d]", i, j),
-						Message: fmt.Sprintf("references unknown chat alias %q", chatID),
-					})
+				warnedMultiBot[chatID] = struct{}{}
+				multiBotWarn(chatID, path)
+			}
+			addTarget := func(chatID, path string) {
+				warnMultiBotOnce(chatID, path)
+				canonical, bot, bad := classify(chatID, path)
+				if bad || canonical == "" {
+					scopeComplete = false
+					return
+				}
+				if previous, ok := scope[canonical]; ok {
+					if previous.raw != chatID {
+						addError(path, fmt.Sprintf("delivery targets %q and %q resolve to the same chat UUID %q", previous.raw, chatID, canonical))
+					}
+					return
+				}
+				scope[canonical] = scopeEntry{raw: chatID, bot: bot}
+			}
+
+			for j, chatID := range sender.Chats {
+				addTarget(chatID, fmt.Sprintf("%s.chats[%d]", prefix, j))
+			}
+			explicitScope := len(sender.Chats) > 0
+			for j, route := range sender.Routes {
+				path := fmt.Sprintf("%s.routes[%d].chats", prefix, j)
+				for _, chatID := range route.Chats {
+					if !explicitScope {
+						// Routes-only sender: route chats are the delivery
+						// targets and follow the same dedup/multi-bot rules
+						// as explicit sender chats.
+						addTarget(chatID, path)
+						continue
+					}
+					canonical, routeBot, bad := classify(chatID, path)
+					if bad || canonical == "" {
+						continue // route chat id not decidable offline
+					}
+					entry, ok := scope[canonical]
+					if !ok {
+						// The canonical UUID is not in the decidable part of the
+						// scope. Only reject when the whole scope is decidable —
+						// otherwise an undecidable (secret-ref) sender chat might
+						// still cover it, and serve would accept it.
+						if scopeComplete {
+							addError(path, fmt.Sprintf("delivery target %q is outside sender scope", chatID))
+						}
+						continue
+					}
+					// The scope entry exists, so the bot-conflict check is
+					// deterministic regardless of undecidable siblings: serve
+					// resolves this exact entry and rejects the same way. This
+					// mirrors server.GitlabTarget.BotConflict (kept in sync by
+					// hand — internal/config cannot import internal/server).
+					if entry.raw != chatID && routeBot != "" && entry.bot != "" && routeBot != entry.bot {
+						addError(path, fmt.Sprintf("%q is bound to bot %q but scope target %q is bound to bot %q", chatID, routeBot, entry.raw, entry.bot))
+					}
 				}
 			}
 		}
@@ -1669,18 +1769,19 @@ func (c *Config) validateCrossReferences() []ValidationResult {
 
 	// Gitlab event-key syntax and templates/template_files key overlap
 	if g := c.Server.Gitlab; g != nil {
-		results = append(results, validateGitlab(g)...)
+		for i, sender := range g.Senders {
+			results = append(results, validateGitlabSender(sender, fmt.Sprintf("server.gitlab.senders[%d]", i))...)
+		}
 	}
 
 	return results
 }
 
-// validateGitlab checks GitLab event-key syntax, templates/template_files key
-// overlap, and catch-all ambiguity. It is shared by the offline Config.Validate
-// and by the serve startup path (see GitlabYAMLConfig.ValidateForServe), which
-// does not run the full Config.Validate.
-func validateGitlab(g *GitlabYAMLConfig) []ValidationResult {
+// validateGitlabSender checks sender-local event-key syntax,
+// templates/template_files overlap, catch-all ambiguity, and routes.
+func validateGitlabSender(sender GitlabSenderYAMLConfig, prefix string) []ValidationResult {
 	var results []ValidationResult
+	message := func(text string) string { return gitlabSenderMessage(sender.Name, text) }
 
 	checkKeys := func(path string, entries []string) {
 		for _, e := range entries {
@@ -1688,42 +1789,42 @@ func validateGitlab(g *GitlabYAMLConfig) []ValidationResult {
 				results = append(results, ValidationResult{
 					Level:   ValidationError,
 					Path:    path,
-					Message: fmt.Sprintf("invalid event key %q: must be \"kind\", \"kind.subtype\", or \"kind.*\"", e),
+					Message: message(fmt.Sprintf("invalid event key %q: must be \"kind\", \"kind.subtype\", or \"kind.*\"", e)),
 				})
 			}
 		}
 	}
-	checkKeys("server.gitlab.events.only", g.Events.Only)
-	checkKeys("server.gitlab.events.exclude", g.Events.Exclude)
-	checkKeys("server.gitlab.error_events", g.ErrorEvents)
+	checkKeys(prefix+".events.only", sender.Events.Only)
+	checkKeys(prefix+".events.exclude", sender.Events.Exclude)
+	checkKeys(prefix+".error_events", sender.ErrorEvents)
 
 	// Template keys must be valid event keys too.
-	for _, k := range sortedMapKeys(g.Templates) {
+	for _, k := range sortedMapKeys(sender.Templates) {
 		if !validGitlabEventKey(k) {
 			results = append(results, ValidationResult{
 				Level:   ValidationError,
-				Path:    "server.gitlab.templates." + k,
-				Message: fmt.Sprintf("invalid event key %q: must be \"kind\", \"kind.subtype\", or \"kind.*\"", k),
+				Path:    prefix + ".templates." + k,
+				Message: message(fmt.Sprintf("invalid event key %q: must be \"kind\", \"kind.subtype\", or \"kind.*\"", k)),
 			})
 		}
 	}
-	for _, k := range sortedMapKeys(g.TemplateFiles) {
+	for _, k := range sortedMapKeys(sender.TemplateFiles) {
 		if !validGitlabEventKey(k) {
 			results = append(results, ValidationResult{
 				Level:   ValidationError,
-				Path:    "server.gitlab.template_files." + k,
-				Message: fmt.Sprintf("invalid event key %q: must be \"kind\", \"kind.subtype\", or \"kind.*\"", k),
+				Path:    prefix + ".template_files." + k,
+				Message: message(fmt.Sprintf("invalid event key %q: must be \"kind\", \"kind.subtype\", or \"kind.*\"", k)),
 			})
 		}
 	}
 
 	// A given key must not be defined in both templates and template_files.
-	for _, k := range sortedMapKeys(g.Templates) {
-		if _, dup := g.TemplateFiles[k]; dup {
+	for _, k := range sortedMapKeys(sender.Templates) {
+		if _, dup := sender.TemplateFiles[k]; dup {
 			results = append(results, ValidationResult{
 				Level:   ValidationError,
-				Path:    "server.gitlab.template_files." + k,
-				Message: fmt.Sprintf("event key %q is defined in both templates and template_files", k),
+				Path:    prefix + ".template_files." + k,
+				Message: message(fmt.Sprintf("event key %q is defined in both templates and template_files", k)),
 			})
 		}
 	}
@@ -1733,7 +1834,7 @@ func validateGitlab(g *GitlabYAMLConfig) []ValidationResult {
 	// single registry slot (see canonGitlabTemplateKey), so defining both is
 	// ambiguous. Checked across the union of templates and template_files.
 	catchAllForm := map[string]string{}
-	for _, m := range []map[string]string{g.Templates, g.TemplateFiles} {
+	for _, m := range []map[string]string{sender.Templates, sender.TemplateFiles} {
 		for _, k := range sortedMapKeys(m) {
 			canon, isCatchAll := gitlabCatchAllKind(k)
 			if !isCatchAll {
@@ -1742,8 +1843,8 @@ func validateGitlab(g *GitlabYAMLConfig) []ValidationResult {
 			if prev, ok := catchAllForm[canon]; ok && prev != k {
 				results = append(results, ValidationResult{
 					Level:   ValidationError,
-					Path:    "server.gitlab.templates",
-					Message: fmt.Sprintf("event keys %q and %q are equivalent catch-alls; define only one", prev, k),
+					Path:    prefix + ".templates",
+					Message: message(fmt.Sprintf("event keys %q and %q are equivalent catch-alls; define only one", prev, k)),
 				})
 			} else {
 				catchAllForm[canon] = k
@@ -1751,7 +1852,7 @@ func validateGitlab(g *GitlabYAMLConfig) []ValidationResult {
 		}
 	}
 
-	results = append(results, validateGitlabRoutes(g.Routes)...)
+	results = append(results, validateGitlabRoutes(sender.Routes, sender.Name, prefix)...)
 
 	return results
 }
@@ -1761,26 +1862,29 @@ func validateGitlab(g *GitlabYAMLConfig) []ValidationResult {
 // valid event keys (kind / kind.subtype / kind.*); and "/regex/" patterns on any
 // other selector must compile. Chat-alias existence is a cross-reference check
 // (validateCrossReferences), since it needs the chats map.
-func validateGitlabRoutes(routes []GitlabRouteYAMLConfig) []ValidationResult {
+func validateGitlabRoutes(routes []GitlabRouteYAMLConfig, senderName, prefix string) []ValidationResult {
 	var results []ValidationResult
+	path := func(i int, suffix string) string {
+		return fmt.Sprintf("%s.routes[%d].%s", prefix, i, suffix)
+	}
 	for i, route := range routes {
 		if len(route.Chats) == 0 {
 			results = append(results, ValidationResult{
 				Level:   ValidationError,
-				Path:    fmt.Sprintf("server.gitlab.routes[%d].chats", i),
-				Message: "chats must not be empty",
+				Path:    path(i, "chats"),
+				Message: gitlabSenderMessage(senderName, "chats must not be empty"),
 			})
 		}
 		for _, selector := range sortedMapKeys(route.Match) {
 			patterns := route.Match[selector]
-			path := fmt.Sprintf("server.gitlab.routes[%d].match.%s", i, selector)
+			matchPath := path(i, "match."+selector)
 			for _, p := range patterns {
 				if selector == "event" {
 					if !validGitlabEventKey(p) {
 						results = append(results, ValidationResult{
 							Level:   ValidationError,
-							Path:    path,
-							Message: fmt.Sprintf("invalid event key %q: must be \"kind\", \"kind.subtype\", or \"kind.*\"", p),
+							Path:    matchPath,
+							Message: gitlabSenderMessage(senderName, fmt.Sprintf("invalid event key %q: must be \"kind\", \"kind.subtype\", or \"kind.*\"", p)),
 						})
 					}
 					continue
@@ -1788,8 +1892,8 @@ func validateGitlabRoutes(routes []GitlabRouteYAMLConfig) []ValidationResult {
 				if err := gitlabRoutePatternError(p); err != nil {
 					results = append(results, ValidationResult{
 						Level:   ValidationError,
-						Path:    path,
-						Message: fmt.Sprintf("invalid regex pattern %q: %v", p, err),
+						Path:    matchPath,
+						Message: gitlabSenderMessage(senderName, fmt.Sprintf("invalid regex pattern %q: %v", p, err)),
 					})
 				}
 			}
@@ -1817,9 +1921,16 @@ func gitlabRoutePatternError(pattern string) error {
 // full Config.Validate, so buildGitlabConfig calls this to reject invalid event
 // keys and templates/template_files overlaps that offline validation would flag.
 func (g *GitlabYAMLConfig) ValidateForServe() error {
-	for _, r := range validateGitlab(g) {
+	for _, r := range validateGitlabSenders(g) {
 		if r.Level == ValidationError {
 			return fmt.Errorf("%s: %s", r.Path, r.Message)
+		}
+	}
+	for i, sender := range g.Senders {
+		for _, r := range validateGitlabSender(sender, fmt.Sprintf("server.gitlab.senders[%d]", i)) {
+			if r.Level == ValidationError {
+				return fmt.Errorf("%s: %s", r.Path, r.Message)
+			}
 		}
 	}
 	return nil

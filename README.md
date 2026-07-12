@@ -173,7 +173,13 @@ chats:
 
 ## Интеграции
 
-В режиме веб-сервера есть методы для интеграции с alertmanager, grafana и gitlab (универсальный приёмник любых событий GitLab с фильтрами `only`/`exclude`, шаблонами по типам и `error_events`). Несколько команд могут делить один GitLab-эндпоинт с изоляцией по своим `X-Gitlab-Token`; при этом `?chat_id=` работает как фильтр внутри разрешённого набора чатов sender'а (400 на пустой, 403 на выход за scope, эквивалентность alias/UUID) — см. [senders](docs/integrations.md#изоляция-команд-senders-несколько-токенов) и пример [examples/gitlab/config-senders.yaml](examples/gitlab/config-senders.yaml) ([Per-team tokens](examples/gitlab/README.md#per-team-tokens-senders)).
+В режиме веб-сервера есть методы для интеграции с alertmanager, grafana и gitlab.
+GitLab-эндпоинт принимает любые события; каждый `server.gitlab.senders[]`
+владеет своим `X-Gitlab-Token`, скоупом чатов, фильтрами, шаблонами и
+маршрутами. `?chat_id=` обходит routes внутри скоупа (400 на пустой, 403
+на выход за scope, alias/UUID эквивалентны) — см.
+[описание GitLab-интеграции](docs/integrations.md#gitlab-универсальный-приёмник-событий) и
+[примеры](examples/gitlab/).
 
 Пример конфига alertmanager:
 

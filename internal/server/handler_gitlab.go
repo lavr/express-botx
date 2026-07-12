@@ -34,45 +34,49 @@ import (
 
 // GitlabConfig holds settings for the GitLab webhook endpoint.
 type GitlabConfig struct {
-	DefaultChatID string // default target chat UUID or alias (may be empty)
-	// SecretToken is the expected value of the X-Gitlab-Token header. GitLab
-	// cannot send Authorization/X-API-Key headers, so the /gitlab route uses
-	// this token instead of the standard API-key middleware.
-	SecretToken string
-	// Templates is the compiled registry of per-event templates plus a generic
-	// default. It selects a template by event key, falling back to the bare kind
-	// and finally the default so every event renders.
-	Templates *gitlabTemplates
-	// FallbackChatID is resolved at startup from the config's chats section
-	// when there is exactly one chat alias configured. Empty otherwise.
-	FallbackChatID string
-	// Only and Exclude filter incoming events by event key. Each entry matches
-	// a full event key ("kind.subtype"), a bare kind (all subtypes), or a
-	// "kind.*" wildcard. An empty Only allows every event; Exclude always wins.
-	Only    []string
-	Exclude []string
-	// ErrorEvents lists event keys that should be delivered with status "error"
-	// (surfaced as BotX notification.status). Entries use the same matching as
-	// Only/Exclude (full key, bare kind, or "kind.*"). Everything else is "ok".
-	ErrorEvents []string
-	// Routes is the compiled, ordered routing rule list. When non-empty (and no
-	// explicit ?chat_id overrides it) an incoming event fans out to the chats of
-	// every matching rule (see gitlab_routing.go). Empty keeps the single-chat
-	// behaviour (DefaultChatID / FallbackChatID).
-	Routes []compiledRoute
-	// Senders optionally maps additional X-Gitlab-Token values to isolated
-	// per-team chat scopes. Secrets are already resolved (env:/vault: references
-	// expanded at startup). A request that authenticates via a sender token is
-	// delivered only to that sender's Chats; ?chat_id, Routes and DefaultChatID
-	// do not apply to it. May coexist with the default SecretToken.
+	// Senders contains the complete, isolated runtime for each accepted token.
+	// Secrets are resolved and chat scopes/routes normalized during startup.
 	Senders []GitlabSender
 }
 
 // GitlabSender is one isolated webhook sender: a resolved secret token bound to
 // a fixed set of target chats (aliases or UUIDs).
+//
+// Scope and Targets are two views of the same delivery set and MUST be kept
+// consistent by whoever builds the sender: every value in Targets must have a
+// Scope entry whose Target equals it, keyed by that chat's canonical UUID. The
+// serve builder (internal/cmd) guarantees this; a hand-built sender that fills
+// only one view will 403 every ?chat_id request (empty Scope) or fan out to no
+// chats (empty Targets).
 type GitlabSender struct {
-	Secret string
-	Chats  []string
+	Label       string // stable log/error label: quoted sender name, or "senders[i]" when unnamed
+	Secret      string
+	Scope       map[string]GitlabTarget // canonical UUID -> delivery target resolved at build time
+	Targets     []string                // ordered, canonical-deduplicated delivery targets
+	Only        []string
+	Exclude     []string
+	ErrorEvents []string
+	Templates   *gitlabTemplates
+	Routes      []compiledRoute
+}
+
+// GitlabTarget is one delivery target of a sender's scope, resolved once at
+// build time. Fixing the bot binding here means canonicalizing a request
+// reference to the scope target can never silently change the sending bot.
+type GitlabTarget struct {
+	Target string // configured delivery target (alias or UUID) passed to fan-out
+	Bot    string // bot binding of the target alias; "" for raw UUIDs and unbound aliases
+}
+
+// BotConflict reports whether delivering a reference ref (bound to refBot) via
+// this target would silently switch the sending bot: the reference canonicalizes
+// to a different configured target and both sides carry an explicit, differing
+// bot binding. An unbound side (raw UUID, or a bot-less alias in single-bot
+// mode) cannot conflict. This is the single predicate shared by the request-time
+// scope check (senderScopeTargets) and the startup route check (buildGitlabSender
+// in internal/cmd); the offline config validator mirrors it.
+func (t GitlabTarget) BotConflict(ref, refBot string) bool {
+	return ref != t.Target && refBot != "" && t.Bot != "" && refBot != t.Bot
 }
 
 // gitlabView is the view-model passed to the message template. It is derived
@@ -251,18 +255,14 @@ func (s *Server) handleGitlab(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Verify X-Gitlab-Token (GitLab cannot set Authorization/X-API-Key). The
-	// token may be the default SecretToken or one of the per-sender secrets;
-	// a sender match carries an isolated chat scope (used in delivery below).
-	senderChats, isSender, ok := s.resolveGitlabAuth(r.Header.Get("X-Gitlab-Token"))
+	sender, ok := s.resolveGitlabAuth(r.Header.Get("X-Gitlab-Token"))
 	if !ok {
 		vlog.V1("gitlab: token mismatch -> 401")
 		writeError(w, http.StatusUnauthorized, "invalid gitlab token")
 		return
 	}
-	if isSender {
-		vlog.V2("gitlab: authenticated as sender (scope: %v)", senderChats)
-	}
+	senderLabel := sender.Label // WithGitlab normalizes missing labels at construction
+	vlog.V1("gitlab: authenticated sender %s", senderLabel)
 
 	var raw map[string]any
 	if err := json.NewDecoder(r.Body).Decode(&raw); err != nil {
@@ -273,126 +273,76 @@ func (s *Server) handleGitlab(w http.ResponseWriter, r *http.Request) {
 	view := normalizeGitlab(raw)
 	vlog.V1("gitlab: received %s (eventKey: %s)", view.Kind, view.EventKey)
 
-	// Apply the only/exclude filter before doing any work.
-	if !passesFilter(view.Kind, view.EventKey, s.gitCfg.Only, s.gitCfg.Exclude) {
-		vlog.V2("gitlab: %s filtered out -> ignored", view.EventKey)
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(gitlabIgnoredResponse{OK: true, Ignored: true, Event: view.EventKey})
+	if !passesFilter(view.Kind, view.EventKey, sender.Only, sender.Exclude) {
+		vlog.V2("gitlab: sender %s filtered out %s -> ignored", senderLabel, view.EventKey)
+		writeGitlabIgnored(w, view.EventKey, "event filtered")
 		return
 	}
 
-	// Render template: exact event key -> bare kind -> generic default.
-	message, err := s.gitCfg.Templates.Render(view.Kind, view.EventKey, view)
+	message, err := sender.Templates.Render(view.Kind, view.EventKey, view)
 	if err != nil {
 		writeError(w, http.StatusBadRequest, "template error: "+err.Error())
 		return
 	}
 	vlog.V3("gitlab: rendered message:\n%s", message)
 
-	// Never post a blank message (e.g. a payload without object_kind that
-	// renders to an empty generic template). Treat it as ignored rather than
-	// delivering an empty notification to the chat.
 	if strings.TrimSpace(message) == "" {
 		vlog.V2("gitlab: %s rendered empty message -> ignored", view.EventKey)
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(gitlabIgnoredResponse{OK: true, Ignored: true, Event: view.EventKey})
+		writeGitlabIgnored(w, view.EventKey, "empty message")
 		return
 	}
 
-	// Map to BotX notification.status: error when the event key matches
-	// ErrorEvents, otherwise ok. Shared by the single-chat and fan-out paths.
 	status := "ok"
-	if eventMatches(view.Kind, view.EventKey, s.gitCfg.ErrorEvents) {
+	if eventMatches(view.Kind, view.EventKey, sender.ErrorEvents) {
 		status = "error"
 	}
 
-	// A sender-token request stays inside that sender's chat scope (team
-	// isolation): ?bot, Routes and DefaultChatID never apply. ?chat_id acts as a
-	// filter *within* the allowed scope — omitted delivers to every sender chat
-	// (previous behaviour), a non-empty subset delivers only to those chats, and
-	// any chat outside the scope is refused (403) rather than silently ignored.
-	// The filter/template/status logic above is shared with the default path.
-	if isSender {
-		queryChats := parseChatIDs(r.URL.Query().Get("chat_id"))
-		// An explicitly-present but empty chat_id (?chat_id= / ?chat_id=,,) is a
-		// request error, not a fall-back to the full sender scope.
-		if len(queryChats) == 0 && r.URL.Query().Has("chat_id") {
-			writeError(w, http.StatusBadRequest, "chat_id is empty: provide at least one chat, or omit chat_id to deliver to all allowed chats")
+	queryChats := parseChatIDs(r.URL.Query().Get("chat_id"))
+	switch {
+	case r.URL.Query().Has("chat_id") && len(queryChats) == 0:
+		writeError(w, http.StatusBadRequest, "chat_id is empty: provide at least one chat, or omit chat_id")
+		return
+	case len(queryChats) > 0:
+		targets, reject, inScope := s.senderScopeTargets(queryChats, sender.Scope)
+		if !inScope {
+			vlog.V1("gitlab: sender %s rejected chat selection: %s -> 403", senderLabel, reject)
+			writeError(w, http.StatusForbidden, reject)
 			return
 		}
-		targets := senderChats
-		if len(queryChats) > 0 {
-			canonical, bad, ok := s.senderScopeTargets(queryChats, senderChats)
-			if !ok {
-				vlog.V1("gitlab: sender requested out-of-scope chat %q -> 403", bad)
-				writeError(w, http.StatusForbidden, fmt.Sprintf("chat %q is outside this token's allowed chats", bad))
-				return
-			}
-			targets = canonical
-		}
+		vlog.V2("gitlab: sender %s final targets %v", senderLabel, targets)
 		s.gitlabDeliver(w, r, "", targets, message, status, view.EventKey)
 		return
-	}
-
-	// An explicit ?chat_id overrides routing entirely (and may itself list several
-	// chats, comma-separated); likewise, with no routes configured the endpoint
-	// keeps its single-chat default behaviour (routes is optional, so its absence
-	// must not change existing deployments).
-	queryChats := parseChatIDs(r.URL.Query().Get("chat_id"))
-	// An explicitly-present but empty chat_id (?chat_id= / ?chat_id=,,) is a
-	// request error, not a silent fall-back to routes or the default chat.
-	if len(queryChats) == 0 && r.URL.Query().Has("chat_id") {
-		writeError(w, http.StatusBadRequest, "chat_id is empty: provide at least one chat, or omit chat_id to use routing/default")
-		return
-	}
-	if len(queryChats) > 0 || len(s.gitCfg.Routes) == 0 {
-		targets := queryChats
-		if len(targets) == 0 {
-			if single := s.singleGitlabChat(); single != "" {
-				targets = []string{single}
-			}
-		}
-		if len(targets) == 0 {
-			writeError(w, http.StatusBadRequest, "chat_id is required: set default_chat_id in config, configure a single chat alias, or pass ?chat_id=")
+	case len(sender.Routes) > 0:
+		targets, matched, matchedRules := evaluateRoutes(sender.Routes, view)
+		if !matched {
+			vlog.V1("gitlab: sender %s matched no route for %s -> ignored", senderLabel, view.EventKey)
+			writeGitlabIgnored(w, view.EventKey, "no route matched")
 			return
 		}
-		s.gitlabDeliver(w, r, r.URL.Query().Get("bot"), targets, message, status, view.EventKey)
+		vlog.V2("gitlab: sender %s matched routes %v -> %v", senderLabel, matchedRules, targets)
+		s.gitlabDeliver(w, r, "", targets, message, status, view.EventKey)
+		return
+	default:
+		vlog.V2("gitlab: sender %s final targets %v", senderLabel, sender.Targets)
+		s.gitlabDeliver(w, r, "", sender.Targets, message, status, view.EventKey)
 		return
 	}
-
-	// Routing engine: fan the event out to the chats of every matching rule. When
-	// no rule matches, fall back to the single default chat; if there is none the
-	// event is ignored (200) rather than treated as an error.
-	targets, matched := evaluateRoutes(s.gitCfg.Routes, view)
-	if !matched {
-		if single := s.singleGitlabChat(); single != "" {
-			targets = []string{single}
-		} else {
-			vlog.V2("gitlab: %s matched no route and no default chat -> ignored", view.EventKey)
-			w.Header().Set("Content-Type", "application/json")
-			json.NewEncoder(w).Encode(gitlabIgnoredResponse{OK: true, Ignored: true, Event: view.EventKey})
-			return
-		}
-	}
-	s.gitlabDeliver(w, r, r.URL.Query().Get("bot"), targets, message, status, view.EventKey)
 }
 
 // resolveGitlabAuth authenticates an incoming X-Gitlab-Token value against the
-// per-sender secrets and the default SecretToken. Every configured secret is
+// per-sender secrets. Every configured secret is
 // compared with subtle.ConstantTimeCompare and no comparison is skipped after a
 // match, so match position does not affect response timing. (ConstantTimeCompare
 // itself returns immediately on a length mismatch, so the timing of a single
 // comparison can still reflect whether the token length matches a secret —
 // standard and acceptable for webhook tokens.)
 // Empty tokens and empty secrets never authenticate, so a misconfigured empty
-// secret cannot let an unauthenticated request through. A sender match returns
-// that sender's isolated chat scope with isSender=true; a default-token match
-// returns (nil, false, true); no match returns (nil, false, false). A token
-// matching both a sender and the default resolves as the sender (startup
-// deduplication in buildGitlabConfig rejects such configs anyway).
-func (s *Server) resolveGitlabAuth(token string) (chats []string, isSender, ok bool) {
+// secret cannot let an unauthenticated request through. On duplicate secrets
+// (possible only in hand-built configs; serve startup rejects them) the first
+// matching sender wins.
+func (s *Server) resolveGitlabAuth(token string) (*GitlabSender, bool) {
 	if token == "" {
-		return nil, false, false
+		return nil, false
 	}
 	tokenBytes := []byte(token)
 	var matched *GitlabSender
@@ -404,79 +354,48 @@ func (s *Server) resolveGitlabAuth(token string) (chats []string, isSender, ok b
 			matched = sender
 		}
 	}
-	defaultHit := s.gitCfg.SecretToken != "" &&
-		subtle.ConstantTimeCompare(tokenBytes, []byte(s.gitCfg.SecretToken)) == 1
-	if matched != nil {
-		return matched.Chats, true, true
-	}
-	if defaultHit {
-		return nil, false, true
-	}
-	return nil, false, false
+	return matched, matched != nil
 }
 
-// senderScopeTargets checks that every requested chat_id stays within a sender's
-// allowed chat scope, treating aliases and the UUIDs they resolve to as
-// equivalent, and maps each in-scope request back to the sender.chats entry the
-// operator configured. Delivering via that configured entry (rather than the raw
-// request string) preserves the entry's bot binding in multi-bot mode, so a
-// request that names a chat by the UUID its alias resolves to still delivers to
-// the right bot instead of failing with "bot is required".
-//
-// It builds a lookup from every recognised key — each raw sender.chats value and
-// the UUID it resolves to — back to the configured entry (raw values that fail to
-// resolve are kept as-is). For each requested value it accepts the value itself,
-// or the UUID it resolves to, when either is a known key, and emits the matching
-// configured entry. Requests that collapse to the same entry are de-duplicated,
-// preserving first-request order.
-//
-// It returns the canonical targets with ok=true, or on the first out-of-scope
-// request (a value that fails to resolve and is not literally configured) returns
-// (nil, that value, false). This gives alias↔UUID equivalence regardless of
-// whether sender.Chats stores aliases or UUIDs.
-func (s *Server) senderScopeTargets(requested, allowed []string) (targets []string, bad string, ok bool) {
-	entryOf := make(map[string]string, len(allowed)*2)
-	for _, a := range allowed {
-		if _, seen := entryOf[a]; !seen {
-			entryOf[a] = a
-		}
-		if res, err := s.chats(a); err == nil && res.ChatID != "" {
-			if _, seen := entryOf[res.ChatID]; !seen {
-				entryOf[res.ChatID] = a
-			}
-		}
-	}
+// senderScopeTargets canonicalizes requested aliases/UUIDs through the sender's
+// prebuilt canonical UUID scope and returns configured delivery targets. It
+// rejects the whole request on the first out-of-scope or bot-conflicting value
+// (reject carries the client-facing 403 message) and de-duplicates by canonical
+// UUID while preserving request order.
+func (s *Server) senderScopeTargets(requested []string, scope map[string]GitlabTarget) (targets []string, reject string, ok bool) {
+	targets = make([]string, 0, len(requested))
 	seen := make(map[string]struct{}, len(requested))
-	for _, q := range requested {
-		entry, in := entryOf[q]
-		if !in {
-			if res, err := s.chats(q); err == nil && res.ChatID != "" {
-				entry, in = entryOf[res.ChatID]
+	for _, raw := range requested {
+		canonical := raw
+		requestedBot := ""
+		if _, inScope := scope[canonical]; !inScope {
+			resolved, err := s.chats(raw)
+			if err != nil || resolved.ChatID == "" {
+				// An unresolvable or empty canonical ID is out of scope; ""
+				// must never match a scope key (see config.ResolveChatRef).
+				return nil, fmt.Sprintf("chat %q is outside this token's allowed chats", raw), false
 			}
+			canonical = resolved.ChatID
+			requestedBot = resolved.Bot
 		}
-		if !in {
-			return nil, q, false
+		entry, inScope := scope[canonical]
+		if !inScope {
+			return nil, fmt.Sprintf("chat %q is outside this token's allowed chats", raw), false
 		}
-		if _, dup := seen[entry]; dup {
+		// Delivery goes through the scope target, so a requested alias carrying
+		// a different bot binding would silently switch the sending bot — the
+		// same contradiction the startup route check rejects.
+		if entry.BotConflict(raw, requestedBot) {
+			return nil, fmt.Sprintf("chat %q is bound to bot %q, but this token delivers to that chat via %q (bot %q)",
+				raw, requestedBot, entry.Target, entry.Bot), false
+		}
+		if _, duplicate := seen[canonical]; duplicate {
 			continue
 		}
-		seen[entry] = struct{}{}
-		targets = append(targets, entry)
+		seen[canonical] = struct{}{}
+		targets = append(targets, entry.Target)
 	}
 	return targets, "", true
-}
-
-// singleGitlabChat returns the single fallback delivery chat, following the
-// precedence default_chat_id -> global default chat -> the sole configured chat
-// alias. It is empty when none is configured.
-func (s *Server) singleGitlabChat() string {
-	if s.gitCfg.DefaultChatID != "" {
-		return s.gitCfg.DefaultChatID
-	}
-	if s.cfg.DefaultChatAlias != "" {
-		return s.cfg.DefaultChatAlias
-	}
-	return s.gitCfg.FallbackChatID
 }
 
 // gitlabDeliver delivers a rendered event to every target chat best-effort using
@@ -485,9 +404,8 @@ func (s *Server) singleGitlabChat() string {
 // response is always a MultiSendResponse — 200 with the results (plus any partial
 // errors) when at least one delivery succeeds, or 502 with the errors when they
 // all fail. A single target still returns the uniform shape (results[0]), so
-// /gitlab shares the contract of every other send surface. requestBot is the
-// ?bot= override; the sender-isolated path passes "" so a sender token cannot
-// pick another configured bot's identity.
+// /gitlab shares the contract of every other send surface. The handler passes an
+// empty requestBot so sender chat bindings always choose the bot identity.
 func (s *Server) gitlabDeliver(w http.ResponseWriter, r *http.Request, requestBot string, targets []string, message, status, eventKey string) {
 	start := time.Now()
 	results, errs := s.fanoutSend(r.Context(), targets, requestBot, message, status)
@@ -500,12 +418,23 @@ func (s *Server) gitlabDeliver(w http.ResponseWriter, r *http.Request, requestBo
 	writeMultiSend(w, results, errs, http.StatusOK)
 }
 
-// gitlabIgnoredResponse is returned with 200 OK when an event is filtered out
-// by the only/exclude rules and no message is sent.
+// gitlabIgnoredResponse is returned with 200 OK when an event is accepted but
+// no message is sent; Reason names the cause ("event filtered", "empty
+// message", "no route matched").
 type gitlabIgnoredResponse struct {
 	OK      bool   `json:"ok"`
 	Ignored bool   `json:"ignored"`
 	Event   string `json:"event"`
+	Reason  string `json:"reason,omitempty"`
+}
+
+// writeGitlabIgnored writes the uniform 200 ignored response shared by the
+// filtered, blank-render, and no-route paths.
+func writeGitlabIgnored(w http.ResponseWriter, eventKey, reason string) {
+	w.Header().Set("Content-Type", "application/json")
+	_ = json.NewEncoder(w).Encode(gitlabIgnoredResponse{
+		OK: true, Ignored: true, Event: eventKey, Reason: reason,
+	})
 }
 
 // DefaultGitlabTemplate is the generic fallback that renders any GitLab event

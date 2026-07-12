@@ -377,15 +377,15 @@ func CompileGitlabRoutes(routes []config.GitlabRouteYAMLConfig) ([]compiledRoute
 // contributes its chats (all-match, not first-match); the chats are unioned with
 // duplicates removed while preserving first-seen order. A matching rule with
 // stop:true ends the scan after its chats are collected. matched reports whether
-// any rule matched at all (distinct from "matched but produced no chats", which a
-// well-formed config never does since chats is required non-empty).
-func evaluateRoutes(routes []compiledRoute, view gitlabView) (chats []string, matched bool) {
+// any rule matched at all; matchedRules contains the matching zero-based indices.
+func evaluateRoutes(routes []compiledRoute, view gitlabView) (chats []string, matched bool, matchedRules []int) {
 	seen := make(map[string]struct{})
-	for _, route := range routes {
+	for i, route := range routes {
 		if !routeMatches(view, route) {
 			continue
 		}
 		matched = true
+		matchedRules = append(matchedRules, i)
 		for _, chat := range route.chats {
 			if _, ok := seen[chat]; ok {
 				continue
@@ -397,5 +397,5 @@ func evaluateRoutes(routes []compiledRoute, view gitlabView) (chats []string, ma
 			break
 		}
 	}
-	return chats, matched
+	return chats, matched, matchedRules
 }

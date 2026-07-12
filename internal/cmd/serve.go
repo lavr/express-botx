@@ -7,9 +7,11 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"maps"
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strconv"
 	"syscall"
 	"time"
 
@@ -309,12 +311,6 @@ Options:
 		if err != nil {
 			return err
 		}
-		if gitCfg.DefaultChatID == "" && len(cfg.Chats) == 1 {
-			for alias := range cfg.Chats {
-				gitCfg.FallbackChatID = alias
-				vlog.V1("gitlab: using single chat alias %q as fallback", alias)
-			}
-		}
 		srvOpts = append(srvOpts, server.WithGitlab(gitCfg))
 	}
 
@@ -481,156 +477,149 @@ func buildGrafanaConfig(gr *config.GrafanaYAMLConfig, configPath string) (*serve
 	}, nil
 }
 
-// chatAliases is the config's chats section, used to reject sender chat entries
-// that reference a nonexistent alias at startup (a typo would otherwise surface
-// only as a per-request delivery failure). UUID entries pass through unchecked.
-func buildGitlabConfig(gl *config.GitlabYAMLConfig, configPath string, chatAliases map[string]config.ChatConfig, isMultiBot bool) (*server.GitlabConfig, error) {
-	// Reject invalid event-key syntax and templates/template_files overlaps that
-	// offline `validate` would catch but LoadForServe does not run.
+func buildGitlabConfig(gl *config.GitlabYAMLConfig, configPath string, chats map[string]config.ChatConfig, multiBot bool) (*server.GitlabConfig, error) {
 	if err := gl.ValidateForServe(); err != nil {
 		return nil, fmt.Errorf("gitlab: %w", err)
 	}
-
-	// Resolve the shared secret token (accepts literal, env:, vault:). The
-	// `secret` key takes precedence over the `secret_token` alias. It is
-	// optional when per-sender tokens are configured instead.
-	tokenRef := gl.Secret
-	if tokenRef == "" {
-		tokenRef = gl.SecretToken
-	}
-	if tokenRef == "" && len(gl.Senders) == 0 {
-		return nil, fmt.Errorf("gitlab: secret token is required (set server.gitlab.secret or server.gitlab.senders)")
-	}
-	var secretToken string
-	if tokenRef != "" {
-		var err error
-		secretToken, err = secret.Resolve(tokenRef)
+	senders := make([]server.GitlabSender, 0, len(gl.Senders))
+	seen := map[string]string{}
+	for i, raw := range gl.Senders {
+		label := fmt.Sprintf("senders[%d]", i)
+		if raw.Name != "" {
+			label = strconv.Quote(raw.Name)
+		}
+		sender, err := buildGitlabSender(raw, configPath, chats, multiBot, label)
 		if err != nil {
-			return nil, fmt.Errorf("resolving gitlab secret: %w", err)
+			return nil, err
 		}
-		if secretToken == "" {
-			// A reference (e.g. vault:path#key) can resolve to an empty value.
-			// Fail startup rather than register an endpoint that rejects every
-			// request with 401.
-			return nil, fmt.Errorf("gitlab: resolved secret token is empty")
+		if owner, ok := seen[sender.Secret]; ok {
+			return nil, fmt.Errorf("gitlab: sender %s secret duplicates %s", label, owner)
 		}
+		seen[sender.Secret] = label
+		vlog.V1("gitlab: sender %s: %d target(s), %d route(s), only=%d exclude=%d error_events=%d",
+			label, len(sender.Targets), len(sender.Routes), len(sender.Only), len(sender.Exclude), len(sender.ErrorEvents))
+		senders = append(senders, sender)
+	}
+	return &server.GitlabConfig{Senders: senders}, nil
+}
+
+func buildGitlabSender(sn config.GitlabSenderYAMLConfig, configPath string, chatAliases map[string]config.ChatConfig, isMultiBot bool, label string) (server.GitlabSender, error) {
+	fail := func(format string, args ...any) (server.GitlabSender, error) {
+		return server.GitlabSender{}, fmt.Errorf("gitlab: sender %s: %s", label, fmt.Sprintf(format, args...))
 	}
 
-	// Resolve per-sender secrets. Duplicate resolved values (sender↔sender or
-	// sender↔default) would make authentication ambiguous — which chat scope
-	// wins? — so they fail startup. Comparison uses resolved values: two
-	// different env:/vault: references pointing at the same secret still clash.
-	var senders []server.GitlabSender
-	seenTokens := map[string]string{}
-	if secretToken != "" {
-		seenTokens[secretToken] = "server.gitlab.secret"
-	}
-	for i, sn := range gl.Senders {
-		ref := sn.Secret
-		if ref == "" {
-			ref = sn.SecretToken
+	scope := make(map[string]server.GitlabTarget)
+	targets := make([]string, 0, len(sn.Chats))
+	addTarget := func(raw string) error {
+		canonical, bot, err := config.ResolveChatRef(chatAliases, raw)
+		if err != nil {
+			return err
 		}
-		if ref == "" {
-			return nil, fmt.Errorf("gitlab: senders[%d]: secret is required", i)
+		if isMultiBot && config.IsUUID(raw) {
+			return fmt.Errorf("%q is a raw chat UUID, but multi-bot mode requires a bot-bound chat alias", raw)
 		}
-		// Validate the cheap structural parts (chats) before resolving the
-		// secret: a vault: reference costs a network round-trip and its error
-		// would hide the simpler misconfiguration.
-		if len(sn.Chats) == 0 {
-			return nil, fmt.Errorf("gitlab: senders[%d]: chats must not be empty", i)
+		if isMultiBot && bot == "" {
+			return fmt.Errorf("chat alias %q has no bot binding, but multi-bot mode requires one", raw)
 		}
-		var chats []string
-		seenChats := map[string]bool{}
-		for _, chat := range sn.Chats {
-			if seenChats[chat] {
-				// A duplicate entry would deliver the same event twice.
-				continue
+		if previous, ok := scope[canonical]; ok {
+			if previous.Target != raw {
+				return fmt.Errorf("delivery targets %q and %q resolve to the same chat UUID %q", previous.Target, raw, canonical)
 			}
-			seenChats[chat] = true
-			// Sender requests always pass requestBot="" (?bot= is ignored to stop a
-			// sender picking another bot's identity), so in multi-bot mode a bot can
-			// only come from the chat's own binding. A raw UUID has no binding, and an
-			// alias without `bot:` set would fail resolveRequestBot's "bot is
-			// required" check on every delivery for this sender.
-			if config.IsUUID(chat) {
-				if isMultiBot {
-					return nil, fmt.Errorf("gitlab: senders[%d]: chats: %q is a raw chat UUID, but multi-bot mode requires a bot-bound chat alias here (?bot= is ignored for sender requests)", i, chat)
+			return nil
+		}
+		scope[canonical] = server.GitlabTarget{Target: raw, Bot: bot}
+		targets = append(targets, raw)
+		return nil
+	}
+
+	routes := make([]config.GitlabRouteYAMLConfig, len(sn.Routes))
+	for i, route := range sn.Routes {
+		routes[i] = route
+		routes[i].Chats = append([]string(nil), route.Chats...)
+	}
+	if len(sn.Chats) > 0 {
+		for _, raw := range sn.Chats {
+			if err := addTarget(raw); err != nil {
+				return fail("chats: %v", err)
+			}
+		}
+		for routeIndex := range routes {
+			for chatIndex, raw := range routes[routeIndex].Chats {
+				canonical, routeBot, err := config.ResolveChatRef(chatAliases, raw)
+				if err != nil {
+					return fail("routes[%d].chats: %v", routeIndex, err)
 				}
-			} else {
-				alias, ok := chatAliases[chat]
+				entry, ok := scope[canonical]
 				if !ok {
-					return nil, fmt.Errorf("gitlab: senders[%d]: chats: unknown chat alias %q", i, chat)
+					return fail("routes[%d].chats: delivery target %q is outside sender scope", routeIndex, raw)
 				}
-				if isMultiBot && alias.Bot == "" {
-					return nil, fmt.Errorf("gitlab: senders[%d]: chats: alias %q has no bot binding, but multi-bot mode requires one here (?bot= is ignored for sender requests)", i, chat)
+				// Delivery goes through the scope target, so a route alias
+				// carrying a different bot binding would silently switch the
+				// sending bot. Reject the contradiction (shared predicate with
+				// the request-time scope check).
+				if entry.BotConflict(raw, routeBot) {
+					return fail("routes[%d].chats: %q is bound to bot %q but scope target %q is bound to bot %q",
+						routeIndex, raw, routeBot, entry.Target, entry.Bot)
+				}
+				routes[routeIndex].Chats[chatIndex] = entry.Target
+			}
+		}
+	} else {
+		for _, route := range routes {
+			for _, raw := range route.Chats {
+				if err := addTarget(raw); err != nil {
+					return fail("routes: %v", err)
 				}
 			}
-			chats = append(chats, chat)
 		}
-		val, err := secret.Resolve(ref)
-		if err != nil {
-			return nil, fmt.Errorf("resolving gitlab senders[%d] secret: %w", i, err)
-		}
-		if val == "" {
-			// Only reachable via a vault: reference resolving to an empty value
-			// (env: refs error on empty, literals are caught by ref == "").
-			return nil, fmt.Errorf("gitlab: senders[%d]: resolved secret is empty", i)
-		}
-		if owner, dup := seenTokens[val]; dup {
-			return nil, fmt.Errorf("gitlab: senders[%d]: secret resolves to the same value as %s; tokens must be unique", i, owner)
-		}
-		seenTokens[val] = fmt.Sprintf("server.gitlab.senders[%d]", i)
-		senders = append(senders, server.GitlabSender{Secret: val, Chats: chats})
-	}
-	if len(senders) > 0 {
-		vlog.V1("gitlab: configured %d isolated sender token(s)", len(senders))
 	}
 
-	// Build the template registry. Start from the inline `templates` map, then
-	// overlay `template_files` (read from disk). Config validation guarantees a
-	// given key is not present in both. Built-in defaults are added by
-	// ParseGitlabTemplates for keys not overridden here.
-	inline := map[string]string{}
-	for k, v := range gl.Templates {
-		inline[k] = v
+	inline := maps.Clone(sn.Templates)
+	if inline == nil {
+		inline = map[string]string{}
 	}
-	for k, p := range gl.TemplateFiles {
-		path := p
+	for key, configuredPath := range sn.TemplateFiles {
+		path := configuredPath
 		if !filepath.IsAbs(path) && configPath != "" {
 			path = filepath.Join(filepath.Dir(configPath), path)
 		}
 		data, err := os.ReadFile(path)
 		if err != nil {
-			return nil, fmt.Errorf("reading gitlab template %s: %w", path, err)
+			return server.GitlabSender{}, fmt.Errorf("gitlab: sender %s: reading template %s: %w", label, path, err)
 		}
-		inline[k] = string(data)
-		vlog.V1("gitlab: loaded template %q from %s", k, path)
+		vlog.V1("gitlab: sender %s: loaded template %q from %s", label, key, path)
+		inline[key] = string(data)
 	}
-
-	tmpls, err := server.ParseGitlabTemplates(inline)
+	templates, err := server.ParseGitlabTemplates(inline)
 	if err != nil {
-		return nil, err
+		return server.GitlabSender{}, fmt.Errorf("gitlab: sender %s: %w", label, err)
 	}
-
-	// Compile routing rules (glob/regex/event patterns) up front so a malformed
-	// pattern fails startup rather than every matching request.
-	routes, err := server.CompileGitlabRoutes(gl.Routes)
+	compiledRoutes, err := server.CompileGitlabRoutes(routes)
 	if err != nil {
-		return nil, fmt.Errorf("gitlab routes: %w", err)
-	}
-	if len(routes) > 0 {
-		vlog.V1("gitlab: compiled %d routing rule(s)", len(routes))
+		return server.GitlabSender{}, fmt.Errorf("gitlab: sender %s: %w", label, err)
 	}
 
-	return &server.GitlabConfig{
-		DefaultChatID: gl.DefaultChatID,
-		SecretToken:   secretToken,
-		Templates:     tmpls,
-		Only:          gl.Events.Only,
-		Exclude:       gl.Events.Exclude,
-		ErrorEvents:   gl.ErrorEvents,
-		Routes:        routes,
-		Senders:       senders,
+	// Resolve the secret last: a vault: reference costs a network round-trip and
+	// its error would otherwise mask the cheaper chat/route misconfigurations
+	// checked above.
+	resolvedSecret, err := secret.Resolve(sn.Secret)
+	if err != nil {
+		return fail("resolving secret: %v", err)
+	}
+	if resolvedSecret == "" {
+		return fail("resolved secret is empty")
+	}
+
+	return server.GitlabSender{
+		Label:       label,
+		Secret:      resolvedSecret,
+		Scope:       scope,
+		Targets:     targets,
+		Only:        sn.Events.Only,
+		Exclude:     sn.Events.Exclude,
+		ErrorEvents: sn.ErrorEvents,
+		Templates:   templates,
+		Routes:      compiledRoutes,
 	}, nil
 }
 

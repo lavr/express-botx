@@ -65,28 +65,24 @@ server:
     default_chat_id: alerts
     error_states: [alerting]              # по умолчанию
   gitlab:                                   # опционально — endpoint включён ТОЛЬКО с этой секцией
-    secret: env:GITLAB_WEBHOOK_TOKEN      # сверяется с заголовком X-Gitlab-Token (literal/env:/vault:)
-    default_chat_id: dev                  # UUID или алиас (опционально)
-    events:                               # фильтр событий (опционально)
-      only:    ["merge_request.*", "pipeline.failed", "build.failed", "push"]
-      exclude: ["merge_request.update"]
-    templates:                            # переопределение шаблонов по event-ключу (опционально)
-      "merge_request.open": "🆕 {{.Title}} — {{.User}}\n{{.URL}}"
-    # template_files:                     # шаблоны из файлов (ключ → путь); ключ не может быть и там, и там
-    #   "default": ./tmpl/gitlab-default.tmpl
-    error_events: ["pipeline.failed", "build.failed"]  # доставка со status=error (опционально)
-    routes:                               # роутинг события по нескольким чатам (опционально)
-      - match:                            # селектор → паттерны (glob или /regex/); event — по event-ключу
-          project: ["group/backend/*"]
-          event:   ["merge_request"]
-          branch:  ["main", "release/*"]
-        chats: [backend-mrs, releases]    # совпало → в оба чата (объединение+дедуп)
-        stop: true                        # совпав, оборвать перебор правил
-    senders:                              # опционально — изоляция команд по своему X-Gitlab-Token
-      - secret: env:TEAM_A_GITLAB_TOKEN   # токен команды A (literal/env:/vault:)
-        chats: [team-a]                   # события по этому токену уходят ТОЛЬКО сюда
-      - secret: env:TEAM_B_GITLAB_TOKEN
-        chats: [team-b, team-b-alerts]
+    senders:                              # непустой список независимых отправителей
+      - name: backend                     # опционально; уникальное имя для логов
+        secret: env:BACKEND_GITLAB_TOKEN  # сверяется с X-Gitlab-Token
+        chats: [backend, backend-oncall]  # явный scope; опционален при routes
+        events:
+          only: ["merge_request.*", "pipeline.failed", push]
+          exclude: ["merge_request.update"]
+        error_events: ["pipeline.failed"]
+        templates:
+          "merge_request.open": "🆕 {{.Title}} — {{.User}}\n{{.URL}}"
+        # template_files:
+        #   default: ./tmpl/gitlab-default.tmpl
+        routes:
+          - match: {event: ["pipeline.failed"]}
+            chats: [backend-oncall]
+            stop: true
+          - match: {}                     # явный catch-all
+            chats: [backend]
 ```
 
 Секция `server.gitlab` (обязательна для включения эндпоинта `/api/v1/gitlab`).
@@ -95,17 +91,24 @@ server:
 про деривацию субтипов, фильтры и шаблоны — в
 [docs/integrations.md](integrations.md#gitlab-универсальный-приёмник-событий).
 
+`server.gitlab` содержит только непустой `senders`. Каждый sender
+полностью владеет своими токеном, скоупом, фильтрами, шаблонами и
+маршрутами. Поля сендера:
+
 | Поле | Описание |
 |---|---|
-| `secret` / `secret_token` | Ожидаемое значение заголовка `X-Gitlab-Token`. Ссылка `literal` / `env:VAR` / `vault:path#key`. Обязателен `secret` **или** непустой `senders` (иначе ручка осталась бы без auth). |
-| `default_chat_id` | UUID или алиас чата по умолчанию (должен существовать в `chats`). |
-| `events.only` | Allowlist event-ключей. Запись матчит полный `kind.subtype`, голый `kind` или `kind.*`. Пустой → пропускать всё. |
-| `events.exclude` | Denylist event-ключей (та же грануляция). Всегда выигрывает над `only`. |
-| `templates` | Мапа `event-ключ → inline Go-шаблон`. Переопределяет встроенные дефолты. |
-| `template_files` | Мапа `event-ключ → путь к файлу шаблона`. Один ключ нельзя задать и в `templates`, и в `template_files`. |
-| `error_events` | Список event-ключей, доставляемых с `notification.status=error` (та же грануляция матчинга). |
-| `routes` | Опциональный упорядоченный список правил роутинга. Событие уходит в чаты **всех** совпавших правил (объединение+дедуп), `stop:true` обрывает перебор. Каждое правило: `match` (селектор → паттерны glob/`/regex/`; `event` — по event-ключу), `chats` (непустой список алиасов/UUID), `stop`. Без секции — прежнее поведение (один чат). Подробнее и приоритет чатов — в [docs/integrations.md](integrations.md#роутинг-событий-по-чатам-routes). |
-| `senders` | Опциональный список дополнительных входящих токенов с жёсткой привязкой к чатам (изоляция команд). Каждый элемент: `secret`/`secret_token` (ссылка `literal`/`env:`/`vault:`, обязателен) и непустой `chats` (алиасы/UUID существующих чатов). Совпал sender-токен → событие уходит в его `chats`; `?bot`, `routes` и `default_chat_id` игнорируются. `?chat_id` работает как **фильтр внутри scope**: отсутствует → все `chats`; непустой subset → только эти чаты (эквивалентность alias↔UUID); чат вне `chats` → `403`; явно пустой (`?chat_id=`) → `400`. Глобальные `events.only/exclude`, `templates` и `error_events` применяются как обычно. Дубликаты разрезолвленных токенов (sender↔sender, sender↔`secret`) — ошибка на старте. Подробнее — в [docs/integrations.md](integrations.md#изоляция-команд-senders-несколько-токенов). |
+| `name` | Опциональное уникальное имя для логов и ошибок. |
+| `secret` | Обязательное значение `X-Gitlab-Token`: литерал, `env:VAR` или `vault:path#key`. Дубликаты разрезолвленных токенов запрещены. |
+| `chats` | Явный скоуп и цели доставки без `routes`. Если задан, все `routes[].chats` должны входить в этот скоуп. Если не задан, скоуп выводится как объединение `routes[].chats`; хотя бы один из списков должен быть непуст. |
+| `events.only` / `events.exclude` | Per-sender allowlist/denylist event-ключей; `exclude` всегда выигрывает. |
+| `templates` / `template_files` | Per-sender inline Go-шаблоны или файлы. Один event-ключ нельзя задать в обоих полях. |
+| `error_events` | Per-sender event-ключи с `notification.status=error`. |
+| `routes` | Per-sender упорядоченные all-match-правила (`match`, непустой `chats`, `stop`). При отсутствии совпадений — `200 ignored`; fallback задаётся явным последним `match: {}`. |
+
+Алиас и его UUID эквивалентны при проверке скоупа и дедупликации. В
+multi-bot-конфигурации каждая цель доставки должна быть алиасом с явным
+`bot`; raw UUID и алиас без bot binding отклоняются на старте. Подробнее — в
+[docs/integrations.md](integrations.md#изоляция-отправителей-и-скоуп-чатов).
 
 ## Переменные окружения
 
@@ -237,7 +240,7 @@ express-botx config chat list                             # покажет (defa
   Резолв конкретного чата/бота, если он не удался, — пер-чатовая ошибка в
   `errors[]` (а не общий `400`); если упали все чаты — `502`.
 - `/alertmanager`, `/grafana`: `?chat_id=` → `default_chat_id` из конфига вебхука → чат по умолчанию → единственный чат → пустой набор даёт `400`; пер-чатовые сбои — в `errors[]`, всё упало — `502`
-- `/gitlab`: `?chat_id=` → `routes` (все совпавшие правила, объединение+дедуп) → `default_chat_id` → чат по умолчанию → единственный чат → `200 {ignored}`; при совпадении sender-токена (`server.gitlab.senders`) цели — `chats` этого sender'а, а `?chat_id=` фильтрует внутри них (subset → только они; вне scope → `403`; явно пустой → `400`), `?bot`/`routes`/`default_chat_id` игнорируются
+- `/gitlab`: без query используются `routes` выбранного sender'а или все его `chats`, если routes нет; `?chat_id=` обходит routes и выбирает subset внутри скоупа (alias/UUID эквивалентны; вне scope **или** in-scope алиас с конфликтующим bot binding → `403`; пустой → `400`); несовпавшие routes → `200 {ignored, reason:"no route matched"}` (фильтр / пустой рендер дают `reason:"event filtered"` / `"empty message"`); `?bot=` всегда игнорируется
 
 Ответ всех эндпоинтов — единый `MultiSendResponse` (см. [Мульти-чат](integrations.md#мульти-чат-и-единый-ответ-multisendresponse)).
 

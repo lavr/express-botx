@@ -734,9 +734,10 @@ express-botx config validate --format json
 
 Проверки:
 - Неизвестные ключи в YAML (предупреждения)
-- Обязательные поля: `host` и `id` для ботов, `secret` или `token` (но не оба); для `server.gitlab` — `secret`/`secret_token` или непустой `senders` (у каждого sender'а — секрет и непустой `chats`; байт-идентичные значения токенов — одинаковые литералы или одинаковые `env:`/`vault:` ссылки — не дублируются, разные ссылки на одно значение проверяются на старте `serve`)
+- Обязательные поля: `host` и `id` для ботов, `secret` или `token` (но не оба); для `server.gitlab` — непустой `senders`, у каждого sender'а — `secret` и хотя бы один из `chats`/`routes`; байт-идентичные токены не дублируются, а разные ссылки на одно значение проверяются на старте `serve`
 - Форматы: UUID для `id` и `chat_id`, длительности (`timeout`, `retry_backoff`), допустимые enum-значения (`cache.type`, `queue.driver`, `routing_mode`)
-- Перекрёстные ссылки: `bot` в чате ссылается на существующего бота, не более одного чата по умолчанию, `default_chat_id` в alertmanager/grafana/gitlab и чаты в `server.gitlab.routes`/`senders` ссылаются на существующие алиасы
+- Перекрёстные ссылки: `bot` в чате ссылается на существующего бота, не более одного чата по умолчанию, `default_chat_id` в alertmanager/grafana и чаты в `server.gitlab.senders[].chats`/`routes[].chats` ссылаются на существующие алиасы
+- GitLab per-sender (оффлайн-зеркало проверок старта `serve`): алиас без `id`, две цели, резолвящиеся в один UUID, `route[].chats` вне скоупа сендера, конфликт bot binding между route-алиасом и целью скоупа — ошибки; raw UUID или алиас без `bot` в multi-bot — предупреждения (реальный режим зависит от `--bot`/кредов на старте)
 
 Флаги:
 

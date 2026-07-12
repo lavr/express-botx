@@ -420,6 +420,7 @@ func TestEvaluateRoutes(t *testing.T) {
 		routes      []compiledRoute
 		wantChats   []string
 		wantMatched bool
+		wantRules   []int
 	}{
 		{
 			name:        "no routes matched",
@@ -432,6 +433,7 @@ func TestEvaluateRoutes(t *testing.T) {
 			routes:      []compiledRoute{{conds: []compiledCondition{condProject("group/backend")}, chats: []string{"c1"}}},
 			wantChats:   []string{"c1"},
 			wantMatched: true,
+			wantRules:   []int{0},
 		},
 		{
 			name: "multiple matches union chats",
@@ -441,6 +443,7 @@ func TestEvaluateRoutes(t *testing.T) {
 			},
 			wantChats:   []string{"c1", "c2"},
 			wantMatched: true,
+			wantRules:   []int{0, 1},
 		},
 		{
 			name: "dedup preserves first-seen order",
@@ -450,6 +453,7 @@ func TestEvaluateRoutes(t *testing.T) {
 			},
 			wantChats:   []string{"c1", "c2", "c3"},
 			wantMatched: true,
+			wantRules:   []int{0, 1},
 		},
 		{
 			name: "stop halts scan after collecting its chats",
@@ -459,6 +463,7 @@ func TestEvaluateRoutes(t *testing.T) {
 			},
 			wantChats:   []string{"c1"},
 			wantMatched: true,
+			wantRules:   []int{0},
 		},
 		{
 			name: "non-matching rule does not stop scan",
@@ -468,22 +473,27 @@ func TestEvaluateRoutes(t *testing.T) {
 			},
 			wantChats:   []string{"c2"},
 			wantMatched: true,
+			wantRules:   []int{1},
 		},
 		{
 			name:        "catch-all matches",
 			routes:      []compiledRoute{{chats: []string{"c1"}}},
 			wantChats:   []string{"c1"},
 			wantMatched: true,
+			wantRules:   []int{0},
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			gotChats, gotMatched := evaluateRoutes(tt.routes, view)
+			gotChats, gotMatched, gotRules := evaluateRoutes(tt.routes, view)
 			if gotMatched != tt.wantMatched {
 				t.Errorf("matched = %v, want %v", gotMatched, tt.wantMatched)
 			}
 			if !reflect.DeepEqual(gotChats, tt.wantChats) {
 				t.Errorf("chats = %v, want %v", gotChats, tt.wantChats)
+			}
+			if !reflect.DeepEqual(gotRules, tt.wantRules) {
+				t.Errorf("matched rules = %v, want %v", gotRules, tt.wantRules)
 			}
 		})
 	}
@@ -598,9 +608,12 @@ func TestCompileGitlabRoutesGlobRegexEvent(t *testing.T) {
 			"object_attributes": map[string]any{"target_branch": "release-2"},
 		},
 	}
-	chats, matched := evaluateRoutes(routes, view)
+	chats, matched, matchedRules := evaluateRoutes(routes, view)
 	if !matched {
 		t.Fatal("expected a match")
+	}
+	if !reflect.DeepEqual(matchedRules, []int{0}) {
+		t.Errorf("matched rules = %v, want [0]", matchedRules)
 	}
 	// stop:true on route0 halts the scan before the catch-all contributes.
 	if !reflect.DeepEqual(chats, []string{"backend"}) {

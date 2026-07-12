@@ -1,127 +1,90 @@
 # GitLab notifications (universal endpoint)
 
-Example configuration and payloads for the `/api/v1/gitlab` webhook endpoint,
-which forwards **any** GitLab group/project event to an eXpress chat. The payload
-is decoded generically and reduced to an event key (`kind` or `kind.subtype`),
-then filtered and rendered by a per-event template registry.
+The `/api/v1/gitlab` endpoint accepts any GitLab group/project webhook. Every
+accepted `X-Gitlab-Token` selects one independent entry in
+`server.gitlab.senders`; that sender owns its chat scope, event filters,
+templates, error events, and routes.
 
 ## Files
 
-- `config.yaml` — express-botx config enabling `server.gitlab` with an
-  `only`/`exclude` filter, per-event `templates`, and `error_events` (single
-  chat via `default_chat_id`).
-- `config-routing.yaml` — same endpoint with `server.gitlab.routes`: one event
-  fans out to multiple chats by project/event/branch (all-match + `stop`, with a
-  `default_chat_id` fallback).
-- `config-senders.yaml` — same endpoint with `server.gitlab.senders`: two teams
-  with their own `X-Gitlab-Token` values, each isolated to its own chats, plus
-  the shared default `secret` (mixed mode).
+- `config.yaml` — minimal single-sender configuration.
+- `config-routing.yaml` — two isolated teams with explicit chat scopes,
+  sender-specific filters/templates/error events, ordered routes, and explicit
+  catch-all routes.
 - `webhook-merge-request-open.json` — MR opened (`merge_request.open`).
 - `webhook-merge-request-merge.json` — MR merged (`merge_request.merge`).
 - `webhook-note.json` — comment on an MR (`note.MergeRequest`).
-- `webhook-pipeline-failed.json` — failed pipeline (`pipeline.failed`, delivered
-  with `status=error`).
+- `webhook-pipeline-failed.json` — failed pipeline (`pipeline.failed`).
 - `webhook-push.json` — branch push (`push`).
 - `webhook-issue-open.json` — issue opened (`issue.open`).
 
-## Try it locally
+## Try the minimal example
+
+The example is self-contained; provide the bot, chat, and webhook credentials,
+then run:
+
+```bash
+export BOT_HOST=express.company.ru \
+  BOT_ID=00000000-0000-0000-0000-000000000001 \
+  BOT_SECRET=replace-me \
+  DEV_CHAT_ID=00000000-0000-0000-0000-000000000002 \
+  GITLAB_WEBHOOK_TOKEN=my-secret-token
+express-botx serve --config config.yaml &
+
+curl -X POST "http://localhost:8080/api/v1/gitlab" \
+  -H "X-Gitlab-Token: my-secret-token" \
+  -H "Content-Type: application/json" \
+  --data @webhook-merge-request-open.json
+```
+
+## Try the routing example
+
+`config-routing.yaml` uses separate tokens for backend and frontend. A sender
+can deliver only to its own explicit `chats` scope. Routes select a subset of
+that scope; the final `match: {}` rule is the explicit fallback. Without a
+matching route, express-botx returns `200` with `ignored: true` and
+`reason: "no route matched"`.
 
 ```bash
 export BOT_HOST=express.company.ru BOT_ID=... BOT_SECRET=... \
-       DEV_CHAT_ID=... GITLAB_WEBHOOK_TOKEN=my-secret-token
+  BACKEND_CHAT_ID=... BACKEND_MRS_CHAT_ID=... BACKEND_ONCALL_CHAT_ID=... \
+  FRONTEND_CHAT_ID=... FRONTEND_ONCALL_CHAT_ID=... \
+  BACKEND_GITLAB_TOKEN=backend-token FRONTEND_GITLAB_TOKEN=frontend-token
 
-express-botx serve --config config.yaml &
+express-botx serve --config config-routing.yaml &
 
-for f in webhook-merge-request-open webhook-note webhook-pipeline-failed \
-         webhook-push webhook-issue-open; do
-  curl -X POST "http://localhost:8080/api/v1/gitlab" \
-    -H "X-Gitlab-Token: my-secret-token" \
-    -H "Content-Type: application/json" \
-    --data @"$f.json"
-  echo
-done
+# Backend MR: selected by the backend sender's routes.
+curl -X POST "http://localhost:8080/api/v1/gitlab" \
+  -H "X-Gitlab-Token: backend-token" \
+  -H "Content-Type: application/json" \
+  --data @webhook-merge-request-open.json
+
+# Query selection bypasses routes but remains inside the authenticated scope.
+curl -X POST "http://localhost:8080/api/v1/gitlab?chat_id=frontend-oncall" \
+  -H "X-Gitlab-Token: frontend-token" \
+  -H "Content-Type: application/json" \
+  --data @webhook-pipeline-failed.json
+
+# A backend token cannot target a frontend chat: 403, with nothing delivered.
+curl -X POST "http://localhost:8080/api/v1/gitlab?chat_id=frontend" \
+  -H "X-Gitlab-Token: backend-token" \
+  -H "Content-Type: application/json" \
+  --data @webhook-push.json
 ```
 
-`merge_request.update` is in `exclude`, so a payload with `"action":"update"`
-is answered with `200 OK` and `{"ok":true,"ignored":true,"event":"merge_request.update"}`
-without sending a message.
+An explicitly empty `?chat_id=` returns `400`. Aliases and their canonical UUIDs
+are equivalent for scope checks. `?bot=` is always ignored; in multi-bot mode,
+use chat aliases that have a `bot` binding.
 
 ## GitLab webhook setup
 
-In a group or project: **Settings → Webhooks → Add new webhook**
+In a group or project, open **Settings → Webhooks → Add new webhook**:
 
-- **URL:** `http://express-botx:8080/api/v1/gitlab` (optionally `?chat_id=<alias>`)
-- **Secret token:** same value as `server.gitlab.secret` — or, when using
-  `server.gitlab.senders`, your team's own sender token
-  (see [Per-team tokens](#per-team-tokens-senders))
-- **Triggers:** enable whichever events you want — or all of them, since filtering
-  now happens in express-botx via `events.only` / `events.exclude`.
+- **URL:** `http://express-botx:8080/api/v1/gitlab` (optionally with an
+  in-scope `?chat_id=<alias>`).
+- **Secret token:** the matching `server.gitlab.senders[].secret` value.
+- **Triggers:** any desired events; the selected sender's `events.only` and
+  `events.exclude` apply additional filtering in express-botx.
 
-## Event keys and subtypes
-
-The event key is `kind` or `kind.subtype`:
-
-| `object_kind` | subtype from | example key |
-|---|---|---|
-| `merge_request`, `issue` | `object_attributes.action` | `merge_request.open` |
-| `note` | `object_attributes.noteable_type` | `note.MergeRequest` |
-| `pipeline` | `object_attributes.status` | `pipeline.failed` |
-| `build` (job) | `build_status` | `build.failed` |
-| `push`, `tag_push` | — | `push` |
-
-See [docs/integrations.md](../../docs/integrations.md#gitlab-универсальный-приёмник-событий)
-for the filter rules, template registry, template variables/helpers, and
-`error_events`.
-
-## Routing one event to several chats
-
-`config-routing.yaml` adds `server.gitlab.routes` — an ordered rule list that
-fans a single event out to one or more chats by project, event key, and branch
-(glob or `/regex/` patterns). All matching rules contribute their chats (unioned
-and de-duplicated); a rule with `stop: true` ends the scan; unmatched events fall
-back to `default_chat_id`. Delivery is best-effort: the response is always a
-`MultiSendResponse` — `200` with `{"ok":true,"results":[…],"errors":[…]}` once at
-least one chat is delivered, `502` if they all fail. A comma-separated
-`?chat_id=a,b` fans out the same way. See the
-[routing section](../../docs/integrations.md#роутинг-событий-по-чатам-routes)
-and [Мульти-чат](../../docs/integrations.md#мульти-чат-и-единый-ответ-multisendresponse)
-for the full model, response format and chat-selection priority.
-
-## Per-team tokens (senders)
-
-`config-senders.yaml` adds `server.gitlab.senders` — extra incoming
-`X-Gitlab-Token` values, each hard-bound to its own chats. A request
-authenticated with a sender token is delivered to that sender's chats (`?bot=`,
-`routes` and `default_chat_id` are ignored), so teams sharing one endpoint
-cannot post into each other's chats or as another bot. The global `events`
-filter, templates and `error_events` apply as usual; the default `secret` keeps
-its ordinary behaviour and may be omitted when only senders are used. Token
-values are `env:`/`vault:` references — the shared YAML never contains plaintext
-secrets, and duplicate resolved tokens fail at startup.
-
-`?chat_id=` is honoured for sender tokens as a **filter within** the allowed
-chats: omit it to reach all of the sender's chats, or pass a subset to target
-only those (aliases and the UUIDs they resolve to are equivalent). A chat
-outside the sender's scope is refused with `403`, and an explicitly-empty
-`?chat_id=` is a `400` — in both cases nothing is sent:
-
-```bash
-# team-b token -> both team-b chats
-curl -X POST "http://localhost:8080/api/v1/gitlab" \
-  -H "X-Gitlab-Token: <team-b token>" -H "Content-Type: application/json" \
-  -d @webhook-merge-request-open.json
-
-# team-b token, only the alerts chat (subset of scope)
-curl -X POST "http://localhost:8080/api/v1/gitlab?chat_id=team-b-alerts" \
-  -H "X-Gitlab-Token: <team-b token>" -H "Content-Type: application/json" \
-  -d @webhook-pipeline-failed.json
-
-# team-b token targeting team-a -> 403 Forbidden, nothing sent
-curl -X POST "http://localhost:8080/api/v1/gitlab?chat_id=team-a" \
-  -H "X-Gitlab-Token: <team-b token>" -H "Content-Type: application/json" \
-  -d @webhook-push.json
-```
-
-See the
-[senders section](../../docs/integrations.md#изоляция-команд-senders-несколько-токенов)
-for details.
+See [the GitLab integration documentation](../../docs/integrations.md#gitlab-универсальный-приёмник-событий)
+for the complete sender, routing, template, and response semantics.

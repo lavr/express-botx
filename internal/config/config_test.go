@@ -379,6 +379,25 @@ func TestRequireChatID_SingleAlias(t *testing.T) {
 	}
 }
 
+// Auto-selecting an alias with no id must error like the explicit path, not
+// silently set ChatID to "" and fail later with an opaque API error.
+func TestRequireChatID_AutoSelectEmptyID(t *testing.T) {
+	// Single-alias branch.
+	single := &Config{Chats: map[string]ChatConfig{"ops": {Bot: "main"}}}
+	if err := single.RequireChatID(); err == nil || !strings.Contains(err.Error(), `chat alias "ops" has no id`) {
+		t.Fatalf("single-alias error = %v, want no-id error", err)
+	}
+
+	// Default-chat branch (multiple aliases, one marked default).
+	def := &Config{Chats: map[string]ChatConfig{
+		"ops":   {Bot: "main", Default: true},
+		"other": {ID: "00000000-0000-0000-0000-000000000002"},
+	}}
+	if err := def.RequireChatID(); err == nil || !strings.Contains(err.Error(), `chat alias "ops" has no id`) {
+		t.Fatalf("default-chat error = %v, want no-id error", err)
+	}
+}
+
 func TestLoad_NoCacheFlag(t *testing.T) {
 	dir := t.TempDir()
 	cfgPath := filepath.Join(dir, "config.yaml")
@@ -2690,693 +2709,705 @@ server:
 	}
 }
 
-func TestValidate_GitlabDefaultChatID(t *testing.T) {
-	rawYAML := []byte(`
-bots:
-  main:
-    host: h
-    id: 00000000-0000-0000-0000-000000000001
-    secret: s
-chats:
-  alerts:
-    id: 00000000-0000-0000-0000-000000000003
+func findValidationResult(t *testing.T, raw []byte, path string) ValidationResult {
+	t.Helper()
+	var cfg Config
+	if err := yaml.Unmarshal(raw, &cfg); err != nil {
+		t.Fatal(err)
+	}
+	for _, result := range cfg.Validate(raw) {
+		if result.Path == path {
+			return result
+		}
+	}
+	t.Fatalf("validation result %q not found", path)
+	return ValidationResult{}
+}
+
+func TestValidate_GitlabSendersOnlySchema(t *testing.T) {
+	raw := []byte(`
 server:
   gitlab:
-    secret: tok
-    default_chat_id: missing_chat
+    senders:
+      - name: dev
+        secret: token
+        chats: [alerts]
+        events: {only: [push]}
+        routes:
+          - match: {event: [push]}
+            chats: [alerts]
+chats:
+  alerts: 00000000-0000-0000-0000-000000000001
 `)
 	var cfg Config
-	if err := yaml.Unmarshal(rawYAML, &cfg); err != nil {
-		t.Fatalf("unmarshal: %v", err)
+	if err := yaml.Unmarshal(raw, &cfg); err != nil {
+		t.Fatal(err)
 	}
-	results := cfg.Validate(rawYAML)
-
-	found := false
-	for _, r := range results {
-		if r.Path == "server.gitlab.default_chat_id" && r.Level == ValidationError {
-			found = true
-		}
-	}
-	if !found {
-		t.Error("expected error for gitlab.default_chat_id referencing unknown chat")
-	}
-
-	// A valid alias reference should not raise an error.
-	rawOK := []byte(`
-bots:
-  main:
-    host: h
-    id: 00000000-0000-0000-0000-000000000001
-    secret: s
-chats:
-  alerts:
-    id: 00000000-0000-0000-0000-000000000003
-server:
-  gitlab:
-    secret: tok
-    default_chat_id: alerts
-`)
-	var cfgOK Config
-	if err := yaml.Unmarshal(rawOK, &cfgOK); err != nil {
-		t.Fatalf("unmarshal: %v", err)
-	}
-	for _, r := range cfgOK.Validate(rawOK) {
-		if r.Path == "server.gitlab.default_chat_id" && r.Level == ValidationError {
-			t.Errorf("unexpected error for valid gitlab default_chat_id: %s", r.Message)
-		}
-		// server.gitlab and its keys must be registered in knownKeys, so no
-		// spurious "unknown key" warnings should surface for this block.
-		if r.Level == ValidationWarning && strings.Contains(r.Message, "unknown key") &&
-			strings.HasPrefix(r.Path, "server.gitlab") {
-			t.Errorf("unexpected unknown-key warning for %s: %s", r.Path, r.Message)
+	for _, result := range cfg.Validate(raw) {
+		if result.Level == ValidationError || strings.Contains(result.Path, "server.gitlab.senders") {
+			t.Fatalf("unexpected validation result: %+v", result)
 		}
 	}
 }
 
-func TestValidate_GitlabEventKeySyntax(t *testing.T) {
-	tests := []struct {
-		name      string
-		yamlBody  string
-		wantPath  string
-		wantError bool
-	}{
-		{
-			name: "bad key in events.only",
-			yamlBody: `
-    events:
-      only: ["merge_request.open", "bad..key"]`,
-			wantPath:  "server.gitlab.events.only",
-			wantError: true,
-		},
-		{
-			name: "bad key in events.exclude",
-			yamlBody: `
-    events:
-      exclude: ["push", "no spaces allowed"]`,
-			wantPath:  "server.gitlab.events.exclude",
-			wantError: true,
-		},
-		{
-			name: "bad key in error_events",
-			yamlBody: `
-    error_events: ["pipeline.failed", ".leadingdot"]`,
-			wantPath:  "server.gitlab.error_events",
-			wantError: true,
-		},
-		{
-			name: "bad key in templates",
-			yamlBody: `
-    templates:
-      "merge_request.*": "ok"
-      "bad key": "x"`,
-			wantPath:  "server.gitlab.templates.bad key",
-			wantError: true,
-		},
-		{
-			name: "valid keys of all forms",
-			yamlBody: `
-    events:
-      only: ["push", "merge_request.open", "merge_request.*"]
-      exclude: ["tag_push"]
-    error_events: ["pipeline.failed", "build.*"]
-    templates:
-      "note.MergeRequest": "x"`,
-			wantError: false,
-		},
+func TestValidate_GitlabLegacyTopLevelMessages(t *testing.T) {
+	for field, want := range map[string]string{
+		"secret":          "moved inside senders[]",
+		"events":          "moved inside senders[]",
+		"templates":       "moved inside senders[]",
+		"template_files":  "moved inside senders[]",
+		"error_events":    "moved inside senders[]",
+		"routes":          "moved inside senders[]",
+		"default_chat_id": "removed",
+	} {
+		raw := []byte("server:\n  gitlab:\n    " + field + ": value\n")
+		result := findValidationResult(t, raw, "server.gitlab."+field)
+		if !strings.Contains(result.Message, want) {
+			t.Fatalf("%s message = %q, want %q", field, result.Message, want)
+		}
 	}
+}
 
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			rawYAML := []byte(`
-bots:
-  main:
-    host: h
-    id: 00000000-0000-0000-0000-000000000001
-    secret: s
-chats:
-  alerts:
-    id: 00000000-0000-0000-0000-000000000003
+func TestValidate_GitlabSecretTokenIsUnknown(t *testing.T) {
+	raw := []byte("server:\n  gitlab:\n    senders:\n      - secret_token: old\n        chats: [alerts]\n")
+	result := findValidationResult(t, raw, "server.gitlab.senders[0].secret_token")
+	if result.Message != `unknown key "secret_token"` {
+		t.Fatalf("message = %q", result.Message)
+	}
+}
+
+func TestValidate_GitlabPerSenderPaths(t *testing.T) {
+	raw := []byte(`
 server:
   gitlab:
-    secret: tok
-    default_chat_id: alerts` + tc.yamlBody + "\n")
-			var cfg Config
-			if err := yaml.Unmarshal(rawYAML, &cfg); err != nil {
-				t.Fatalf("unmarshal: %v", err)
-			}
-			results := cfg.Validate(rawYAML)
+    senders:
+      - {name: ok, secret: one, chats: [alerts]}
+      - name: broken
+        secret: two
+        chats: [alerts]
+        events: {only: ["bad.key.extra"]}
+chats:
+  alerts: 00000000-0000-0000-0000-000000000001
+`)
+	result := findValidationResult(t, raw, "server.gitlab.senders[1].events.only")
+	if !strings.Contains(result.Message, `sender "broken"`) {
+		t.Fatalf("message lacks sender name: %q", result.Message)
+	}
+}
 
-			var gotErr bool
-			for _, r := range results {
-				if r.Level != ValidationError {
-					continue
-				}
-				if strings.Contains(r.Message, "invalid event key") {
-					gotErr = true
-					if tc.wantPath != "" && r.Path != tc.wantPath {
-						t.Errorf("event-key error path = %q, want %q (msg: %s)", r.Path, tc.wantPath, r.Message)
-					}
-				}
-			}
-			if gotErr != tc.wantError {
-				t.Errorf("event-key error present = %v, want %v; results: %+v", gotErr, tc.wantError, results)
+// A chat alias with no id is rejected once by the general required-fields rule,
+// protecting every consumer (here: an alertmanager default_chat_id that only
+// cross-references alias existence).
+func TestValidate_ChatIDRequired(t *testing.T) {
+	raw := []byte(`
+server:
+  alertmanager:
+    default_chat_id: ops
+chats:
+  ops: {bot: main}
+bots:
+  main: {id: 00000000-0000-0000-0000-000000000001, host: h, secret: s}
+`)
+	result := findValidationResult(t, raw, "chats.ops.id")
+	if result.Level != ValidationError || result.Message != "id is required" {
+		t.Fatalf("result = %+v, want id-required error", result)
+	}
+}
+
+// Byte-identical sender secrets are guaranteed duplicates and must be caught
+// offline, before serve startup fails on the resolved values.
+func TestValidate_GitlabDuplicateSecrets(t *testing.T) {
+	raw := []byte(`
+server:
+  gitlab:
+    senders:
+      - {name: dev, secret: same, chats: [alerts]}
+      - {name: ops, secret: same, chats: [alerts]}
+chats:
+  alerts: 00000000-0000-0000-0000-000000000001
+`)
+	result := findValidationResult(t, raw, "server.gitlab.senders[1].secret")
+	if !strings.Contains(result.Message, "secret duplicates server.gitlab.senders[0]") {
+		t.Fatalf("message = %q, want duplicate-secret error", result.Message)
+	}
+}
+
+// Offline validation must mirror the serve-startup rule that route chats
+// resolve into the sender's explicit chats scope, for the offline-decidable
+// alias/UUID cases.
+func TestValidate_GitlabRouteOutsideScope(t *testing.T) {
+	const alertsID = "00000000-0000-0000-0000-000000000001"
+	raw := []byte(`
+server:
+  gitlab:
+    senders:
+      - name: dev
+        secret: token
+        chats: [alerts]
+        routes:
+          - match: {event: [push]}
+            chats: [ops]
+chats:
+  alerts: ` + alertsID + `
+  ops: 00000000-0000-0000-0000-000000000002
+`)
+	result := findValidationResult(t, raw, "server.gitlab.senders[0].routes[0].chats")
+	if !strings.Contains(result.Message, `delivery target "ops" is outside sender scope`) {
+		t.Fatalf("message = %q, want out-of-scope error", result.Message)
+	}
+
+	// A route referencing the scope chat by raw UUID stays in scope.
+	inScope := []byte(`
+server:
+  gitlab:
+    senders:
+      - name: dev
+        secret: token
+        chats: [alerts]
+        routes:
+          - match: {event: [push]}
+            chats: [` + alertsID + `]
+chats:
+  alerts: ` + alertsID + `
+`)
+	var cfg Config
+	if err := yaml.Unmarshal(inScope, &cfg); err != nil {
+		t.Fatal(err)
+	}
+	for _, r := range cfg.Validate(inScope) {
+		if r.Level == ValidationError {
+			t.Fatalf("unexpected validation error: %+v", r)
+		}
+	}
+}
+
+// Offline validation mirrors the serve-startup delivery-target rules: empty-id
+// aliases, duplicate canonical UUIDs (both scope shapes), and route/target
+// bot-binding conflicts are all caught by `config validate`.
+func TestValidate_GitlabOfflineMirrorsServeRules(t *testing.T) {
+	const (
+		id1 = "00000000-0000-0000-0000-000000000001"
+		id2 = "00000000-0000-0000-0000-000000000002"
+	)
+	tests := []struct {
+		name     string
+		raw      string
+		wantPath string
+		wantMsg  string
+	}{
+		{
+			// An empty-id alias is flagged once by the general chats.<name>.id
+			// required rule (validateRequiredFields), not per gitlab reference.
+			name: "empty-id alias",
+			raw: `
+server:
+  gitlab:
+    senders:
+      - {name: dev, secret: token, chats: [alerts]}
+chats:
+  alerts: {bot: main}
+bots:
+  main: {id: ` + id1 + `, host: h, secret: s}
+`,
+			wantPath: "chats.alerts.id",
+			wantMsg:  "id is required",
+		},
+		{
+			name: "alias and raw UUID resolve to one chat",
+			raw: `
+server:
+  gitlab:
+    senders:
+      - {name: dev, secret: token, chats: [alerts, ` + id1 + `]}
+chats:
+  alerts: ` + id1 + `
+`,
+			wantPath: "server.gitlab.senders[0].chats[1]",
+			wantMsg:  `delivery targets "alerts" and "` + id1 + `" resolve to the same chat UUID`,
+		},
+		{
+			name: "routes-only duplicate canonical targets",
+			raw: `
+server:
+  gitlab:
+    senders:
+      - name: dev
+        secret: token
+        routes:
+          - {match: {event: [push]}, chats: [alerts]}
+          - {match: {event: [tag_push]}, chats: [` + id1 + `]}
+chats:
+  alerts: ` + id1 + `
+`,
+			wantPath: "server.gitlab.senders[0].routes[1].chats",
+			wantMsg:  "resolve to the same chat UUID",
+		},
+		{
+			name: "route alias bot conflicts with scope target",
+			raw: `
+server:
+  gitlab:
+    senders:
+      - name: dev
+        secret: token
+        chats: [alerts-dev]
+        routes:
+          - {match: {event: [push]}, chats: [alerts-ops]}
+chats:
+  alerts-dev: {id: ` + id1 + `, bot: dev}
+  alerts-ops: {id: ` + id1 + `, bot: ops}
+bots:
+  dev: {id: ` + id2 + `, host: h, secret: s}
+  ops: {id: 00000000-0000-0000-0000-000000000003, host: h, secret: s}
+`,
+			wantPath: "server.gitlab.senders[0].routes[0].chats",
+			wantMsg:  `"alerts-ops" is bound to bot "ops" but scope target "alerts-dev" is bound to bot "dev"`,
+		},
+		{
+			// The bot-conflict is deterministic against the decidable scope
+			// entry (alerts-dev) even though a sibling scope target (ops) has an
+			// undecidable secret-ref id, so validate must still catch it.
+			name: "route bot conflict with undecidable sibling scope target",
+			raw: `
+server:
+  gitlab:
+    senders:
+      - name: dev
+        secret: token
+        chats: [ops, alerts-dev]
+        routes:
+          - {match: {event: [push]}, chats: [alerts-ops]}
+chats:
+  ops:        {id: env:OPS_CHAT, bot: dev}
+  alerts-dev: {id: ` + id1 + `, bot: dev}
+  alerts-ops: {id: ` + id1 + `, bot: ops}
+bots:
+  dev: {id: ` + id2 + `, host: h, secret: s}
+  ops: {id: 00000000-0000-0000-0000-000000000003, host: h, secret: s}
+`,
+			wantPath: "server.gitlab.senders[0].routes[0].chats",
+			wantMsg:  `"alerts-ops" is bound to bot "ops" but scope target "alerts-dev" is bound to bot "dev"`,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := findValidationResult(t, []byte(tt.raw), tt.wantPath)
+			if !strings.Contains(result.Message, tt.wantMsg) {
+				t.Fatalf("message = %q, want containing %q", result.Message, tt.wantMsg)
 			}
 		})
 	}
 }
 
-func TestValidate_GitlabTemplateKeyOverlap(t *testing.T) {
-	rawYAML := []byte(`
-bots:
-  main:
-    host: h
-    id: 00000000-0000-0000-0000-000000000001
-    secret: s
-chats:
-  alerts:
-    id: 00000000-0000-0000-0000-000000000003
+// Multi-bot delivery rules cannot be offline errors (whether serve runs
+// multi-bot depends on --bot and runtime credentials), so validation warns.
+func TestValidate_GitlabMultiBotWarnings(t *testing.T) {
+	const (
+		id1 = "00000000-0000-0000-0000-000000000001"
+		id2 = "00000000-0000-0000-0000-000000000002"
+	)
+	raw := []byte(`
 server:
   gitlab:
-    secret: tok
-    default_chat_id: alerts
-    templates:
-      "merge_request.open": "inline"
-    template_files:
-      "merge_request.open": ./tmpl/mr.tmpl
+    senders:
+      - {name: dev, secret: token, chats: [unbound, ` + id1 + `]}
+chats:
+  unbound: ` + id2 + `
+bots:
+  a: {id: 00000000-0000-0000-0000-000000000003, host: h, secret: s}
+  b: {id: 00000000-0000-0000-0000-000000000004, host: h, secret: s}
 `)
-	var cfg Config
-	if err := yaml.Unmarshal(rawYAML, &cfg); err != nil {
-		t.Fatalf("unmarshal: %v", err)
+	aliasWarn := findValidationResult(t, raw, "server.gitlab.senders[0].chats[0]")
+	if aliasWarn.Level != ValidationWarning || !strings.Contains(aliasWarn.Message, "no bot binding") {
+		t.Fatalf("alias warning = %+v", aliasWarn)
 	}
-	found := false
-	for _, r := range cfg.Validate(rawYAML) {
-		if r.Level == ValidationError && strings.Contains(r.Message, "defined in both templates and template_files") {
-			found = true
-			if r.Path != "server.gitlab.template_files.merge_request.open" {
-				t.Errorf("overlap error path = %q", r.Path)
+	uuidWarn := findValidationResult(t, raw, "server.gitlab.senders[0].chats[1]")
+	if uuidWarn.Level != ValidationWarning || !strings.Contains(uuidWarn.Message, "raw chat UUID") {
+		t.Fatalf("uuid warning = %+v", uuidWarn)
+	}
+}
+
+// The multi-bot binding warning is decidable from the alias bot binding alone,
+// so it must fire even when the chat id is a secret reference (undecidable
+// offline) — and must not duplicate when the same chat is listed twice.
+func TestValidate_GitlabMultiBotWarningSecretRefAndDedup(t *testing.T) {
+	countWarnings := func(raw []byte, path string) int {
+		var cfg Config
+		if err := yaml.Unmarshal(raw, &cfg); err != nil {
+			t.Fatal(err)
+		}
+		n := 0
+		for _, r := range cfg.Validate(raw) {
+			if r.Path == path && r.Level == ValidationWarning && strings.Contains(r.Message, "no bot binding") {
+				n++
 			}
 		}
-	}
-	if !found {
-		t.Error("expected error for key defined in both templates and template_files")
+		return n
 	}
 
-	// Disjoint keys must not trigger the overlap error.
-	rawOK := []byte(`
-bots:
-  main:
-    host: h
-    id: 00000000-0000-0000-0000-000000000001
-    secret: s
-chats:
-  alerts:
-    id: 00000000-0000-0000-0000-000000000003
+	// Secret-ref id, no bot binding: warns despite the undecidable id.
+	secretRef := []byte(`
 server:
   gitlab:
-    secret: tok
-    default_chat_id: alerts
-    templates:
-      "merge_request.open": "inline"
-    template_files:
-      "default": ./tmpl/default.tmpl
+    senders:
+      - {name: dev, secret: token, chats: [team]}
+chats:
+  team: {id: env:TEAM_CHAT}
+bots:
+  a: {id: 00000000-0000-0000-0000-000000000003, host: h, secret: s}
+  b: {id: 00000000-0000-0000-0000-000000000004, host: h, secret: s}
 `)
-	var cfgOK Config
-	if err := yaml.Unmarshal(rawOK, &cfgOK); err != nil {
-		t.Fatalf("unmarshal: %v", err)
+	if n := countWarnings(secretRef, "server.gitlab.senders[0].chats[0]"); n != 1 {
+		t.Fatalf("secret-ref warnings = %d, want 1", n)
 	}
-	for _, r := range cfgOK.Validate(rawOK) {
-		if r.Level == ValidationError && strings.Contains(r.Message, "defined in both") {
-			t.Errorf("unexpected overlap error for disjoint keys: %s", r.Message)
-		}
+
+	// The same chat listed twice warns once, not per occurrence.
+	dup := []byte(`
+server:
+  gitlab:
+    senders:
+      - name: dev
+        secret: token
+        routes:
+          - {match: {event: [push]}, chats: [team, team]}
+chats:
+  team: 00000000-0000-0000-0000-000000000001
+bots:
+  a: {id: 00000000-0000-0000-0000-000000000003, host: h, secret: s}
+  b: {id: 00000000-0000-0000-0000-000000000004, host: h, secret: s}
+`)
+	if n := countWarnings(dup, "server.gitlab.senders[0].routes[0].chats"); n != 1 {
+		t.Fatalf("duplicate-reference warnings = %d, want 1", n)
 	}
 }
 
-func TestValidate_GitlabTemplateCatchAllAmbiguity(t *testing.T) {
-	// "pipeline" and "pipeline.*" are equivalent catch-alls; defining both
-	// (across the union of templates and template_files) is ambiguous.
-	rawYAML := []byte(`
-bots:
-  main:
-    host: h
-    id: 00000000-0000-0000-0000-000000000001
-    secret: s
-chats:
-  alerts:
-    id: 00000000-0000-0000-0000-000000000003
-server:
-  gitlab:
-    secret: tok
-    default_chat_id: alerts
-    templates:
-      "pipeline": "bare"
-    template_files:
-      "pipeline.*": ./tmpl/pipe.tmpl
-`)
-	var cfg Config
-	if err := yaml.Unmarshal(rawYAML, &cfg); err != nil {
-		t.Fatalf("unmarshal: %v", err)
-	}
-	found := false
-	for _, r := range cfg.Validate(rawYAML) {
-		if r.Level == ValidationError && strings.Contains(r.Message, "equivalent catch-alls") {
-			found = true
-		}
-	}
-	if !found {
-		t.Error("expected error for equivalent catch-all keys pipeline and pipeline.*")
-	}
-
-	// A bare kind plus a specific subtype of the same kind is NOT ambiguous.
-	rawOK := []byte(`
-bots:
-  main:
-    host: h
-    id: 00000000-0000-0000-0000-000000000001
-    secret: s
-chats:
-  alerts:
-    id: 00000000-0000-0000-0000-000000000003
-server:
-  gitlab:
-    secret: tok
-    default_chat_id: alerts
-    templates:
-      "pipeline.*": "catch-all"
-      "pipeline.failed": "specific"
-`)
-	var cfgOK Config
-	if err := yaml.Unmarshal(rawOK, &cfgOK); err != nil {
-		t.Fatalf("unmarshal: %v", err)
-	}
-	for _, r := range cfgOK.Validate(rawOK) {
-		if r.Level == ValidationError && strings.Contains(r.Message, "equivalent catch-alls") {
-			t.Errorf("unexpected catch-all ambiguity error: %s", r.Message)
-		}
-	}
-}
-
-func TestValidate_GitlabFullConfigNoErrors(t *testing.T) {
-	rawYAML := []byte(`
-bots:
-  main:
-    host: h
-    id: 00000000-0000-0000-0000-000000000001
-    secret: s
-chats:
-  alerts:
-    id: 00000000-0000-0000-0000-000000000003
-server:
-  gitlab:
-    secret: env:GITLAB_TOKEN
-    default_chat_id: alerts
-    events:
-      only: ["merge_request.*", "pipeline.failed", "push"]
-      exclude: ["merge_request.update"]
-    templates:
-      "merge_request.open": "new {{.Title}}"
-      "default": "generic"
-    template_files:
-      "pipeline": ./tmpl/pipeline.tmpl
-    error_events: ["pipeline.failed", "build.*"]
-`)
-	var cfg Config
-	if err := yaml.Unmarshal(rawYAML, &cfg); err != nil {
-		t.Fatalf("unmarshal: %v", err)
-	}
-	for _, r := range cfg.Validate(rawYAML) {
-		if r.Level == ValidationError && strings.HasPrefix(r.Path, "server.gitlab") {
-			t.Errorf("unexpected error for valid gitlab config: %s: %s", r.Path, r.Message)
-		}
-		if r.Level == ValidationWarning && strings.Contains(r.Message, "unknown key") &&
-			strings.HasPrefix(r.Path, "server.gitlab") {
-			t.Errorf("unexpected unknown-key warning for %s: %s", r.Path, r.Message)
-		}
-	}
-}
-
-// gitlabRoutesYAML wraps a routes YAML body in a minimal valid config with one
-// bot and an "alerts" chat alias.
-func gitlabRoutesYAML(routesBody string) []byte {
-	return []byte(`
-bots:
-  main:
-    host: h
-    id: 00000000-0000-0000-0000-000000000001
-    secret: s
-chats:
-  alerts:
-    id: 00000000-0000-0000-0000-000000000003
-  releases:
-    id: 00000000-0000-0000-0000-000000000004
-server:
-  gitlab:
-    secret: tok
-    default_chat_id: alerts
-    routes:` + routesBody + "\n")
-}
-
-func TestValidate_GitlabRoutes(t *testing.T) {
+func TestValidate_GitlabPerSenderValidation(t *testing.T) {
 	tests := []struct {
-		name       string
-		routesBody string
-		wantErr    bool
-		wantMsg    string // substring expected in an error message (when wantErr)
+		name     string
+		gitlab   string
+		wantPath string
+		wantMsg  string
 	}{
 		{
-			name: "unknown chat alias",
-			routesBody: `
-      - match:
-          project: ["group/backend/*"]
-        chats: ["nope"]`,
-			wantErr: true,
-			wantMsg: "unknown chat alias",
+			name:     "empty senders",
+			gitlab:   "    senders: []",
+			wantPath: "server.gitlab.senders",
+			wantMsg:  "senders must not be empty",
 		},
 		{
-			name: "empty chats",
-			routesBody: `
-      - match:
-          project: ["group/backend/*"]
-        chats: []`,
-			wantErr: true,
-			wantMsg: "chats must not be empty",
+			name: "missing secret",
+			gitlab: `    senders:
+      - name: broken
+        chats: [alerts]`,
+			wantPath: "server.gitlab.senders[0].secret",
+			wantMsg:  `sender "broken": secret is required`,
 		},
 		{
-			name: "broken regex pattern",
-			routesBody: `
-      - match:
-          branch: ["/release-([/"]
-        chats: ["alerts"]`,
-			wantErr: true,
-			wantMsg: "invalid regex pattern",
+			name: "empty chats and routes",
+			gitlab: `    senders:
+      - name: broken
+        secret: token
+        chats: []
+        routes: []`,
+			wantPath: "server.gitlab.senders[0].chats",
+			wantMsg:  "chats or routes must not be empty",
+		},
+		{
+			name: "invalid second sender",
+			gitlab: `    senders:
+      - {name: ok, secret: one, chats: [alerts]}
+      - name: broken
+        secret: two
+        chats: [alerts]
+        events: {only: ["bad.key.extra"]}`,
+			wantPath: "server.gitlab.senders[1].events.only",
+			wantMsg:  `sender "broken"`,
+		},
+		{
+			name: "duplicate names",
+			gitlab: `    senders:
+      - {name: same, secret: one, chats: [alerts]}
+      - {name: same, secret: two, chats: [alerts]}`,
+			wantPath: "server.gitlab.senders[1].name",
+			wantMsg:  "duplicates server.gitlab.senders[0]",
+		},
+		{
+			name: "template overlap",
+			gitlab: `    senders:
+      - name: broken
+        secret: token
+        chats: [alerts]
+        templates: {push: inline}
+        template_files: {push: ./push.tmpl}`,
+			wantPath: "server.gitlab.senders[0].template_files.push",
+			wantMsg:  "defined in both templates and template_files",
 		},
 		{
 			name: "bad event key",
-			routesBody: `
-      - match:
-          event: ["merge_request", "bad..key"]
-        chats: ["alerts"]`,
-			wantErr: true,
-			wantMsg: "invalid event key",
+			gitlab: `    senders:
+      - name: broken
+        secret: token
+        chats: [alerts]
+        error_events: ["bad.key.extra"]`,
+			wantPath: "server.gitlab.senders[0].error_events",
+			wantMsg:  "invalid event key",
 		},
 		{
-			name: "valid routes with glob, regex, event and raw selector",
-			routesBody: `
-      - match:
-          project: ["group/backend/*"]
-          branch: ["/^release-/"]
-          event: ["merge_request.open", "pipeline.*"]
-          object_attributes.labels: ["urgent"]
-        chats: ["alerts", "00000000-0000-0000-0000-000000000009"]
-        stop: true
-      - chats: ["releases"]`,
-			wantErr: false,
-		},
-	}
-
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			rawYAML := gitlabRoutesYAML(tc.routesBody)
-			var cfg Config
-			if err := yaml.Unmarshal(rawYAML, &cfg); err != nil {
-				t.Fatalf("unmarshal: %v", err)
-			}
-			results := cfg.Validate(rawYAML)
-
-			var gotErr bool
-			var gotMsg bool
-			for _, r := range results {
-				if r.Level == ValidationError && strings.HasPrefix(r.Path, "server.gitlab.routes") {
-					gotErr = true
-					if tc.wantMsg != "" && strings.Contains(r.Message, tc.wantMsg) {
-						gotMsg = true
-					}
-				}
-				// An arbitrary selector inside match (e.g. object_attributes.labels)
-				// must not surface an unknown-key warning.
-				if r.Level == ValidationWarning && strings.Contains(r.Message, "unknown key") &&
-					strings.HasPrefix(r.Path, "server.gitlab.routes") {
-					t.Errorf("unexpected unknown-key warning: %s: %s", r.Path, r.Message)
-				}
-			}
-			if gotErr != tc.wantErr {
-				t.Errorf("route error present = %v, want %v; results: %+v", gotErr, tc.wantErr, results)
-			}
-			if tc.wantErr && tc.wantMsg != "" && !gotMsg {
-				t.Errorf("expected error message containing %q; results: %+v", tc.wantMsg, results)
-			}
-		})
-	}
-}
-
-// TestValidate_GitlabRoutesKnownKeys checks that the rule keys match/chats/stop
-// are registered (no unknown-key warnings) while arbitrary match selectors are
-// accepted, and that a misspelled rule key IS flagged.
-func TestValidate_GitlabRoutesKnownKeys(t *testing.T) {
-	rawYAML := gitlabRoutesYAML(`
-      - match:
-          project: ["group/backend/*"]
-          object_attributes.action: ["open"]
-        chats: ["alerts"]
-        stop: true`)
-	var cfg Config
-	if err := yaml.Unmarshal(rawYAML, &cfg); err != nil {
-		t.Fatalf("unmarshal: %v", err)
-	}
-	for _, r := range cfg.Validate(rawYAML) {
-		if r.Level == ValidationWarning && strings.Contains(r.Message, "unknown key") &&
-			strings.HasPrefix(r.Path, "server.gitlab.routes") {
-			t.Errorf("unexpected unknown-key warning: %s: %s", r.Path, r.Message)
-		}
-	}
-
-	// A misspelled rule key must be reported as unknown.
-	rawBad := gitlabRoutesYAML(`
-      - chats: ["alerts"]
-        stopp: true`)
-	var cfgBad Config
-	if err := yaml.Unmarshal(rawBad, &cfgBad); err != nil {
-		t.Fatalf("unmarshal: %v", err)
-	}
-	found := false
-	for _, r := range cfgBad.Validate(rawBad) {
-		if r.Level == ValidationWarning && strings.Contains(r.Message, "unknown key") &&
-			strings.Contains(r.Path, "stopp") {
-			found = true
-		}
-	}
-	if !found {
-		t.Error("expected unknown-key warning for misspelled rule key \"stopp\"")
-	}
-}
-
-// gitlabSendersYAML wraps a server.gitlab YAML body in a minimal valid config
-// with one bot and two chat aliases.
-func gitlabSendersYAML(gitlabBody string) []byte {
-	return []byte(`
-bots:
-  main:
-    host: h
-    id: 00000000-0000-0000-0000-000000000001
-    secret: s
-chats:
-  alerts:
-    id: 00000000-0000-0000-0000-000000000003
-  releases:
-    id: 00000000-0000-0000-0000-000000000004
-server:
-  gitlab:` + gitlabBody + "\n")
-}
-
-func TestValidate_GitlabSenders(t *testing.T) {
-	tests := []struct {
-		name       string
-		gitlabBody string
-		wantErr    bool
-		wantPath   string // exact path expected on an error (when wantErr)
-		wantMsg    string // substring expected in the error message (when wantErr)
-	}{
-		{
-			name: "valid single-tenant with only secret",
-			gitlabBody: `
-    secret: tok`,
-			wantErr: false,
+			name: "bad excluded event key",
+			gitlab: `    senders:
+      - secret: token
+        chats: [alerts]
+        events: {exclude: ["bad.key.extra"]}`,
+			wantPath: "server.gitlab.senders[0].events.exclude",
+			wantMsg:  "invalid event key",
 		},
 		{
-			name: "valid senders without default secret",
-			gitlabBody: `
-    senders:
-      - secret: env:TEAM_A_TOKEN
-        chats: ["alerts"]
-      - secret_token: env:TEAM_B_TOKEN
-        chats: ["releases", "00000000-0000-0000-0000-000000000009"]`,
-			wantErr: false,
+			name: "bad template key",
+			gitlab: `    senders:
+      - secret: token
+        chats: [alerts]
+        templates: {"bad key": inline}`,
+			wantPath: "server.gitlab.senders[0].templates.bad key",
+			wantMsg:  "invalid event key",
 		},
 		{
-			name: "valid mixed default secret and senders",
-			gitlabBody: `
-    secret: tok
-    default_chat_id: alerts
-    senders:
-      - secret: env:TEAM_A_TOKEN
-        chats: ["releases"]`,
-			wantErr: false,
+			name: "bad template file key",
+			gitlab: `    senders:
+      - secret: token
+        chats: [alerts]
+        template_files: {"bad key": ./bad.tmpl}`,
+			wantPath: "server.gitlab.senders[0].template_files.bad key",
+			wantMsg:  "invalid event key",
 		},
 		{
-			name: "sender without secret",
-			gitlabBody: `
-    senders:
-      - chats: ["alerts"]`,
-			wantErr:  true,
-			wantPath: "server.gitlab.senders[0].secret",
-			wantMsg:  "secret or secret_token is required",
+			name: "equivalent template catch alls",
+			gitlab: `    senders:
+      - secret: token
+        chats: [alerts]
+        templates: {pipeline: inline}
+        template_files: {"pipeline.*": ./pipeline.tmpl}`,
+			wantPath: "server.gitlab.senders[0].templates",
+			wantMsg:  "equivalent catch-alls",
 		},
 		{
-			name: "sender with empty chats",
-			gitlabBody: `
-    senders:
-      - secret: env:TEAM_A_TOKEN
-        chats: []`,
-			wantErr:  true,
-			wantPath: "server.gitlab.senders[0].chats",
-			wantMsg:  "chats must not be empty",
+			name: "empty route chats",
+			gitlab: `    senders:
+      - name: broken
+        secret: token
+        routes:
+          - match: {event: [push]}
+            chats: []`,
+			wantPath: "server.gitlab.senders[0].routes[0].chats",
+			wantMsg:  `sender "broken"`,
 		},
 		{
-			name: "sender chat references unknown alias",
-			gitlabBody: `
-    senders:
-      - secret: env:TEAM_A_TOKEN
-        chats: ["alerts", "nope"]`,
-			wantErr:  true,
-			wantPath: "server.gitlab.senders[0].chats[1]",
+			name: "bad route regex",
+			gitlab: `    senders:
+      - name: broken
+        secret: token
+        routes:
+          - match: {branch: ["/release-([/"]}
+            chats: [alerts]`,
+			wantPath: "server.gitlab.senders[0].routes[0].match.branch",
+			wantMsg:  "invalid regex pattern",
+		},
+		{
+			name: "bad route event key",
+			gitlab: `    senders:
+      - secret: token
+        routes:
+          - match: {event: ["bad.key.extra"]}
+            chats: [alerts]`,
+			wantPath: "server.gitlab.senders[0].routes[0].match.event",
+			wantMsg:  "invalid event key",
+		},
+		{
+			name: "unknown sender chat alias",
+			gitlab: `    senders:
+      - {secret: token, chats: [missing]}`,
+			wantPath: "server.gitlab.senders[0].chats[0]",
 			wantMsg:  "unknown chat alias",
 		},
 		{
-			name: "neither secret nor senders",
-			gitlabBody: `
-    default_chat_id: alerts`,
-			wantErr:  true,
-			wantPath: "server.gitlab.secret",
-			wantMsg:  "secret, secret_token, or senders is required",
-		},
-		// Byte-identical config strings are detectable offline: the same literal
-		// or the same env:/vault: reference repeated is a guaranteed duplicate.
-		// Distinct references resolving to one value are only comparable after
-		// resolution, which happens at serve startup.
-		{
-			name: "duplicate literal sender tokens",
-			gitlabBody: `
-    senders:
-      - secret: same-tok
-        chats: ["alerts"]
-      - secret: same-tok
-        chats: ["releases"]`,
-			wantErr:  true,
-			wantPath: "server.gitlab.senders[1].secret",
-			wantMsg:  "duplicates the token value of server.gitlab.senders[0]",
-		},
-		{
-			name: "sender token duplicates literal default secret",
-			gitlabBody: `
-    secret: same-tok
-    senders:
-      - secret_token: same-tok
-        chats: ["alerts"]`,
-			wantErr:  true,
-			wantPath: "server.gitlab.senders[0].secret",
-			wantMsg:  "duplicates the token value of server.gitlab.secret",
-		},
-		{
-			name: "sender token duplicates default secret_token alias",
-			gitlabBody: `
-    secret_token: same-tok
-    senders:
-      - secret: same-tok
-        chats: ["alerts"]`,
-			wantErr:  true,
-			wantPath: "server.gitlab.senders[0].secret",
-			wantMsg:  "duplicates the token value of server.gitlab.secret",
-		},
-		{
-			name: "duplicate identical secret references",
-			gitlabBody: `
-    senders:
-      - secret: env:TEAM_A_TOKEN
-        chats: ["alerts"]
-      - secret: env:TEAM_A_TOKEN
-        chats: ["releases"]`,
-			wantErr:  true,
-			wantPath: "server.gitlab.senders[1].secret",
-			wantMsg:  "duplicates the token value of server.gitlab.senders[0]",
-		},
-		{
-			name: "sender reference duplicates default secret reference",
-			gitlabBody: `
-    secret: env:GITLAB_WEBHOOK_TOKEN
-    senders:
-      - secret: env:GITLAB_WEBHOOK_TOKEN
-        chats: ["alerts"]`,
-			wantErr:  true,
-			wantPath: "server.gitlab.senders[0].secret",
-			wantMsg:  "duplicates the token value of server.gitlab.secret",
+			name: "unknown route chat alias",
+			gitlab: `    senders:
+      - secret: token
+        routes:
+          - chats: [missing]`,
+			wantPath: "server.gitlab.senders[0].routes[0].chats",
+			wantMsg:  "unknown chat alias",
 		},
 	}
 
-	for _, tc := range tests {
-		t.Run(tc.name, func(t *testing.T) {
-			rawYAML := gitlabSendersYAML(tc.gitlabBody)
-			var cfg Config
-			if err := yaml.Unmarshal(rawYAML, &cfg); err != nil {
-				t.Fatalf("unmarshal: %v", err)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			raw := []byte("chats:\n  alerts: 00000000-0000-0000-0000-000000000001\nserver:\n  gitlab:\n" + tt.gitlab + "\n")
+			result := findValidationResult(t, raw, tt.wantPath)
+			if result.Level != ValidationError {
+				t.Fatalf("level = %q, want error: %+v", result.Level, result)
 			}
-			results := cfg.Validate(rawYAML)
-
-			var gotErr, gotMatch bool
-			for _, r := range results {
-				if r.Level == ValidationError && strings.HasPrefix(r.Path, "server.gitlab") {
-					gotErr = true
-					if r.Path == tc.wantPath && strings.Contains(r.Message, tc.wantMsg) {
-						gotMatch = true
-					}
-				}
-				// secret/secret_token/chats must be registered in knownKeys, so no
-				// unknown-key warnings should surface for the senders block.
-				if r.Level == ValidationWarning && strings.Contains(r.Message, "unknown key") &&
-					strings.HasPrefix(r.Path, "server.gitlab.senders") {
-					t.Errorf("unexpected unknown-key warning: %s: %s", r.Path, r.Message)
-				}
-			}
-			if gotErr != tc.wantErr {
-				t.Errorf("gitlab error present = %v, want %v; results: %+v", gotErr, tc.wantErr, results)
-			}
-			if tc.wantErr && !gotMatch {
-				t.Errorf("expected error at %q containing %q; results: %+v", tc.wantPath, tc.wantMsg, results)
+			if !strings.Contains(result.Message, tt.wantMsg) {
+				t.Fatalf("message = %q, want substring %q", result.Message, tt.wantMsg)
 			}
 		})
 	}
 }
 
-// A misspelled key inside a sender entry must surface as an unknown-key
-// warning. This is the positive counterpart of the no-warnings assertion in
-// TestValidate_GitlabSenders: it fails if the "server.gitlab.senders.*"
-// knownKeys registration is dropped or its path misspelled (sequence items
-// would then silently skip key checking entirely).
-func TestValidate_GitlabSendersKnownKeys(t *testing.T) {
-	rawYAML := gitlabSendersYAML(`
-    senders:
-      - secret: tok
-        chatz: ["alerts"]`)
-	var cfg Config
-	if err := yaml.Unmarshal(rawYAML, &cfg); err != nil {
-		t.Fatalf("unmarshal: %v", err)
+func TestValidate_GitlabNestedUnknownKeysUseIndexedPaths(t *testing.T) {
+	for _, tt := range []struct {
+		name string
+		raw  []byte
+		path string
+	}{
+		{
+			name: "events",
+			raw:  []byte("server:\n  gitlab:\n    senders:\n      - secret: token\n        chats: [alerts]\n        events: {exclud: [push]}\n"),
+			path: "server.gitlab.senders[0].events.exclud",
+		},
+		{
+			name: "routes",
+			raw:  []byte("server:\n  gitlab:\n    senders:\n      - secret: token\n        routes:\n          - chats: [alerts]\n            stopp: true\n"),
+			path: "server.gitlab.senders[0].routes[0].stopp",
+		},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			result := findValidationResult(t, tt.raw, tt.path)
+			if result.Message == "" || !strings.Contains(result.Message, "unknown key") {
+				t.Fatalf("unexpected result: %+v", result)
+			}
+		})
 	}
-	found := false
-	for _, r := range cfg.Validate(rawYAML) {
-		if r.Level == ValidationWarning && strings.Contains(r.Message, "unknown key") &&
-			strings.Contains(r.Path, "chatz") {
-			found = true
+}
+
+func TestValidate_GitlabRouteMatchSelectorsAreOpen(t *testing.T) {
+	raw := []byte(`
+server:
+  gitlab:
+    senders:
+      - secret: token
+        routes:
+          - match:
+              project: [group/backend]
+              object_attributes.labels: [urgent]
+            chats: [00000000-0000-0000-0000-000000000001]
+`)
+	var cfg Config
+	if err := yaml.Unmarshal(raw, &cfg); err != nil {
+		t.Fatal(err)
+	}
+	for _, result := range cfg.Validate(raw) {
+		if result.Level == ValidationWarning && strings.Contains(result.Path, ".routes[0].match.") {
+			t.Fatalf("unexpected selector warning: %+v", result)
 		}
 	}
-	if !found {
-		t.Error("expected unknown-key warning for misspelled sender key \"chatz\"")
+}
+
+func TestGitlabYAMLConfig_ValidateForServe(t *testing.T) {
+	tests := []struct {
+		name    string
+		config  GitlabYAMLConfig
+		wantErr string
+	}{
+		{
+			name:    "empty senders",
+			config:  GitlabYAMLConfig{},
+			wantErr: "server.gitlab.senders",
+		},
+		{
+			name: "missing secret",
+			config: GitlabYAMLConfig{Senders: []GitlabSenderYAMLConfig{
+				{Name: "broken", Chats: []string{"alerts"}},
+			}},
+			wantErr: `server.gitlab.senders[0].secret: sender "broken"`,
+		},
+		{
+			name: "empty chats and routes",
+			config: GitlabYAMLConfig{Senders: []GitlabSenderYAMLConfig{
+				{Secret: "token"},
+			}},
+			wantErr: "server.gitlab.senders[0].chats",
+		},
+		{
+			name: "invalid second sender",
+			config: GitlabYAMLConfig{Senders: []GitlabSenderYAMLConfig{
+				{Name: "ok", Secret: "one", Chats: []string{"alerts"}},
+				{Name: "broken", Secret: "two", Chats: []string{"alerts"}, Events: GitlabEventsConfig{Only: []string{"bad.key.extra"}}},
+			}},
+			wantErr: `server.gitlab.senders[1].events.only: sender "broken"`,
+		},
+		{
+			name: "template overlap",
+			config: GitlabYAMLConfig{Senders: []GitlabSenderYAMLConfig{
+				{
+					Secret:        "token",
+					Chats:         []string{"alerts"},
+					Templates:     map[string]string{"push": "inline"},
+					TemplateFiles: map[string]string{"push": "./push.tmpl"},
+				},
+			}},
+			wantErr: "server.gitlab.senders[0].template_files.push",
+		},
+		{
+			name: "equivalent template catch alls",
+			config: GitlabYAMLConfig{Senders: []GitlabSenderYAMLConfig{
+				{
+					Secret:        "token",
+					Chats:         []string{"alerts"},
+					Templates:     map[string]string{"pipeline": "inline"},
+					TemplateFiles: map[string]string{"pipeline.*": "./pipeline.tmpl"},
+				},
+			}},
+			wantErr: "server.gitlab.senders[0].templates",
+		},
+		{
+			name: "empty route chats",
+			config: GitlabYAMLConfig{Senders: []GitlabSenderYAMLConfig{
+				{Secret: "token", Routes: []GitlabRouteYAMLConfig{{Match: map[string][]string{"event": {"push"}}}}},
+			}},
+			wantErr: "server.gitlab.senders[0].routes[0].chats",
+		},
+		{
+			name: "invalid route event",
+			config: GitlabYAMLConfig{Senders: []GitlabSenderYAMLConfig{
+				{Secret: "token", Routes: []GitlabRouteYAMLConfig{{Match: map[string][]string{"event": {"bad.key.extra"}}, Chats: []string{"alerts"}}}},
+			}},
+			wantErr: "server.gitlab.senders[0].routes[0].match.event",
+		},
+		{
+			name: "invalid route regex",
+			config: GitlabYAMLConfig{Senders: []GitlabSenderYAMLConfig{
+				{Secret: "token", Routes: []GitlabRouteYAMLConfig{{Match: map[string][]string{"branch": {"/release-([/"}}, Chats: []string{"alerts"}}}},
+			}},
+			wantErr: "server.gitlab.senders[0].routes[0].match.branch",
+		},
+		{
+			name: "duplicate name",
+			config: GitlabYAMLConfig{Senders: []GitlabSenderYAMLConfig{
+				{Name: "same", Secret: "one", Chats: []string{"alerts"}},
+				{Name: "same", Secret: "two", Chats: []string{"alerts"}},
+			}},
+			wantErr: "server.gitlab.senders[1].name",
+		},
+		{
+			name: "valid route only sender",
+			config: GitlabYAMLConfig{Senders: []GitlabSenderYAMLConfig{
+				{Secret: "one", Routes: []GitlabRouteYAMLConfig{{Chats: []string{"alerts"}}}},
+			}},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := tt.config.ValidateForServe()
+			if tt.wantErr == "" {
+				if err != nil {
+					t.Fatalf("unexpected error: %v", err)
+				}
+				return
+			}
+			if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+				t.Fatalf("error = %v, want substring %q", err, tt.wantErr)
+			}
+		})
 	}
 }

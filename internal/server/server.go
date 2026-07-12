@@ -98,9 +98,33 @@ func WithGrafana(cfg *GrafanaConfig) Option {
 }
 
 // WithGitlab enables the GitLab webhook endpoint. It is authenticated by the
-// X-Gitlab-Token header rather than the standard API-key middleware.
+// X-Gitlab-Token header rather than the standard API-key middleware. A nil
+// config leaves the endpoint disabled, matching a caller that builds the option
+// conditionally.
+//
+// Hand-built senders are normalized here for the two invariants that would
+// otherwise crash or log blank: a missing Label gets the "senders[i]" fallback,
+// and a nil Templates registry gets the built-in defaults instead of panicking
+// on the first rendered event. It does NOT derive the Scope↔Targets pair — a
+// hand-built sender must set both consistently (Scope keyed by canonical UUID,
+// Targets the ordered delivery list); see GitlabSender. The serve builder
+// (internal/cmd) establishes all of this from YAML.
 func WithGitlab(cfg *GitlabConfig) Option {
 	return func(s *Server) {
+		if cfg == nil {
+			return
+		}
+		for i := range cfg.Senders {
+			sender := &cfg.Senders[i]
+			if sender.Label == "" {
+				sender.Label = fmt.Sprintf("senders[%d]", i)
+			}
+			if sender.Templates == nil {
+				// nil inline templates cannot fail: only the static built-in
+				// defaults are compiled.
+				sender.Templates, _ = ParseGitlabTemplates(nil)
+			}
+		}
 		s.gitCfg = cfg
 	}
 }
@@ -295,20 +319,7 @@ func New(cfg Config, sendFn SendFunc, chatResolver ChatResolver, opts ...Option)
 		// authenticates via the X-Gitlab-Token header inside the handler
 		// rather than through authMiddleware.
 		r.Method("POST", base+"/gitlab", s.apm.WrapHandler("POST /gitlab", http.HandlerFunc(s.handleGitlab)))
-		chatInfo := "from ?chat_id param"
-		if s.gitCfg.DefaultChatID != "" {
-			chatInfo = s.gitCfg.DefaultChatID
-		} else if cfg.DefaultChatAlias != "" {
-			chatInfo = cfg.DefaultChatAlias
-		} else if s.gitCfg.FallbackChatID != "" {
-			chatInfo = s.gitCfg.FallbackChatID
-		}
-		nTemplates := 0
-		if s.gitCfg.Templates != nil {
-			nTemplates = len(s.gitCfg.Templates.byKey)
-		}
-		vlog.Info("server: gitlab endpoint enabled (chat: %s, token auth, %d templates, only=%d exclude=%d error_events=%d)",
-			chatInfo, nTemplates, len(s.gitCfg.Only), len(s.gitCfg.Exclude), len(s.gitCfg.ErrorEvents))
+		vlog.Info("server: gitlab endpoint enabled (%d senders, token auth)", len(s.gitCfg.Senders))
 	}
 
 	if s.callbackRouter != nil && s.callbacksCfg != nil {

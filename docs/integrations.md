@@ -245,8 +245,9 @@ generic-декодером, а событие сводится к **event-клю
 
 Аутентификация — по заголовку `X-Gitlab-Token` (GitLab не умеет ставить
 `Authorization`/`X-API-Key`), поэтому эндпоинт не использует обычные `api_keys`.
-Помимо общего `secret` можно завести несколько изолированных токенов команд —
-см. [senders](#изоляция-команд-senders-несколько-токенов).
+Секция `server.gitlab` содержит только `senders`: каждый токен выбирает свой
+полностью независимый набор чатов, фильтров, шаблонов, error-событий и
+маршрутов.
 
 ### Event-ключ и деривация субтипа
 
@@ -264,14 +265,17 @@ Event-ключ — это строка `kind` или `kind.subtype`, где `kin
 
 ### Фильтр событий: only / exclude
 
-Через `server.gitlab.events` можно ограничить, какие события отправляются.
+Через `server.gitlab.senders[].events` можно ограничить события конкретного
+sender'а.
 Каждая запись фильтра матчит: полный event-ключ (`kind.subtype`), голый `kind`
 (все субтипы этого типа) или wildcard `kind.*` (то же, что голый `kind`).
 
 - `only` пустой → проходят все события; `only` непустой → событие должно матчиться.
 - `exclude` вычитает и **всегда выигрывает** над `only`.
 - Событие, не прошедшее фильтр → `200 OK` с телом
-  `{"ok":true,"ignored":true,"event":"<key>"}` и без отправки сообщения.
+  `{"ok":true,"ignored":true,"event":"<key>","reason":"event filtered"}` и без
+  отправки сообщения (пустой отрендеренный шаблон даёт то же с
+  `reason:"empty message"`).
 
 ```yaml
 events:
@@ -330,50 +334,39 @@ error_events: ["pipeline.failed", "build.failed"]
 ### Настройка express-botx
 
 В отличие от Alertmanager/Grafana, эндпоинт включается только при наличии секции
-`gitlab` с секретом:
+`gitlab` с непустым списком отправителей:
 
 ```yaml
 server:
   listen: ":8080"
   base_path: /api/v1
   gitlab:
-    secret: env:GITLAB_WEBHOOK_TOKEN   # literal / env: / vault: — сверяется с X-Gitlab-Token
-    default_chat_id: dev               # UUID или алиас чата (опционально)
-    events:
-      only:    ["merge_request.*", "pipeline.failed", "build.failed", "push"]
-      exclude: ["merge_request.update"]
-    templates:
-      "merge_request.open": "🆕 {{.Title}} — {{.User}}\n{{.URL}}"
-    # template_files:
-    #   "default": ./tmpl/gitlab-default.tmpl
-    error_events: ["pipeline.failed", "build.failed"]
+    senders:
+      - name: dev
+        secret: env:GITLAB_WEBHOOK_TOKEN
+        chats: [dev]
+        events:
+          only: ["merge_request.*", "pipeline.failed", "build.failed", push]
+          exclude: ["merge_request.update"]
+        templates:
+          "merge_request.open": "🆕 {{.Title}} — {{.User}}\n{{.URL}}"
+        # template_files:
+        #   default: ./tmpl/gitlab-default.tmpl
+        error_events: ["pipeline.failed", "build.failed"]
 ```
-
-Если `default_chat_id` не задан, используется чат по умолчанию (`default: true`),
-единственный чат из конфига или query-параметр `?chat_id=`.
 
 ### Настройка GitLab
 
 1. В группе или проекте: **Settings → Webhooks → Add new webhook**
 2. **URL:** `http://express-botx:8080/api/v1/gitlab` (можно с `?chat_id=<alias>`)
-3. **Secret token:** то же значение, что и `server.gitlab.secret`
+3. **Secret token:** значение `server.gitlab.senders[].secret` нужной команды
 4. Отметьте нужные триггеры (или все — фильтрация теперь на стороне приложения)
 5. Сохраните и нажмите **Test → …**
 
-### Несколько чатов
-
-Как и у Alertmanager/Grafana — используйте `?chat_id=` в URL вебхука, чтобы
-направлять события разных групп/проектов в разные чаты:
-
-- `http://express-botx:8080/api/v1/gitlab?chat_id=backend-mrs`
-- `http://express-botx:8080/api/v1/gitlab?chat_id=frontend-mrs`
-
 ### Роутинг событий по чатам (`routes`)
 
-Когда одного `?chat_id`/`default_chat_id` мало (одно событие должно уходить в
-несколько чатов, а выбор чата зависит от проекта, типа события или ветки),
-используйте `server.gitlab.routes` — опциональный **упорядоченный** список
-правил. Секция обратно совместима: без неё поведение = прежнее (один чат).
+Каждый sender может задать свой опциональный **упорядоченный** список
+`routes`, если цель зависит от проекта, event-ключа, ветки или payload.
 
 **Модель матчинга (all-match + stop):**
 
@@ -422,99 +415,95 @@ server:
 - Селектор `event` использует event-матчинг (полный ключ `kind.subtype`, голый
   `kind`, `kind.*`), glob/regex к нему **не применяются**.
 
-**Приоритет выбора чатов:** `?chat_id=` → `routes` (all-match+stop, дедуп) →
-`default_chat_id` → чат по умолчанию → единственный чат → `200 {ignored}`.
+**Выбор чатов:** если есть `?chat_id=`, он обходит routes и выбирает subset внутри
+скоупа. Без query вычисляются routes. Если ни одно правило не совпало,
+возвращается `200 {"ok":true,"ignored":true,"event":"<key>","reason":"no route matched"}`.
+Неявного fallback нет; для него нужно добавить последний catch-all `match: {}`.
 
 **Фан-аут и коды ответа (best-effort):** сообщение отправляется в каждый целевой
 чат независимо. Ответ — **единый** `MultiSendResponse`
 `{"ok":true,"results":[{"chat","sync_id"}],"errors":[{"chat","error"}]}` с кодом
 `200`, если доставлено **хотя бы в один** чат (частичные сбои — в `errors`);
 `502`, если упали все. Явный `?chat_id=` (в т.ч. с запятой — фан-аут в несколько
-чатов) и одиночный `default_chat_id` возвращают ту же форму (`results[0]` для
-одного чата) — см. [единый ответ и ломающее изменение](#единый-ответ-multisendresponse-ломающее-изменение).
+чатов) и доставка без routes во все `chats` sender'а возвращают ту же форму — см.
+[единый ответ](#единый-ответ-multisendresponse-ломающее-изменение).
 
 ```yaml
 server:
   gitlab:
-    secret: env:GITLAB_WEBHOOK_TOKEN
-    default_chat_id: dev          # fallback, если ни одно правило не совпало
-    routes:
-      # MR в main любого backend-проекта → в два чата; stop обрывает перебор.
-      - match:
-          project: ["group/backend/*"]
-          event:   ["merge_request"]
-          branch:  ["main", "release/*"]
-        chats: [backend-mrs, releases]
-        stop: true
-      # Упавшие пайплайны и джобы → в дежурный чат (regex по ветке).
-      - match:
-          event:  ["pipeline.failed", "build.failed"]
-          branch: ["/^(main|release\\/.*)$/"]
-        chats: [oncall]
-      # MR из веток hotfix/* (dotted-путь к скаляру в payload) → чат хотфиксов.
-      - match:
-          event: ["merge_request"]
-          object_attributes.source_branch: ["hotfix/*"]
-        chats: [hotfixes]
-```
-
-### Изоляция команд: senders (несколько токенов)
-
-Когда один эндпоинт обслуживает несколько команд, `?chat_id`/`routes` не дают
-изоляции: любой, кто знает общий секрет, может отправить событие в чужой чат.
-`server.gitlab.senders` — опциональный список **дополнительных** входящих
-токенов, каждый жёстко привязан к своему набору чатов:
-
-```yaml
-server:
-  gitlab:
-    secret: env:GITLAB_WEBHOOK_TOKEN     # общий дефолтный токен (опционален при senders)
-    default_chat_id: dev
     senders:
-      - secret: env:TEAM_A_GITLAB_TOKEN  # literal / env: / vault: — как обычный secret
-        chats: [team-a]
-      - secret: env:TEAM_B_GITLAB_TOKEN
-        chats: [team-b, team-b-alerts]
+      - name: backend
+        secret: env:BACKEND_GITLAB_TOKEN
+        chats: [backend, backend-mrs, releases, oncall]
+        routes:
+          - match:
+              project: ["group/backend/*"]
+              event: [merge_request]
+              branch: [main, "release/*"]
+            chats: [backend-mrs, releases]
+            stop: true
+          - match:
+              event: ["pipeline.failed", "build.failed"]
+              branch: ["/^(main|release\\/.*)$/"]
+            chats: [oncall]
+          - match: {}
+            chats: [backend]
 ```
 
-**Резолв аутентификации.** Входящий `X-Gitlab-Token` сверяется со всеми
-sender-токенами и с дефолтным `secret` (constant-time, без early-exit):
+### Изоляция отправителей и скоуп чатов
 
-- совпал **sender-токен** → событие уходит в `chats` этого sender'а (fan-out,
-  best-effort — как у `routes`). `?chat_id=` при этом работает как **фильтр
-  внутри разрешённого набора** (см. ниже); `?bot=`, `routes` и `default_chat_id`
-  **игнорируются** — команда A не может отправить от имени чужого бота или в чат
-  вне своего scope, даже подставив `?bot`/`?chat_id`;
-- совпал **дефолтный `secret`** → прежнее поведение без изменений
-  (`?chat_id` → `routes` → `default_chat_id` → …);
-- не совпал ни один → `401`.
+Каждый sender аутентифицируется своим `secret` и обрабатывается только своими
+`events`, `templates`, `template_files`, `error_events` и `routes`.
 
-Глобальные `events.only/exclude`, `templates`/`template_files` и `error_events`
-применяются к sender-событиям как обычно (отфильтрованное событие → `200
-{ignored}` и для sender'а). Своих `routes`/фильтров/шаблонов у sender'а нет —
-его скоуп только чаты.
+```yaml
+server:
+  gitlab:
+    senders:
+      - name: team-a
+        secret: env:TEAM_A_GITLAB_TOKEN
+        chats: [team-a, team-a-alerts]
+      - name: team-b
+        secret: env:TEAM_B_GITLAB_TOKEN
+        # chats нет: scope выводится из объединения route-целей.
+        routes:
+          - match: {event: ["pipeline.failed"]}
+            chats: [team-b-alerts]
+          - match: {}
+            chats: [team-b]
+```
 
-**`?chat_id=` как фильтр внутри scope.** Один sender-токен остаётся изолированным
-в рамках команды, но команда может направлять конкретные вебхуки в нужный чат
-внутри своего разрешённого набора:
+**Скоуп.** Если `chats` непуст, это явная граница, и все `routes[].chats` должны быть её
+подмножеством. Если `chats` отсутствует или пуст, скоуп выводится из объединения
+`routes[].chats`. Хотя бы один из списков должен быть непустым.
 
-- `?chat_id` **отсутствует** → событие уходит во **все** `chats` sender'а
-  (прежнее поведение);
-- `?chat_id=a,b` (непустой) → доставка **только** в перечисленные чаты, но
-  **только если каждый** входит в `chats` sender'а (синтаксис общий: список через
-  запятую, trim, dedup, сохранение порядка);
-- хотя бы один чат из `?chat_id` **вне** `chats` sender'а → `403 Forbidden`
-  (`{"ok":false,"error":"chat \"…\" is outside this token's allowed chats"}`),
-  ничего не отправляется — попытка выйти за scope, а не тихое игнорирование;
+При старте алиасы канонизируются в UUID. Алиас и UUID одного чата эквивалентны при
+проверке скоупа и дедупликации, но доставка сохраняет исходную цель и её bot
+binding. Ошибки старта (их же ловит `config validate`):
+
+- две разные цели одного сендера, резолвящиеся в один UUID;
+- алиас без `id`;
+- `route[].chats`, ссылающийся на алиас с bot binding, отличным от цели скоупа,
+  в которую он канонизируется (иначе доставка молча ушла бы через другого бота);
+- в multi-bot-режиме — raw UUID или алиас без `bot` среди delivery targets.
+
+`?bot=` всегда игнорируется.
+
+**`?chat_id=` внутри scope:**
+
+- query отсутствует → вычисляются routes; если routes нет, доставка идёт во все `chats`;
+- `?chat_id=a,b` (непустой) → доставка **только** в перечисленные чаты, если
+  каждый разрешён; routes при этом не вычисляются;
+- чат вне scope, **или** in-scope чат, названный алиасом с bot binding, отличным
+  от цели сендера для этого чата → `403 Forbidden`, ничего не отправляется:
+  первый случай — `chat "…" is outside this token's allowed chats`, второй —
+  `chat "…" is bound to bot "…", but this token delivers to that chat via "…"`;
 - `?chat_id` **явно пустой** (`?chat_id=`, `?chat_id=,,`) → `400` request-level,
   ничего не отправляется;
 - сравнение эквивалентно по **алиасу и UUID**: `chats: [team-a-alerts]` разрешает
-  и `?chat_id=team-a-alerts`, и UUID, в который этот алиас резолвится (но не чужой
-  алиас/UUID). Направление не важно — если в `chats` указан UUID, `?chat_id=`
-  можно передать алиасом, и наоборот.
+  и `?chat_id=team-a-alerts`, и UUID, в который этот алиас резолвится.
 
 ```
-# всё разрешённое (оба чата sender'а):
+# routes sender'а или все его chats, если routes нет:
 POST /api/v1/gitlab                        X-Gitlab-Token: <team-a-token>
 # только один чат из scope:
 POST /api/v1/gitlab?chat_id=team-a-alerts  X-Gitlab-Token: <team-a-token>  → 200
@@ -526,16 +515,11 @@ POST /api/v1/gitlab?chat_id=               X-Gitlab-Token: <team-a-token>  → 4
 
 **Правила конфигурации:**
 
-- Каждый sender: непустой `secret`/`secret_token` + непустой `chats`
-  (алиасы/UUID существующих чатов из секции `chats`).
-- Должен быть задан общий `secret` **или** хотя бы один sender — иначе ручка
-  осталась бы без аутентификации (ошибка валидации).
-- Дефолтный `secret` опционален: можно оставить только senders (тогда
-  неизвестный токен всегда получает `401`), а можно смешанный режим — общий
-  токен для большинства + изолированные senders для чувствительных команд.
+- `senders` непуст; у каждого sender обязателен `secret` и хотя бы один из `chats`/`routes`;
+- `name`, если задан, уникален;
 - Значения токенов задаются ссылками `env:`/`vault:` — в общем YAML только
   ссылки, команды не видят секреты друг друга.
-- Дубликаты **разрезолвленных** значений (sender↔sender или sender↔дефолт) —
+- Дубликаты **разрезолвленных** токенов между sender'ами —
   ошибка на старте: аутентификация была бы неоднозначной. Байт-идентичные
   строки в конфиге (один литерал или одна и та же `env:`/`vault:` ссылка
   дважды) ловит уже `config validate`.

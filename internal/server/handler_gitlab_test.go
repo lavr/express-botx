@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net/http"
 	"slices"
 	"strings"
 	"sync"
@@ -36,7 +37,7 @@ func scopeTestServer(t *testing.T) *Server {
 }
 
 // TestSenderScopeTargets covers alias/UUID membership equivalence, out-of-scope
-// detection, and canonicalisation to the configured sender.chats entry for the
+// detection, and canonicalisation to the configured sender target for the
 // sender-scoped ?chat_id filter.
 func TestSenderScopeTargets(t *testing.T) {
 	s := scopeTestServer(t)
@@ -114,10 +115,21 @@ func TestSenderScopeTargets(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			targets, bad, ok := s.senderScopeTargets(tt.requested, tt.allowed)
-			if ok != tt.wantOK || bad != tt.wantBad || !slices.Equal(targets, tt.wantTargets) {
-				t.Errorf("senderScopeTargets(%v, %v) = (%v, %q, %v), want (%v, %q, %v)",
-					tt.requested, tt.allowed, targets, bad, ok, tt.wantTargets, tt.wantBad, tt.wantOK)
+			scope := make(map[string]GitlabTarget, len(tt.allowed))
+			for _, target := range tt.allowed {
+				resolved, err := s.chats(target)
+				if err != nil {
+					t.Fatalf("resolve allowed target %q: %v", target, err)
+				}
+				scope[resolved.ChatID] = GitlabTarget{Target: target}
+			}
+			targets, reject, ok := s.senderScopeTargets(tt.requested, scope)
+			if ok != tt.wantOK || !slices.Equal(targets, tt.wantTargets) {
+				t.Errorf("senderScopeTargets(%v, %v) = (%v, %q, %v), want (%v, bad %q, %v)",
+					tt.requested, tt.allowed, targets, reject, ok, tt.wantTargets, tt.wantBad, tt.wantOK)
+			}
+			if tt.wantBad != "" && !strings.Contains(reject, fmt.Sprintf("%q", tt.wantBad)) {
+				t.Errorf("reject message %q does not name chat %q", reject, tt.wantBad)
 			}
 		})
 	}
@@ -133,12 +145,14 @@ func newGitlabTestServer(t *testing.T, cfg *GitlabConfig) (*Server, *captureSend
 // the server Config (e.g. DefaultChatAlias) and inject a send error.
 func newGitlabTestServerCfg(t *testing.T, srvCfg Config, cfg *GitlabConfig, sendErr error) (*Server, *captureSend) {
 	t.Helper()
-	if cfg.Templates == nil {
-		tmpls, err := ParseGitlabTemplates(nil)
-		if err != nil {
-			t.Fatalf("parse default templates: %v", err)
+	for i := range cfg.Senders {
+		if cfg.Senders[i].Templates == nil {
+			tmpls, err := ParseGitlabTemplates(nil)
+			if err != nil {
+				t.Fatalf("parse default templates: %v", err)
+			}
+			cfg.Senders[i].Templates = tmpls
 		}
-		cfg.Templates = tmpls
 	}
 	cap := &captureSend{}
 	sendFn := func(ctx context.Context, p *SendPayload) (string, error) {
@@ -156,6 +170,18 @@ func newGitlabTestServerCfg(t *testing.T, srvCfg Config, cfg *GitlabConfig, send
 	}
 	srv := New(srvCfg, sendFn, chatResolver, WithGitlab(cfg))
 	return srv, cap
+}
+
+func gitlabTestSender(secret string, targets ...string) GitlabSender {
+	scope := make(map[string]GitlabTarget, len(targets))
+	for _, target := range targets {
+		scope[target] = GitlabTarget{Target: target}
+	}
+	return GitlabSender{Secret: secret, Scope: scope, Targets: targets}
+}
+
+func gitlabTestConfig(secret string, targets ...string) *GitlabConfig {
+	return &GitlabConfig{Senders: []GitlabSender{gitlabTestSender(secret, targets...)}}
 }
 
 // captureSend records the payloads passed to the send function.
@@ -456,7 +482,7 @@ func TestGitlab_GenericRender(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			srv, cap := newGitlabTestServer(t, &GitlabConfig{DefaultChatID: "chat1", SecretToken: "secret"})
+			srv, cap := newGitlabTestServer(t, gitlabTestConfig("secret", "chat1"))
 			w := doRequest(srv, "POST", "/api/v1/gitlab", strings.NewReader(tc.payload), gitlabHeaders("secret"))
 			if w.Code != 200 {
 				t.Fatalf("status = %d, body: %s", w.Code, w.Body.String())
@@ -487,7 +513,7 @@ func TestGitlab_TokenValidation(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			srv, cap := newGitlabTestServer(t, &GitlabConfig{DefaultChatID: "chat1", SecretToken: "secret"})
+			srv, cap := newGitlabTestServer(t, gitlabTestConfig("secret", "chat1"))
 			headers := map[string]string{"Content-Type": "application/json"}
 			if tc.token != "" {
 				headers["X-Gitlab-Token"] = tc.token
@@ -503,92 +529,276 @@ func TestGitlab_TokenValidation(t *testing.T) {
 	}
 }
 
-func TestResolveGitlabAuth(t *testing.T) {
-	senders := []GitlabSender{
-		{Secret: "team-a-token", Chats: []string{"chat-a1", "chat-a2"}},
-		{Secret: "team-b-token", Chats: []string{"chat-b"}},
+func TestResolveGitlabAuthReturnsMatchedRuntime(t *testing.T) {
+	want := GitlabSender{Label: "dev", Secret: "dev-token"}
+	s := &Server{gitCfg: &GitlabConfig{Senders: []GitlabSender{
+		want,
+		{Label: "ops", Secret: "ops-token"},
+	}}}
+	got, ok := s.resolveGitlabAuth("dev-token")
+	if !ok || got.Label != "dev" {
+		t.Fatalf("got (%+v, %v), want dev sender", got, ok)
 	}
-	cases := []struct {
-		name         string
-		secretToken  string
-		senders      []GitlabSender
-		token        string
-		wantChats    []string
-		wantIsSender bool
-		wantOK       bool
+}
+
+// An empty sender secret must never authenticate: serve startup rejects empty
+// secrets, but a hand-built config (WithGitlab) can carry one, and it must not
+// match an empty or arbitrary token.
+func TestResolveGitlabAuthEmptySenderSecretNeverMatches(t *testing.T) {
+	s := &Server{gitCfg: &GitlabConfig{Senders: []GitlabSender{
+		{Label: "broken", Secret: ""},
+	}}}
+	for _, token := range []string{"", "anything"} {
+		if got, ok := s.resolveGitlabAuth(token); ok || got != nil {
+			t.Fatalf("token %q: got (%+v, %v), want no match", token, got, ok)
+		}
+	}
+}
+
+// On duplicate secrets (possible only in hand-built configs; serve startup
+// rejects them) the first matching sender must win, deterministically.
+func TestResolveGitlabAuthFirstSenderWinsOnDuplicateSecrets(t *testing.T) {
+	s := &Server{gitCfg: &GitlabConfig{Senders: []GitlabSender{
+		{Label: "first", Secret: "dup"},
+		{Label: "second", Secret: "dup"},
+	}}}
+	got, ok := s.resolveGitlabAuth("dup")
+	if !ok || got.Label != "first" {
+		t.Fatalf("got (%+v, %v), want first sender", got, ok)
+	}
+}
+
+func TestGitlab_PerSenderIsolation(t *testing.T) {
+	devTemplates, err := ParseGitlabTemplates(map[string]string{
+		"merge_request.open": "DEV {{ .Title }}",
+	})
+	if err != nil {
+		t.Fatalf("parse dev templates: %v", err)
+	}
+	opsTemplates, err := ParseGitlabTemplates(map[string]string{
+		"merge_request.open": "OPS {{ .Title }}",
+	})
+	if err != nil {
+		t.Fatalf("parse ops templates: %v", err)
+	}
+
+	cfg := &GitlabConfig{Senders: []GitlabSender{
+		{
+			Label:       "dev",
+			Secret:      "dev-token",
+			Scope:       map[string]GitlabTarget{"dev-route": {Target: "dev-route"}},
+			Only:        []string{"merge_request.*"},
+			ErrorEvents: []string{"merge_request.open"},
+			Templates:   devTemplates,
+			Routes:      []compiledRoute{{chats: []string{"dev-route"}}},
+		},
+		{
+			Label:     "ops",
+			Secret:    "ops-token",
+			Scope:     map[string]GitlabTarget{"ops-route": {Target: "ops-route"}},
+			Exclude:   []string{"pipeline.*"},
+			Templates: opsTemplates,
+			Routes:    []compiledRoute{{chats: []string{"ops-route"}}},
+		},
+	}}
+
+	tests := []struct {
+		name       string
+		token      string
+		wantCode   int
+		wantChat   string
+		wantPrefix string
+		wantStatus string
 	}{
-		{"sender_token", "secret", senders, "team-a-token", []string{"chat-a1", "chat-a2"}, true, true},
-		{"second_sender_token", "secret", senders, "team-b-token", []string{"chat-b"}, true, true},
-		{"default_token", "secret", senders, "secret", nil, false, true},
-		{"unknown_token", "secret", senders, "wrong", nil, false, false},
-		{"empty_token", "secret", senders, "", nil, false, false},
-		{"senders_only_unknown", "", senders, "wrong", nil, false, false},
-		{"senders_only_sender", "", senders, "team-b-token", []string{"chat-b"}, true, true},
-		{"senders_only_empty_token", "", senders, "", nil, false, false},
-		{"empty_sender_secret_never_matches", "secret", []GitlabSender{{Secret: "", Chats: []string{"c"}}}, "", nil, false, false},
-		{"empty_sender_secret_nonempty_token", "secret", []GitlabSender{{Secret: "", Chats: []string{"c"}}}, "x", nil, false, false},
-		{"no_senders_default", "secret", nil, "secret", nil, false, true},
-		// Precedence invariants for directly-constructed configs (the serve path
-		// rejects duplicate tokens at startup, but library users can build
-		// GitlabConfig by hand): a token matching both a sender and the default
-		// resolves as the sender, and the first matching sender wins. Flipping
-		// either silently breaks team isolation.
-		{"sender_wins_over_default", "dup", []GitlabSender{{Secret: "dup", Chats: []string{"c1"}}}, "dup", []string{"c1"}, true, true},
-		{"first_sender_wins", "", []GitlabSender{{Secret: "dup", Chats: []string{"c1"}}, {Secret: "dup", Chats: []string{"c2"}}}, "dup", []string{"c1"}, true, true},
+		{name: "dev runtime", token: "dev-token", wantCode: http.StatusOK, wantChat: "dev-route", wantPrefix: "DEV ", wantStatus: "error"},
+		{name: "ops runtime", token: "ops-token", wantCode: http.StatusOK, wantChat: "ops-route", wantPrefix: "OPS ", wantStatus: "ok"},
+		{name: "unknown token", token: "unknown", wantCode: http.StatusUnauthorized},
+		{name: "empty token", token: "", wantCode: http.StatusUnauthorized},
 	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			srv, _ := newGitlabTestServer(t, &GitlabConfig{
-				DefaultChatID: "chat1",
-				SecretToken:   tc.secretToken,
-				Senders:       tc.senders,
-			})
-			chats, isSender, ok := srv.resolveGitlabAuth(tc.token)
-			if ok != tc.wantOK || isSender != tc.wantIsSender {
-				t.Fatalf("resolveGitlabAuth(%q) = (%v, %v, %v), want (%v, %v, %v)",
-					tc.token, chats, isSender, ok, tc.wantChats, tc.wantIsSender, tc.wantOK)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			srv, cap := newGitlabFanoutServer(t, cfg, okSend, nil)
+			headers := gitlabHeaders(tt.token)
+			if tt.token == "" {
+				delete(headers, "X-Gitlab-Token")
 			}
-			if !slices.Equal(chats, tc.wantChats) {
-				t.Errorf("chats = %v, want %v", chats, tc.wantChats)
+			w := doRequest(srv, "POST", "/api/v1/gitlab?bot=other", strings.NewReader(mrOpenPayload), headers)
+			if w.Code != tt.wantCode {
+				t.Fatalf("status = %d, want %d (body: %s)", w.Code, tt.wantCode, w.Body.String())
+			}
+			if tt.wantCode != http.StatusOK {
+				if cap.count() != 0 {
+					t.Fatalf("send count = %d, want 0", cap.count())
+				}
+				return
+			}
+			if cap.count() != 1 {
+				t.Fatalf("send count = %d, want 1", cap.count())
+			}
+			got := cap.last()
+			if got.ChatID != tt.wantChat || !strings.HasPrefix(got.Message, tt.wantPrefix) || got.Status != tt.wantStatus {
+				t.Errorf("send = %+v, want chat %q, message prefix %q, status %q", got, tt.wantChat, tt.wantPrefix, tt.wantStatus)
 			}
 		})
 	}
 }
 
-func TestGitlab_SenderTokenValidation(t *testing.T) {
-	// HTTP-level auth with senders configured: a sender token and the default
-	// token both authenticate; unknown/empty tokens are rejected — including
-	// when only senders are configured (no default secret at all).
-	cases := []struct {
-		name        string
-		secretToken string
-		token       string
-		wantCode    int
-	}{
-		{"sender_token_ok", "secret", "team-a-token", 200},
-		{"default_token_ok", "secret", "secret", 200},
-		{"unknown_401", "secret", "wrong", 401},
-		{"empty_401", "secret", "", 401},
-		{"senders_only_sender_ok", "", "team-a-token", 200},
-		{"senders_only_unknown_401", "", "wrong", 401},
-		{"senders_only_default_like_401", "", "secret", 401},
+func TestGitlab_SenderSelectionMatrix(t *testing.T) {
+	templates, err := ParseGitlabTemplates(nil)
+	if err != nil {
+		t.Fatalf("parse templates: %v", err)
 	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			srv, _ := newGitlabTestServer(t, &GitlabConfig{
-				DefaultChatID: "chat1",
-				SecretToken:   tc.secretToken,
-				Senders:       []GitlabSender{{Secret: "team-a-token", Chats: []string{"chat-a"}}},
-			})
-			headers := map[string]string{"Content-Type": "application/json"}
-			if tc.token != "" {
-				headers["X-Gitlab-Token"] = tc.token
+	matchingRoutes := []compiledRoute{{chats: []string{"alerts"}}}
+	nonMatchingRoutes := []compiledRoute{{
+		conds: []compiledCondition{{selector: "project", matchers: []patternMatcher{globMatcher{pattern: "other"}}}},
+		chats: []string{"alerts"},
+	}}
+	chatFn := func(chatID string) (ChatResolveResult, error) {
+		switch chatID {
+		case "alerts":
+			return ChatResolveResult{ChatID: "uuid-a"}, nil
+		case "dev":
+			return ChatResolveResult{ChatID: "uuid-b"}, nil
+		default:
+			return ChatResolveResult{ChatID: chatID}, nil
+		}
+	}
+
+	tests := []struct {
+		name       string
+		query      string
+		routes     []compiledRoute
+		wantCode   int
+		wantChats  []string
+		wantReason string
+	}{
+		{name: "query canonical without routes", query: "?chat_id=uuid-a,uuid-a", wantCode: http.StatusOK, wantChats: []string{"uuid-a"}},
+		{name: "query alias derived through resolver", query: "?chat_id=alerts,uuid-a", wantCode: http.StatusOK, wantChats: []string{"uuid-a"}},
+		{name: "query overrides routes", query: "?chat_id=uuid-b", routes: matchingRoutes, wantCode: http.StatusOK, wantChats: []string{"uuid-b"}},
+		{name: "targets without query or routes", wantCode: http.StatusOK, wantChats: []string{"uuid-a", "uuid-b"}},
+		{name: "routes without query", routes: matchingRoutes, wantCode: http.StatusOK, wantChats: []string{"uuid-a"}},
+		{name: "empty query", query: "?chat_id=,,", wantCode: http.StatusBadRequest},
+		{name: "partial out of scope", query: "?chat_id=uuid-a,foreign", wantCode: http.StatusForbidden},
+		{name: "no route match", routes: nonMatchingRoutes, wantCode: http.StatusOK, wantReason: "no route matched"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := &GitlabConfig{Senders: []GitlabSender{{
+				Label:     "dev",
+				Secret:    "dev-token",
+				Scope:     map[string]GitlabTarget{"uuid-a": {Target: "alerts"}, "uuid-b": {Target: "dev"}},
+				Targets:   []string{"alerts", "dev"},
+				Templates: templates,
+				Routes:    tt.routes,
+			}}}
+			srv, cap := newGitlabFanoutServer(t, cfg, okSend, chatFn)
+			w := doRequest(srv, "POST", "/api/v1/gitlab"+tt.query, strings.NewReader(mrOpenPayload), gitlabHeaders("dev-token"))
+			if w.Code != tt.wantCode {
+				t.Fatalf("status = %d, want %d (body: %s)", w.Code, tt.wantCode, w.Body.String())
 			}
-			w := doRequest(srv, "POST", "/api/v1/gitlab", strings.NewReader(mrOpenPayload), headers)
-			if w.Code != tc.wantCode {
-				t.Fatalf("status = %d, want %d (body: %s)", w.Code, tc.wantCode, w.Body.String())
+			if cap.count() != len(tt.wantChats) {
+				t.Fatalf("send count = %d, want %d", cap.count(), len(tt.wantChats))
+			}
+			for i, want := range tt.wantChats {
+				if got := cap.calls[i].ChatID; got != want {
+					t.Errorf("send[%d].chat = %q, want %q", i, got, want)
+				}
+			}
+			if tt.wantReason != "" {
+				var body struct {
+					OK      bool   `json:"ok"`
+					Ignored bool   `json:"ignored"`
+					Event   string `json:"event"`
+					Reason  string `json:"reason"`
+				}
+				if err := json.Unmarshal(w.Body.Bytes(), &body); err != nil {
+					t.Fatalf("decode response: %v (body: %s)", err, w.Body.String())
+				}
+				if !body.OK || !body.Ignored || body.Reason != tt.wantReason {
+					t.Errorf("response = %+v, want ignored reason %q", body, tt.wantReason)
+				}
 			}
 		})
+	}
+}
+
+func TestSenderScopeTargetsUsesPrebuiltScope(t *testing.T) {
+	s := scopeTestServer(t)
+	targets, reject, ok := s.senderScopeTargets(
+		[]string{"team-a-alerts", "uuid-a", "team-a-dev"},
+		map[string]GitlabTarget{"uuid-a": {Target: "team-a-alerts"}, "uuid-b": {Target: "team-a-dev"}},
+	)
+	if !ok || reject != "" || !slices.Equal(targets, []string{"team-a-alerts", "team-a-dev"}) {
+		t.Fatalf("got (%v, %q, %v), want ([team-a-alerts team-a-dev], empty, true)", targets, reject, ok)
+	}
+}
+
+// A requested alias whose bot binding contradicts the scope target's binding is
+// rejected: honoring it would silently switch the sending bot (the runtime
+// mirror of the startup route bot-conflict check).
+func TestSenderScopeTargetsRejectsBotConflict(t *testing.T) {
+	chatFn := func(chatID string) (ChatResolveResult, error) {
+		if chatID == "alerts-ops" {
+			return ChatResolveResult{ChatID: "uuid-a", Bot: "ops"}, nil
+		}
+		return ChatResolveResult{ChatID: chatID}, nil
+	}
+	s := New(Config{Listen: ":0", BasePath: "/api/v1"}, okSend, chatFn)
+	scope := map[string]GitlabTarget{"uuid-a": {Target: "alerts-dev", Bot: "dev"}}
+
+	_, reject, ok := s.senderScopeTargets([]string{"alerts-ops"}, scope)
+	if ok || !strings.Contains(reject, `"alerts-ops" is bound to bot "ops"`) {
+		t.Fatalf("got (ok=%v, reject=%q), want bot-conflict rejection", ok, reject)
+	}
+
+	// An unbound reference (raw UUID) to the same chat stays allowed.
+	targets, reject, ok := s.senderScopeTargets([]string{"uuid-a"}, scope)
+	if !ok || !slices.Equal(targets, []string{"alerts-dev"}) {
+		t.Fatalf("got (%v, %q, %v), want ([alerts-dev], empty, true)", targets, reject, ok)
+	}
+}
+
+// WithGitlab must normalize hand-built senders: a nil Templates registry gets
+// the built-in defaults (instead of a nil-pointer panic on the first rendered
+// event) and a missing Label gets the "senders[i]" fallback.
+func TestWithGitlabNormalizesHandBuiltSenders(t *testing.T) {
+	cfg := &GitlabConfig{Senders: []GitlabSender{{
+		Secret:  "tok",
+		Scope:   map[string]GitlabTarget{"uuid-a": {Target: "uuid-a"}},
+		Targets: []string{"uuid-a"},
+	}}}
+	cap := &captureSend{}
+	send := func(ctx context.Context, p *SendPayload) (string, error) {
+		cap.record(p)
+		return "sync-1", nil
+	}
+	chatFn := func(chatID string) (ChatResolveResult, error) {
+		return ChatResolveResult{ChatID: chatID}, nil
+	}
+	srv := New(Config{Listen: ":0", BasePath: "/api/v1"}, send, chatFn, WithGitlab(cfg))
+
+	if got := cfg.Senders[0].Label; got != "senders[0]" {
+		t.Errorf("label = %q, want senders[0]", got)
+	}
+	if cfg.Senders[0].Templates == nil {
+		t.Fatal("templates not defaulted")
+	}
+	w := doRequest(srv, "POST", "/api/v1/gitlab", strings.NewReader(mrOpenPayload), gitlabHeaders("tok"))
+	if w.Code != 200 || cap.count() != 1 {
+		t.Fatalf("status = %d, sends = %d, want 200 and 1 send (body: %s)", w.Code, cap.count(), w.Body.String())
+	}
+}
+
+// WithGitlab(nil) must leave the endpoint disabled rather than panic in New:
+// callers may build the option from a maybe-nil config.
+func TestWithGitlabNilConfigDisablesEndpoint(t *testing.T) {
+	chatFn := func(chatID string) (ChatResolveResult, error) {
+		return ChatResolveResult{ChatID: chatID}, nil
+	}
+	srv := New(Config{Listen: ":0", BasePath: "/api/v1"}, okSend, chatFn, WithGitlab(nil))
+	w := doRequest(srv, "POST", "/api/v1/gitlab", strings.NewReader(mrOpenPayload), gitlabHeaders("secret"))
+	if w.Code != 404 {
+		t.Fatalf("status = %d, want 404 (endpoint disabled)", w.Code)
 	}
 }
 
@@ -603,7 +813,7 @@ func TestGitlab_EndpointNotRegisteredWithoutConfig(t *testing.T) {
 }
 
 func TestGitlab_ChatOverride(t *testing.T) {
-	srv, cap := newGitlabTestServer(t, &GitlabConfig{DefaultChatID: "chat1", SecretToken: "secret"})
+	srv, cap := newGitlabTestServer(t, gitlabTestConfig("secret", "chat1", "chat2"))
 	w := doRequest(srv, "POST", "/api/v1/gitlab?chat_id=chat2", strings.NewReader(mrOpenPayload), gitlabHeaders("secret"))
 	if w.Code != 200 {
 		t.Fatalf("status = %d, body: %s", w.Code, w.Body.String())
@@ -616,7 +826,7 @@ func TestGitlab_ChatOverride(t *testing.T) {
 // TestGitlab_MultiChatOverride: ?chat_id may itself list several chats
 // (comma-separated) and fans the event out to each, deduplicating repeats.
 func TestGitlab_MultiChatOverride(t *testing.T) {
-	srv, cap := newGitlabTestServer(t, &GitlabConfig{DefaultChatID: "chat1", SecretToken: "secret"})
+	srv, cap := newGitlabTestServer(t, gitlabTestConfig("secret", "chatA", "chatB"))
 	w := doRequest(srv, "POST", "/api/v1/gitlab?chat_id=chatA,+chatB+,chatA", strings.NewReader(mrOpenPayload), gitlabHeaders("secret"))
 	if w.Code != 200 {
 		t.Fatalf("status = %d, body: %s", w.Code, w.Body.String())
@@ -640,7 +850,7 @@ func TestGitlab_ChatResolveError(t *testing.T) {
 	// A chat that fails to resolve is a per-chat delivery outcome, not a
 	// request-level error: with the single default chat unresolvable, every
 	// target fails -> 502 with the error in errors[] (unified contract).
-	srv, cap := newGitlabTestServer(t, &GitlabConfig{DefaultChatID: "unknown-alias", SecretToken: "secret"})
+	srv, cap := newGitlabTestServer(t, gitlabTestConfig("secret", "unknown-alias"))
 	w := doRequest(srv, "POST", "/api/v1/gitlab", strings.NewReader(mrOpenPayload), gitlabHeaders("secret"))
 	if w.Code != 502 {
 		t.Fatalf("status = %d, want 502 (body: %s)", w.Code, w.Body.String())
@@ -657,19 +867,8 @@ func TestGitlab_ChatResolveError(t *testing.T) {
 	}
 }
 
-func TestGitlab_MissingChatID(t *testing.T) {
-	srv, cap := newGitlabTestServer(t, &GitlabConfig{SecretToken: "secret"})
-	w := doRequest(srv, "POST", "/api/v1/gitlab", strings.NewReader(mrOpenPayload), gitlabHeaders("secret"))
-	if w.Code != 400 {
-		t.Fatalf("status = %d, want 400 (body: %s)", w.Code, w.Body.String())
-	}
-	if cap.count() != 0 {
-		t.Errorf("send count = %d, want 0", cap.count())
-	}
-}
-
 func TestGitlab_InvalidJSON(t *testing.T) {
-	srv, _ := newGitlabTestServer(t, &GitlabConfig{DefaultChatID: "chat1", SecretToken: "secret"})
+	srv, _ := newGitlabTestServer(t, gitlabTestConfig("secret", "chat1"))
 	w := doRequest(srv, "POST", "/api/v1/gitlab", strings.NewReader("{not json"), gitlabHeaders("secret"))
 	if w.Code != 400 {
 		t.Fatalf("status = %d, want 400 (body: %s)", w.Code, w.Body.String())
@@ -677,7 +876,7 @@ func TestGitlab_InvalidJSON(t *testing.T) {
 }
 
 func TestGitlab_AuthorUsernameFallback(t *testing.T) {
-	srv, cap := newGitlabTestServer(t, &GitlabConfig{DefaultChatID: "chat1", SecretToken: "secret"})
+	srv, cap := newGitlabTestServer(t, gitlabTestConfig("secret", "chat1"))
 	w := doRequest(srv, "POST", "/api/v1/gitlab", strings.NewReader(mrOpenUsernameOnlyPayload), gitlabHeaders("secret"))
 	if w.Code != 200 {
 		t.Fatalf("status = %d, body: %s", w.Code, w.Body.String())
@@ -692,7 +891,7 @@ func TestGitlab_AuthorUsernameFallback(t *testing.T) {
 
 func TestGitlab_SendFailure(t *testing.T) {
 	srv, cap := newGitlabTestServerCfg(t, Config{Listen: ":0", BasePath: "/api/v1"},
-		&GitlabConfig{DefaultChatID: "chat1", SecretToken: "secret"}, fmt.Errorf("botx unavailable"))
+		gitlabTestConfig("secret", "chat1"), fmt.Errorf("botx unavailable"))
 	w := doRequest(srv, "POST", "/api/v1/gitlab", strings.NewReader(mrOpenPayload), gitlabHeaders("secret"))
 	if w.Code != 502 {
 		t.Fatalf("status = %d, want 502 (body: %s)", w.Code, w.Body.String())
@@ -700,41 +899,6 @@ func TestGitlab_SendFailure(t *testing.T) {
 	if cap.count() != 1 {
 		t.Errorf("send count = %d, want 1 (send attempted then failed)", cap.count())
 	}
-}
-
-func TestGitlab_ChatResolutionFallbacks(t *testing.T) {
-	t.Run("global_default_chat", func(t *testing.T) {
-		srv, cap := newGitlabTestServerCfg(t, Config{Listen: ":0", BasePath: "/api/v1", DefaultChatAlias: "globchat"},
-			&GitlabConfig{SecretToken: "secret"}, nil)
-		w := doRequest(srv, "POST", "/api/v1/gitlab", strings.NewReader(mrOpenPayload), gitlabHeaders("secret"))
-		if w.Code != 200 {
-			t.Fatalf("status = %d, body: %s", w.Code, w.Body.String())
-		}
-		if cap.last().ChatID != "globchat" {
-			t.Errorf("chat = %q, want globchat", cap.last().ChatID)
-		}
-	})
-	t.Run("single_chat_fallback", func(t *testing.T) {
-		srv, cap := newGitlabTestServer(t, &GitlabConfig{SecretToken: "secret", FallbackChatID: "onlychat"})
-		w := doRequest(srv, "POST", "/api/v1/gitlab", strings.NewReader(mrOpenPayload), gitlabHeaders("secret"))
-		if w.Code != 200 {
-			t.Fatalf("status = %d, body: %s", w.Code, w.Body.String())
-		}
-		if cap.last().ChatID != "onlychat" {
-			t.Errorf("chat = %q, want onlychat", cap.last().ChatID)
-		}
-	})
-	t.Run("query_overrides_default_chat", func(t *testing.T) {
-		srv, cap := newGitlabTestServerCfg(t, Config{Listen: ":0", BasePath: "/api/v1", DefaultChatAlias: "globchat"},
-			&GitlabConfig{SecretToken: "secret", FallbackChatID: "onlychat"}, nil)
-		w := doRequest(srv, "POST", "/api/v1/gitlab?chat_id=override", strings.NewReader(mrOpenPayload), gitlabHeaders("secret"))
-		if w.Code != 200 {
-			t.Fatalf("status = %d, body: %s", w.Code, w.Body.String())
-		}
-		if cap.last().ChatID != "override" {
-			t.Errorf("chat = %q, want override", cap.last().ChatID)
-		}
-	})
 }
 
 func TestEventMatches(t *testing.T) {
@@ -792,10 +956,9 @@ func TestPassesFilter(t *testing.T) {
 
 func TestGitlab_FilterIgnoresEvent(t *testing.T) {
 	t.Run("excluded_event_ignored", func(t *testing.T) {
-		srv, cap := newGitlabTestServer(t, &GitlabConfig{
-			DefaultChatID: "chat1", SecretToken: "secret",
-			Exclude: []string{"merge_request.update"},
-		})
+		cfg := gitlabTestConfig("secret", "chat1")
+		cfg.Senders[0].Exclude = []string{"merge_request.update"}
+		srv, cap := newGitlabTestServer(t, cfg)
 		w := doRequest(srv, "POST", "/api/v1/gitlab", strings.NewReader(mrUpdatePayload), gitlabHeaders("secret"))
 		if w.Code != 200 {
 			t.Fatalf("status = %d, body: %s", w.Code, w.Body.String())
@@ -812,10 +975,9 @@ func TestGitlab_FilterIgnoresEvent(t *testing.T) {
 		}
 	})
 	t.Run("only_not_listed_ignored", func(t *testing.T) {
-		srv, cap := newGitlabTestServer(t, &GitlabConfig{
-			DefaultChatID: "chat1", SecretToken: "secret",
-			Only: []string{"pipeline.*"},
-		})
+		cfg := gitlabTestConfig("secret", "chat1")
+		cfg.Senders[0].Only = []string{"pipeline.*"}
+		srv, cap := newGitlabTestServer(t, cfg)
 		w := doRequest(srv, "POST", "/api/v1/gitlab", strings.NewReader(mrOpenPayload), gitlabHeaders("secret"))
 		if w.Code != 200 {
 			t.Fatalf("status = %d, body: %s", w.Code, w.Body.String())
@@ -825,10 +987,9 @@ func TestGitlab_FilterIgnoresEvent(t *testing.T) {
 		}
 	})
 	t.Run("only_listed_passes", func(t *testing.T) {
-		srv, cap := newGitlabTestServer(t, &GitlabConfig{
-			DefaultChatID: "chat1", SecretToken: "secret",
-			Only: []string{"merge_request.*"},
-		})
+		cfg := gitlabTestConfig("secret", "chat1")
+		cfg.Senders[0].Only = []string{"merge_request.*"}
+		srv, cap := newGitlabTestServer(t, cfg)
 		w := doRequest(srv, "POST", "/api/v1/gitlab", strings.NewReader(mrOpenPayload), gitlabHeaders("secret"))
 		if w.Code != 200 {
 			t.Fatalf("status = %d, body: %s", w.Code, w.Body.String())
@@ -842,9 +1003,7 @@ func TestGitlab_FilterIgnoresEvent(t *testing.T) {
 func TestGitlab_EmptyMessageIgnored(t *testing.T) {
 	// A payload without object_kind renders the generic default to an empty
 	// string; with an allow-all config it must be ignored, not sent blank.
-	srv, cap := newGitlabTestServer(t, &GitlabConfig{
-		DefaultChatID: "chat1", SecretToken: "secret",
-	})
+	srv, cap := newGitlabTestServer(t, gitlabTestConfig("secret", "chat1"))
 	w := doRequest(srv, "POST", "/api/v1/gitlab", strings.NewReader(`{}`), gitlabHeaders("secret"))
 	if w.Code != 200 {
 		t.Fatalf("status = %d, body: %s", w.Code, w.Body.String())
@@ -877,10 +1036,9 @@ func TestGitlab_ErrorEventsStatus(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			srv, cap := newGitlabTestServer(t, &GitlabConfig{
-				DefaultChatID: "chat1", SecretToken: "secret",
-				ErrorEvents: tc.errorEvents,
-			})
+			cfg := gitlabTestConfig("secret", "chat1")
+			cfg.Senders[0].ErrorEvents = tc.errorEvents
+			srv, cap := newGitlabTestServer(t, cfg)
 			w := doRequest(srv, "POST", "/api/v1/gitlab", strings.NewReader(tc.payload), gitlabHeaders("secret"))
 			if w.Code != 200 {
 				t.Fatalf("status = %d, body: %s", w.Code, w.Body.String())
@@ -1019,9 +1177,9 @@ func TestGitlab_TemplateWildcardKey(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ParseGitlabTemplates: %v", err)
 	}
-	srv, cap := newGitlabTestServer(t, &GitlabConfig{
-		DefaultChatID: "chat1", SecretToken: "secret", Templates: gt,
-	})
+	cfg := gitlabTestConfig("secret", "chat1")
+	cfg.Senders[0].Templates = gt
+	srv, cap := newGitlabTestServer(t, cfg)
 	w := doRequest(srv, "POST", "/api/v1/gitlab", strings.NewReader(mrUpdatePayload), gitlabHeaders("secret"))
 	if w.Code != 200 {
 		t.Fatalf("status = %d, body: %s", w.Code, w.Body.String())
@@ -1040,9 +1198,9 @@ func TestGitlab_UserWildcardOverridesBuiltinBareKind(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ParseGitlabTemplates: %v", err)
 	}
-	srv, cap := newGitlabTestServer(t, &GitlabConfig{
-		DefaultChatID: "chat1", SecretToken: "secret", Templates: gt,
-	})
+	cfg := gitlabTestConfig("secret", "chat1")
+	cfg.Senders[0].Templates = gt
+	srv, cap := newGitlabTestServer(t, cfg)
 	w := doRequest(srv, "POST", "/api/v1/gitlab", strings.NewReader(pipelinePayload), gitlabHeaders("secret"))
 	if w.Code != 200 {
 		t.Fatalf("status = %d, body: %s", w.Code, w.Body.String())
@@ -1057,9 +1215,9 @@ func TestGitlab_TemplateOverrideEndpoint(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ParseGitlabTemplates: %v", err)
 	}
-	srv, cap := newGitlabTestServer(t, &GitlabConfig{
-		DefaultChatID: "chat1", SecretToken: "secret", Templates: gt,
-	})
+	cfg := gitlabTestConfig("secret", "chat1")
+	cfg.Senders[0].Templates = gt
+	srv, cap := newGitlabTestServer(t, cfg)
 	w := doRequest(srv, "POST", "/api/v1/gitlab", strings.NewReader(mrOpenPayload), gitlabHeaders("secret"))
 	if w.Code != 200 {
 		t.Fatalf("status = %d, body: %s", w.Code, w.Body.String())
@@ -1077,9 +1235,9 @@ func TestGitlab_TemplateExecutionError(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ParseGitlabTemplates: %v", err)
 	}
-	srv, cap := newGitlabTestServer(t, &GitlabConfig{
-		DefaultChatID: "chat1", SecretToken: "secret", Templates: gt,
-	})
+	cfg := gitlabTestConfig("secret", "chat1")
+	cfg.Senders[0].Templates = gt
+	srv, cap := newGitlabTestServer(t, cfg)
 	w := doRequest(srv, "POST", "/api/v1/gitlab", strings.NewReader(mrOpenPayload), gitlabHeaders("secret"))
 	if w.Code != 400 {
 		t.Fatalf("status = %d, want 400 on template execution error; body: %s", w.Code, w.Body.String())
@@ -1106,12 +1264,14 @@ func mustCompileRoutes(t *testing.T, in []config.GitlabRouteYAMLConfig) []compil
 // nil chatFn resolves every alias to itself (ChatID == alias).
 func newGitlabFanoutServer(t *testing.T, cfg *GitlabConfig, sendFn SendFunc, chatFn ChatResolver) (*Server, *captureSend) {
 	t.Helper()
-	if cfg.Templates == nil {
-		tmpls, err := ParseGitlabTemplates(nil)
-		if err != nil {
-			t.Fatalf("parse default templates: %v", err)
+	for i := range cfg.Senders {
+		if cfg.Senders[i].Templates == nil {
+			tmpls, err := ParseGitlabTemplates(nil)
+			if err != nil {
+				t.Fatalf("parse default templates: %v", err)
+			}
+			cfg.Senders[i].Templates = tmpls
 		}
-		cfg.Templates = tmpls
 	}
 	cap := &captureSend{}
 	send := func(ctx context.Context, p *SendPayload) (string, error) {
@@ -1136,7 +1296,9 @@ func TestGitlab_QueryChatBypassesRoutes(t *testing.T) {
 	routes := mustCompileRoutes(t, []config.GitlabRouteYAMLConfig{
 		{Match: map[string][]string{"project": {"myproj"}}, Chats: []string{"chatA", "chatB"}},
 	})
-	srv, cap := newGitlabFanoutServer(t, &GitlabConfig{SecretToken: "secret", Routes: routes}, okSend, nil)
+	cfg := gitlabTestConfig("secret", "override")
+	cfg.Senders[0].Routes = routes
+	srv, cap := newGitlabFanoutServer(t, cfg, okSend, nil)
 	w := doRequest(srv, "POST", "/api/v1/gitlab?chat_id=override", strings.NewReader(mrOpenPayload), gitlabHeaders("secret"))
 	if w.Code != 200 {
 		t.Fatalf("status = %d, body: %s", w.Code, w.Body.String())
@@ -1162,7 +1324,9 @@ func TestGitlab_FanoutTwoChats(t *testing.T) {
 	routes := mustCompileRoutes(t, []config.GitlabRouteYAMLConfig{
 		{Match: map[string][]string{"project": {"myproj"}}, Chats: []string{"chatA", "chatB"}},
 	})
-	srv, cap := newGitlabFanoutServer(t, &GitlabConfig{SecretToken: "secret", Routes: routes}, okSend, nil)
+	cfg := gitlabTestConfig("secret")
+	cfg.Senders[0].Routes = routes
+	srv, cap := newGitlabFanoutServer(t, cfg, okSend, nil)
 	w := doRequest(srv, "POST", "/api/v1/gitlab", strings.NewReader(mrOpenPayload), gitlabHeaders("secret"))
 	if w.Code != 200 {
 		t.Fatalf("status = %d, body: %s", w.Code, w.Body.String())
@@ -1209,7 +1373,9 @@ func TestGitlab_FanoutNamespacedProject(t *testing.T) {
 		{Match: map[string][]string{"project": {"api"}}, Chats: []string{"wrong"}},
 		{Match: map[string][]string{"project": {"group/backend/*"}}, Chats: []string{"backend-mrs"}},
 	})
-	srv, cap := newGitlabFanoutServer(t, &GitlabConfig{SecretToken: "secret", Routes: routes}, okSend, nil)
+	cfg := gitlabTestConfig("secret")
+	cfg.Senders[0].Routes = routes
+	srv, cap := newGitlabFanoutServer(t, cfg, okSend, nil)
 	w := doRequest(srv, "POST", "/api/v1/gitlab", strings.NewReader(payload), gitlabHeaders("secret"))
 	if w.Code != 200 {
 		t.Fatalf("status = %d, body: %s", w.Code, w.Body.String())
@@ -1233,9 +1399,10 @@ func TestGitlab_FanoutErrorStatus(t *testing.T) {
 	routes := mustCompileRoutes(t, []config.GitlabRouteYAMLConfig{
 		{Match: map[string][]string{"kind": {"pipeline"}}, Chats: []string{"chatA", "chatB"}},
 	})
-	srv, cap := newGitlabFanoutServer(t, &GitlabConfig{
-		SecretToken: "secret", Routes: routes, ErrorEvents: []string{"pipeline.failed"},
-	}, okSend, nil)
+	cfg := gitlabTestConfig("secret")
+	cfg.Senders[0].Routes = routes
+	cfg.Senders[0].ErrorEvents = []string{"pipeline.failed"}
+	srv, cap := newGitlabFanoutServer(t, cfg, okSend, nil)
 	w := doRequest(srv, "POST", "/api/v1/gitlab", strings.NewReader(pipelinePayload), gitlabHeaders("secret"))
 	if w.Code != 200 {
 		t.Fatalf("status = %d, body: %s", w.Code, w.Body.String())
@@ -1262,7 +1429,9 @@ func TestGitlab_FanoutPartialFailure(t *testing.T) {
 		}
 		return "sync-1", nil
 	}
-	srv, cap := newGitlabFanoutServer(t, &GitlabConfig{SecretToken: "secret", Routes: routes}, sendFn, nil)
+	cfg := gitlabTestConfig("secret")
+	cfg.Senders[0].Routes = routes
+	srv, cap := newGitlabFanoutServer(t, cfg, sendFn, nil)
 	w := doRequest(srv, "POST", "/api/v1/gitlab", strings.NewReader(mrOpenPayload), gitlabHeaders("secret"))
 	if w.Code != 200 {
 		t.Fatalf("status = %d, want 200 (partial success); body: %s", w.Code, w.Body.String())
@@ -1290,7 +1459,9 @@ func TestGitlab_FanoutAllFail(t *testing.T) {
 	sendFn := func(context.Context, *SendPayload) (string, error) {
 		return "", fmt.Errorf("botx unavailable")
 	}
-	srv, cap := newGitlabFanoutServer(t, &GitlabConfig{SecretToken: "secret", Routes: routes}, sendFn, nil)
+	cfg := gitlabTestConfig("secret")
+	cfg.Senders[0].Routes = routes
+	srv, cap := newGitlabFanoutServer(t, cfg, sendFn, nil)
 	w := doRequest(srv, "POST", "/api/v1/gitlab", strings.NewReader(mrOpenPayload), gitlabHeaders("secret"))
 	if w.Code != 502 {
 		t.Fatalf("status = %d, want 502 (all failed); body: %s", w.Code, w.Body.String())
@@ -1309,31 +1480,6 @@ func TestGitlab_FanoutAllFail(t *testing.T) {
 
 // TestGitlab_NoRouteMatchFallsBackToDefault: when no rule matches, the event is
 // delivered to the configured default chat rather than dropped.
-func TestGitlab_NoRouteMatchFallsBackToDefault(t *testing.T) {
-	routes := mustCompileRoutes(t, []config.GitlabRouteYAMLConfig{
-		{Match: map[string][]string{"project": {"otherproj"}}, Chats: []string{"chatA"}},
-	})
-	srv, cap := newGitlabFanoutServer(t, &GitlabConfig{SecretToken: "secret", DefaultChatID: "dflt", Routes: routes}, okSend, nil)
-	w := doRequest(srv, "POST", "/api/v1/gitlab", strings.NewReader(mrOpenPayload), gitlabHeaders("secret"))
-	if w.Code != 200 {
-		t.Fatalf("status = %d, body: %s", w.Code, w.Body.String())
-	}
-	if cap.count() != 1 || cap.last().ChatID != "dflt" {
-		t.Fatalf("send count = %d chat = %q, want 1 to dflt", cap.count(), func() string {
-			if cap.last() == nil {
-				return ""
-			}
-			return cap.last().ChatID
-		}())
-	}
-	var resp MultiSendResponse
-	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
-		t.Fatalf("decode: %v (body: %s)", err, w.Body.String())
-	}
-	if !resp.OK || len(resp.Results) != 1 || resp.Results[0].Chat != "dflt" {
-		t.Errorf("response = %+v, want ok with single dflt result", resp)
-	}
-}
 
 // TestGitlab_NoRouteMatchNoDefaultIgnored: no rule matches and no default chat
 // is configured -> the event is ignored (200) rather than delivered or errored.
@@ -1341,7 +1487,9 @@ func TestGitlab_NoRouteMatchNoDefaultIgnored(t *testing.T) {
 	routes := mustCompileRoutes(t, []config.GitlabRouteYAMLConfig{
 		{Match: map[string][]string{"project": {"otherproj"}}, Chats: []string{"chatA"}},
 	})
-	srv, cap := newGitlabFanoutServer(t, &GitlabConfig{SecretToken: "secret", Routes: routes}, okSend, nil)
+	cfg := gitlabTestConfig("secret")
+	cfg.Senders[0].Routes = routes
+	srv, cap := newGitlabFanoutServer(t, cfg, okSend, nil)
 	w := doRequest(srv, "POST", "/api/v1/gitlab", strings.NewReader(mrOpenPayload), gitlabHeaders("secret"))
 	if w.Code != 200 {
 		t.Fatalf("status = %d, body: %s", w.Code, w.Body.String())
@@ -1370,7 +1518,9 @@ func TestGitlab_FanoutChatResolveError(t *testing.T) {
 		}
 		return ChatResolveResult{ChatID: chatID}, nil
 	}
-	srv, cap := newGitlabFanoutServer(t, &GitlabConfig{SecretToken: "secret", Routes: routes}, okSend, chatFn)
+	cfg := gitlabTestConfig("secret")
+	cfg.Senders[0].Routes = routes
+	srv, cap := newGitlabFanoutServer(t, cfg, okSend, chatFn)
 	w := doRequest(srv, "POST", "/api/v1/gitlab", strings.NewReader(mrOpenPayload), gitlabHeaders("secret"))
 	if w.Code != 200 {
 		t.Fatalf("status = %d, want 200 (one chat still delivers); body: %s", w.Code, w.Body.String())
@@ -1389,16 +1539,11 @@ func TestGitlab_FanoutChatResolveError(t *testing.T) {
 
 // --- Task 3 (per-sender tokens): isolated send path for a matched sender ---
 
-// senderTestConfig returns a GitlabConfig with a default secret, a default chat
-// and one two-chat sender, so tests can hit either auth path.
+// senderTestConfig returns one two-chat sender runtime.
 func senderTestConfig() *GitlabConfig {
-	return &GitlabConfig{
-		SecretToken:   "secret",
-		DefaultChatID: "chat1",
-		Senders: []GitlabSender{
-			{Secret: "team-a-token", Chats: []string{"team-a-chat1", "team-a-chat2"}},
-		},
-	}
+	return &GitlabConfig{Senders: []GitlabSender{
+		gitlabTestSender("team-a-token", "team-a-chat1", "team-a-chat2"),
+	}}
 }
 
 // TestGitlab_SenderFanout: an event authenticated with a sender token is fanned
@@ -1514,8 +1659,11 @@ func TestGitlab_SenderChatFilterAliasUUID(t *testing.T) {
 
 	t.Run("UUID request against alias scope", func(t *testing.T) {
 		cfg := &GitlabConfig{
-			SecretToken: "secret",
-			Senders:     []GitlabSender{{Secret: "team-a-token", Chats: []string{"team-a-alerts", "team-a-dev"}}},
+			Senders: []GitlabSender{{
+				Secret:  "team-a-token",
+				Scope:   map[string]GitlabTarget{"uuid-a": {Target: "team-a-alerts"}, "uuid-b": {Target: "team-a-dev"}},
+				Targets: []string{"team-a-alerts", "team-a-dev"},
+			}},
 		}
 		srv, cap := newGitlabFanoutServer(t, cfg, okSend, chatFn)
 		w := doRequest(srv, "POST", "/api/v1/gitlab?chat_id=uuid-a", strings.NewReader(mrOpenPayload), gitlabHeaders("team-a-token"))
@@ -1529,8 +1677,11 @@ func TestGitlab_SenderChatFilterAliasUUID(t *testing.T) {
 
 	t.Run("alias request against UUID scope", func(t *testing.T) {
 		cfg := &GitlabConfig{
-			SecretToken: "secret",
-			Senders:     []GitlabSender{{Secret: "team-a-token", Chats: []string{"uuid-a", "uuid-b"}}},
+			Senders: []GitlabSender{{
+				Secret:  "team-a-token",
+				Scope:   map[string]GitlabTarget{"uuid-a": {Target: "uuid-a"}, "uuid-b": {Target: "uuid-b"}},
+				Targets: []string{"uuid-a", "uuid-b"},
+			}},
 		}
 		srv, cap := newGitlabFanoutServer(t, cfg, okSend, chatFn)
 		w := doRequest(srv, "POST", "/api/v1/gitlab?chat_id=team-a-alerts", strings.NewReader(mrOpenPayload), gitlabHeaders("team-a-token"))
@@ -1549,10 +1700,9 @@ func TestGitlab_SenderChatFilterAliasUUID(t *testing.T) {
 // TestGitlab_SenderChatFilterMultiSubset: ?chat_id naming several in-scope chats
 // fans out to exactly those chats, in request order, leaving the rest untouched.
 func TestGitlab_SenderChatFilterMultiSubset(t *testing.T) {
-	cfg := &GitlabConfig{
-		SecretToken: "secret",
-		Senders:     []GitlabSender{{Secret: "team-a-token", Chats: []string{"team-a-c1", "team-a-c2", "team-a-c3"}}},
-	}
+	cfg := &GitlabConfig{Senders: []GitlabSender{
+		gitlabTestSender("team-a-token", "team-a-c1", "team-a-c2", "team-a-c3"),
+	}}
 	srv, cap := newGitlabFanoutServer(t, cfg, okSend, nil)
 	w := doRequest(srv, "POST", "/api/v1/gitlab?chat_id=team-a-c1,team-a-c3", strings.NewReader(mrOpenPayload), gitlabHeaders("team-a-token"))
 	if w.Code != 200 {
@@ -1577,13 +1727,15 @@ func TestGitlab_SenderChatFilterMultiSubset(t *testing.T) {
 // delivery succeeds (rather than failing with "bot is required").
 func TestGitlab_SenderChatFilterUUIDMultiBot(t *testing.T) {
 	cfg := &GitlabConfig{
-		Senders: []GitlabSender{{Secret: "team-a-token", Chats: []string{"team-a-alerts"}}},
+		Senders: []GitlabSender{{
+			Secret: "team-a-token", Scope: map[string]GitlabTarget{"uuid-a": {Target: "team-a-alerts", Bot: "bot-a"}}, Targets: []string{"team-a-alerts"},
+		}},
 	}
 	tmpls, err := ParseGitlabTemplates(nil)
 	if err != nil {
 		t.Fatalf("parse default templates: %v", err)
 	}
-	cfg.Templates = tmpls
+	cfg.Senders[0].Templates = tmpls
 	cap := &captureSend{}
 	send := func(ctx context.Context, p *SendPayload) (string, error) {
 		cap.record(p)
@@ -1606,33 +1758,10 @@ func TestGitlab_SenderChatFilterUUIDMultiBot(t *testing.T) {
 	}
 }
 
-// TestGitlab_SenderIgnoresRoutes: configured routes must not apply to a
-// sender-token request; targets are the sender's chats, not the rule's.
-func TestGitlab_SenderIgnoresRoutes(t *testing.T) {
-	cfg := senderTestConfig()
-	cfg.Routes = mustCompileRoutes(t, []config.GitlabRouteYAMLConfig{
-		{Match: map[string][]string{"project": {"myproj"}}, Chats: []string{"routed-chat"}},
-	})
-	srv, cap := newGitlabFanoutServer(t, cfg, okSend, nil)
-	w := doRequest(srv, "POST", "/api/v1/gitlab", strings.NewReader(mrOpenPayload), gitlabHeaders("team-a-token"))
-	if w.Code != 200 {
-		t.Fatalf("status = %d, body: %s", w.Code, w.Body.String())
-	}
-	if cap.count() != 2 {
-		t.Fatalf("send count = %d, want 2 (sender chats, not the route)", cap.count())
-	}
-	for _, p := range cap.calls {
-		if p.ChatID == "routed-chat" {
-			t.Errorf("delivered to %q via routes; sender scope must ignore routes", p.ChatID)
-		}
-	}
-}
-
-// TestGitlab_SenderFilterApplies: the global only/exclude filter drops a
-// sender-token event the same way it drops a default-token one (200 ignored).
+// TestGitlab_SenderFilterApplies: sender-local filters drop matching events.
 func TestGitlab_SenderFilterApplies(t *testing.T) {
 	cfg := senderTestConfig()
-	cfg.Only = []string{"pipeline"}
+	cfg.Senders[0].Only = []string{"pipeline"}
 	srv, cap := newGitlabFanoutServer(t, cfg, okSend, nil)
 	w := doRequest(srv, "POST", "/api/v1/gitlab", strings.NewReader(mrOpenPayload), gitlabHeaders("team-a-token"))
 	if w.Code != 200 {
@@ -1654,7 +1783,7 @@ func TestGitlab_SenderFilterApplies(t *testing.T) {
 // sender path too — matching events deliver with status "error" to sender chats.
 func TestGitlab_SenderErrorStatus(t *testing.T) {
 	cfg := senderTestConfig()
-	cfg.ErrorEvents = []string{"pipeline.failed"}
+	cfg.Senders[0].ErrorEvents = []string{"pipeline.failed"}
 	srv, cap := newGitlabFanoutServer(t, cfg, okSend, nil)
 	w := doRequest(srv, "POST", "/api/v1/gitlab", strings.NewReader(pipelinePayload), gitlabHeaders("team-a-token"))
 	if w.Code != 200 {
@@ -1673,11 +1802,7 @@ func TestGitlab_SenderErrorStatus(t *testing.T) {
 // TestGitlab_SenderSingleChat: a sender configured with exactly one chat
 // delivers once, still via the fan-out response shape.
 func TestGitlab_SenderSingleChat(t *testing.T) {
-	cfg := &GitlabConfig{
-		SecretToken:   "secret",
-		DefaultChatID: "chat1",
-		Senders:       []GitlabSender{{Secret: "team-b-token", Chats: []string{"team-b-chat"}}},
-	}
+	cfg := &GitlabConfig{Senders: []GitlabSender{gitlabTestSender("team-b-token", "team-b-chat")}}
 	srv, cap := newGitlabFanoutServer(t, cfg, okSend, nil)
 	w := doRequest(srv, "POST", "/api/v1/gitlab", strings.NewReader(mrOpenPayload), gitlabHeaders("team-b-token"))
 	if w.Code != 200 {
@@ -1716,57 +1841,6 @@ func TestGitlab_SenderIgnoresQueryBot(t *testing.T) {
 	}
 	if !resp.OK || len(resp.Errors) != 0 {
 		t.Errorf("response = %+v, want ok without errors", resp)
-	}
-}
-
-// TestGitlab_QueryBotHonoredOnRoutesFanout: mirror of SenderIgnoresQueryBot —
-// on the default-token path ?bot= must reach gitlabDeliver. In this single-bot
-// harness (no SingleBotName) an honoured ?bot=other fails every delivery with
-// "bot ... is not available", so 502 here proves the query bot is threaded
-// through; if a refactor passed "" at the default call site, the request would
-// succeed with 200 and both this test and the sender-isolation one would go
-// vacuous.
-func TestGitlab_QueryBotHonoredOnRoutesFanout(t *testing.T) {
-	routes := mustCompileRoutes(t, []config.GitlabRouteYAMLConfig{
-		{Match: map[string][]string{"project": {"myproj"}}, Chats: []string{"chatA", "chatB"}},
-	})
-	srv, cap := newGitlabFanoutServer(t, &GitlabConfig{SecretToken: "secret", Routes: routes}, okSend, nil)
-	w := doRequest(srv, "POST", "/api/v1/gitlab?bot=other", strings.NewReader(mrOpenPayload), gitlabHeaders("secret"))
-	if w.Code != 502 {
-		t.Fatalf("status = %d, want 502 (?bot honoured must fail bot resolution); body: %s", w.Code, w.Body.String())
-	}
-	if cap.count() != 0 {
-		t.Fatalf("send count = %d, want 0 (bot resolution fails before send)", cap.count())
-	}
-	var resp MultiSendResponse
-	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
-		t.Fatalf("decode: %v (body: %s)", err, w.Body.String())
-	}
-	if len(resp.Errors) != 2 || !strings.Contains(resp.Errors[0].Error, `bot "other" is not available`) {
-		t.Errorf("errors = %+v, want 2 bot-not-available errors", resp.Errors)
-	}
-}
-
-// TestGitlab_QueryBotHonoredOnSinglePath: same guarantee for the single-chat
-// path — ?bot= on the default-token single-chat delivery must be validated. Bot
-// resolution failure is now a per-chat delivery outcome, so it surfaces as a 502
-// with the error in errors[] (the whole single-target fan-out failed) rather than
-// being silently dropped.
-func TestGitlab_QueryBotHonoredOnSinglePath(t *testing.T) {
-	srv, cap := newGitlabFanoutServer(t, &GitlabConfig{SecretToken: "secret", DefaultChatID: "chat1"}, okSend, nil)
-	w := doRequest(srv, "POST", "/api/v1/gitlab?bot=other", strings.NewReader(mrOpenPayload), gitlabHeaders("secret"))
-	if w.Code != 502 {
-		t.Fatalf("status = %d, want 502 (?bot honoured must fail bot resolution); body: %s", w.Code, w.Body.String())
-	}
-	if cap.count() != 0 {
-		t.Fatalf("send count = %d, want 0", cap.count())
-	}
-	var resp MultiSendResponse
-	if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
-		t.Fatalf("decode: %v (body: %s)", err, w.Body.String())
-	}
-	if len(resp.Errors) != 1 || resp.Errors[0].Chat != "chat1" || !strings.Contains(resp.Errors[0].Error, `bot "other" is not available`) {
-		t.Errorf("errors = %+v, want single chat1 bot-not-available error", resp.Errors)
 	}
 }
 
@@ -1834,14 +1908,20 @@ func TestGitlab_SenderFanoutPartialFailure(t *testing.T) {
 func TestGitlab_SenderMultiBot(t *testing.T) {
 	cfg := &GitlabConfig{
 		Senders: []GitlabSender{
-			{Secret: "team-a-token", Chats: []string{"team-a-bound", "team-a-unbound"}},
+			{
+				Secret: "team-a-token",
+				Scope: map[string]GitlabTarget{
+					"team-a-bound": {Target: "team-a-bound"}, "team-a-unbound": {Target: "team-a-unbound"},
+				},
+				Targets: []string{"team-a-bound", "team-a-unbound"},
+			},
 		},
 	}
 	tmpls, err := ParseGitlabTemplates(nil)
 	if err != nil {
 		t.Fatalf("parse default templates: %v", err)
 	}
-	cfg.Templates = tmpls
+	cfg.Senders[0].Templates = tmpls
 
 	cap := &captureSend{}
 	send := func(ctx context.Context, p *SendPayload) (string, error) {
@@ -1875,56 +1955,6 @@ func TestGitlab_SenderMultiBot(t *testing.T) {
 	}
 }
 
-// TestGitlab_DefaultTokenUnchangedWithSenders: with senders configured, the
-// default token keeps its original chat-selection behaviour — single delivery to
-// default_chat_id, uniform MultiSendResponse shape, ?chat_id override still works.
-func TestGitlab_DefaultTokenUnchangedWithSenders(t *testing.T) {
-	t.Run("default_chat", func(t *testing.T) {
-		srv, cap := newGitlabFanoutServer(t, senderTestConfig(), okSend, nil)
-		w := doRequest(srv, "POST", "/api/v1/gitlab", strings.NewReader(mrOpenPayload), gitlabHeaders("secret"))
-		if w.Code != 200 {
-			t.Fatalf("status = %d, body: %s", w.Code, w.Body.String())
-		}
-		if cap.count() != 1 {
-			t.Fatalf("send count = %d, want 1", cap.count())
-		}
-		if got := cap.last().ChatID; got != "chat1" {
-			t.Errorf("chat = %q, want chat1 (default)", got)
-		}
-		var resp MultiSendResponse
-		if err := json.Unmarshal(w.Body.Bytes(), &resp); err != nil {
-			t.Fatalf("decode: %v (body: %s)", err, w.Body.String())
-		}
-		if !resp.OK || len(resp.Results) != 1 || resp.Results[0].Chat != "chat1" || resp.Results[0].SyncID != "sync-1" {
-			t.Errorf("response = %+v, want ok with single chat1->sync-1 result", resp)
-		}
-	})
-	t.Run("query_chat_override", func(t *testing.T) {
-		srv, cap := newGitlabFanoutServer(t, senderTestConfig(), okSend, nil)
-		w := doRequest(srv, "POST", "/api/v1/gitlab?chat_id=chat2", strings.NewReader(mrOpenPayload), gitlabHeaders("secret"))
-		if w.Code != 200 {
-			t.Fatalf("status = %d, body: %s", w.Code, w.Body.String())
-		}
-		if got := cap.last().ChatID; got != "chat2" {
-			t.Errorf("chat = %q, want chat2 (override still works for default token)", got)
-		}
-	})
-	t.Run("routes_still_apply", func(t *testing.T) {
-		cfg := senderTestConfig()
-		cfg.Routes = mustCompileRoutes(t, []config.GitlabRouteYAMLConfig{
-			{Match: map[string][]string{"project": {"myproj"}}, Chats: []string{"routed-chat"}},
-		})
-		srv, cap := newGitlabFanoutServer(t, cfg, okSend, nil)
-		w := doRequest(srv, "POST", "/api/v1/gitlab", strings.NewReader(mrOpenPayload), gitlabHeaders("secret"))
-		if w.Code != 200 {
-			t.Fatalf("status = %d, body: %s", w.Code, w.Body.String())
-		}
-		if cap.count() != 1 || cap.last().ChatID != "routed-chat" {
-			t.Fatalf("calls = %d last = %+v, want single routed-chat delivery", cap.count(), cap.last())
-		}
-	})
-}
-
 // TestGitlab_EmptyChatIDIsRequestError: an explicit-but-empty ?chat_id (?chat_id=
 // or ?chat_id=,,) is a 400 request error, not a silent fall-through to the routing
 // engine or default chat.
@@ -1934,7 +1964,9 @@ func TestGitlab_EmptyChatIDIsRequestError(t *testing.T) {
 	})
 	for _, q := range []string{"?chat_id=", "?chat_id=,,"} {
 		t.Run(q, func(t *testing.T) {
-			srv, cap := newGitlabFanoutServer(t, &GitlabConfig{SecretToken: "secret", Routes: routes}, okSend, nil)
+			cfg := gitlabTestConfig("secret")
+			cfg.Senders[0].Routes = routes
+			srv, cap := newGitlabFanoutServer(t, cfg, okSend, nil)
 			w := doRequest(srv, "POST", "/api/v1/gitlab"+q, strings.NewReader(mrOpenPayload), gitlabHeaders("secret"))
 			if w.Code != 400 {
 				t.Fatalf("status = %d, want 400 (body: %s)", w.Code, w.Body.String())
