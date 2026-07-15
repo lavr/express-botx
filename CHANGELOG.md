@@ -1,5 +1,7 @@
 # Changelog
 
+## 0.35.0
+
 ### Added: HTTPS/TLS serving с hot reload сертификата
 
 - `serve` и `serve --enqueue` поддерживают opt-in HTTPS через YAML, env или
