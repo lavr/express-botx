@@ -35,7 +35,7 @@ spec:
               service:
                 name: {{ include "express-botx.fullname" $ }}
                 port:
-                  name: http
+                  name: {{ include "express-botx.portName" $ }}
           {{- end }}
     {{- end }}
 {{- end }}

@@ -521,6 +521,35 @@ func TestLoad_ServerConfig_Empty(t *testing.T) {
 	}
 }
 
+func TestLoad_ServerTLSConfig(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.yaml")
+	data := []byte("bots:\n  main:\n    host: h\n    id: b\n    secret: s\nserver:\n  tls:\n    cert_file: /tls/tls.crt\n    key_file: /tls/tls.key\n    reload_interval: 45s\n")
+	if err := os.WriteFile(path, data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(Flags{ConfigPath: path})
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := TLSYAMLConfig{CertFile: "/tls/tls.crt", KeyFile: "/tls/tls.key", ReloadInterval: "45s"}
+	if cfg.Server.TLS == nil || *cfg.Server.TLS != want {
+		t.Fatalf("TLS = %#v, want %#v", cfg.Server.TLS, want)
+	}
+}
+
+func TestValidate_ServerTLSKeysAreKnown(t *testing.T) {
+	raw := []byte("server:\n  tls:\n    cert_file: /tls/tls.crt\n    key_file: /tls/tls.key\n    reload_interval: 60s\n")
+	var cfg Config
+	if err := yaml.Unmarshal(raw, &cfg); err != nil {
+		t.Fatal(err)
+	}
+	for _, result := range cfg.Validate(raw) {
+		if result.Level == ValidationWarning && strings.Contains(result.Message, "unknown key") {
+			t.Fatalf("TLS key reported unknown: %+v", result)
+		}
+	}
+}
+
 // --- ValidateFormat ---
 
 func TestValidateFormat(t *testing.T) {

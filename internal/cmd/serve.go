@@ -28,24 +28,79 @@ import (
 	"github.com/lavr/express-botx/internal/token"
 )
 
+func resolveTLS(yamlCfg *config.TLSYAMLConfig, envCert, envKey, envInterval, flagCert, flagKey string) (*server.TLSConfig, error) {
+	var certFile, keyFile, intervalValue string
+	if yamlCfg != nil {
+		certFile, keyFile, intervalValue = yamlCfg.CertFile, yamlCfg.KeyFile, yamlCfg.ReloadInterval
+	}
+	if envCert != "" {
+		certFile = envCert
+	}
+	if envKey != "" {
+		keyFile = envKey
+	}
+	if envInterval != "" {
+		intervalValue = envInterval
+	}
+	if flagCert != "" {
+		certFile = flagCert
+	}
+	if flagKey != "" {
+		keyFile = flagKey
+	}
+	if certFile == "" && keyFile == "" {
+		return nil, nil
+	}
+	if certFile == "" || keyFile == "" {
+		return nil, fmt.Errorf("TLS requires both certificate and key paths")
+	}
+	interval := 60 * time.Second
+	if intervalValue != "" {
+		parsed, err := time.ParseDuration(intervalValue)
+		if err != nil {
+			return nil, fmt.Errorf("invalid TLS reload interval %q: %w", intervalValue, err)
+		}
+		if parsed <= 0 {
+			return nil, fmt.Errorf("TLS reload interval must be positive, got %s", parsed)
+		}
+		interval = parsed
+	}
+	return &server.TLSConfig{CertFile: certFile, KeyFile: keyFile, ReloadInterval: interval}, nil
+}
+
+func warnDisabledTLS(yamlCfg *config.TLSYAMLConfig, tlsCfg *server.TLSConfig, logf func(string, ...any)) {
+	if yamlCfg == nil || tlsCfg != nil {
+		return
+	}
+	logf("serve: server.tls is present but no TLS certificate/key paths were resolved; TLS is disabled, serving plaintext HTTP")
+}
+
 func runServe(args []string, deps Deps) error {
 	fs := flag.NewFlagSet("serve", flag.ContinueOnError)
 	fs.SetOutput(deps.Stderr)
 	var flags config.Flags
 	var listenFlag string
 	var apiKeyFlag string
+	var tlsCertFlag string
+	var tlsKeyFlag string
 	var failFast bool
 	var enqueueMode bool
 
 	globalFlags(fs, &flags)
 	fs.StringVar(&listenFlag, "listen", "", "address to listen on (overrides config)")
 	fs.StringVar(&apiKeyFlag, "api-key", "", "API key for quick start (overrides config)")
+	fs.StringVar(&tlsCertFlag, "tls-cert", "", "path to TLS certificate file (PEM)")
+	fs.StringVar(&tlsKeyFlag, "tls-key", "", "path to TLS private key file (PEM)")
 	fs.BoolVar(&failFast, "fail-fast", false, "exit if bot authentication fails at startup")
 	fs.BoolVar(&enqueueMode, "enqueue", false, "async mode: publish to queue instead of sending directly")
 	fs.Usage = func() {
 		fmt.Fprintf(deps.Stderr, `Usage: express-botx serve [options]
 
 Start an HTTP server for sending messages via API.
+
+TLS options:
+  --tls-cert FILE   Path to TLS certificate file (PEM)
+  --tls-key FILE    Path to TLS private key file (PEM)
 
 Options:
 `)
@@ -60,7 +115,7 @@ Options:
 	}
 
 	if enqueueMode {
-		return runServeEnqueue(flags, listenFlag, apiKeyFlag, deps)
+		return runServeEnqueue(flags, listenFlag, apiKeyFlag, tlsCertFlag, tlsKeyFlag, deps)
 	}
 
 	if flags.Secret != "" && flags.Token != "" {
@@ -98,6 +153,19 @@ Options:
 	if srvCfg.BasePath == "" {
 		srvCfg.BasePath = "/api/v1"
 	}
+	tlsCfg, err := resolveTLS(
+		cfg.Server.TLS,
+		os.Getenv("EXPRESS_BOTX_SERVER_TLS_CERT"),
+		os.Getenv("EXPRESS_BOTX_SERVER_TLS_KEY"),
+		os.Getenv("EXPRESS_BOTX_SERVER_TLS_RELOAD_INTERVAL"),
+		tlsCertFlag,
+		tlsKeyFlag,
+	)
+	if err != nil {
+		return err
+	}
+	srvCfg.TLS = tlsCfg
+	warnDisabledTLS(cfg.Server.TLS, tlsCfg, vlog.Info)
 
 	// External URL for OpenAPI docs
 	srvCfg.ExternalURL = cfg.Server.ExternalURL
@@ -770,7 +838,7 @@ func runtimeChatEntries(cfg *config.Config) []config.ChatEntry {
 
 // runServeEnqueue starts the HTTP server in async/enqueue mode.
 // Instead of sending directly to BotX API, requests are published to a work queue.
-func runServeEnqueue(flags config.Flags, listenFlag, apiKeyFlag string, deps Deps) error {
+func runServeEnqueue(flags config.Flags, listenFlag, apiKeyFlag, tlsCertFlag, tlsKeyFlag string, deps Deps) error {
 	cfg, err := config.LoadForServeEnqueue(flags)
 	if err != nil {
 		return err
@@ -809,6 +877,19 @@ func runServeEnqueue(flags config.Flags, listenFlag, apiKeyFlag string, deps Dep
 	if srvCfg.BasePath == "" {
 		srvCfg.BasePath = "/api/v1"
 	}
+	tlsCfg, err := resolveTLS(
+		cfg.Server.TLS,
+		os.Getenv("EXPRESS_BOTX_SERVER_TLS_CERT"),
+		os.Getenv("EXPRESS_BOTX_SERVER_TLS_KEY"),
+		os.Getenv("EXPRESS_BOTX_SERVER_TLS_RELOAD_INTERVAL"),
+		tlsCertFlag,
+		tlsKeyFlag,
+	)
+	if err != nil {
+		return err
+	}
+	srvCfg.TLS = tlsCfg
+	warnDisabledTLS(cfg.Server.TLS, tlsCfg, vlog.Info)
 
 	srvCfg.ExternalURL = cfg.Server.ExternalURL
 	if v := os.Getenv("EXPRESS_BOTX_SERVER_EXTERNAL_URL"); v != "" {

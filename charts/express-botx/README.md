@@ -47,6 +47,7 @@ config:
 |----------|----------|--------------|
 | `mode` | Режим: `serve`, `serve-enqueue`, `worker` | `serve` |
 | `replicaCount` | Количество реплик | `1` |
+| `containerPort` | Порт контейнера и probes | `8080` |
 | `image.repository` | Docker-образ | `lavr/express-botx` |
 | `image.tag` | Тег образа | `<appVersion>-rootless` из Chart.yaml |
 | `image.pullPolicy` | Pull policy | `IfNotPresent` |
@@ -76,8 +77,19 @@ config:
 | `config.catalog.publish` | Worker публикует catalog | `true` |
 | `config.catalog.publish_interval` | Интервал публикации | `30s` |
 | `existingSecret` | Имя существующего Secret с `config.yaml` | `""` |
+| `tls.enabled` | Включить HTTPS на pod | `false` |
+| `tls.mountPath` | Каталог TLS Secret | `/etc/express-botx/tls` |
+| `tls.reloadInterval` | Интервал hot reload | `60s` |
+| `tls.certManager.enabled` | Создать Certificate | `false` |
+| `tls.certManager.issuerRef.name` | Имя issuer | `""` |
+| `tls.certManager.issuerRef.kind` | Issuer kind | `ClusterIssuer` |
+| `tls.certManager.dnsNames` | SAN или fallback из Ingress hosts | `[]` |
+| `tls.certManager.duration` | Опциональная duration | `""` |
+| `tls.certManager.renewBefore` | Опциональная renewBefore | `""` |
+| `tls.existingSecret` | Secret с `tls.crt`/`tls.key` | `""` |
 | `service.type` | Тип сервиса | `ClusterIP` |
 | `service.port` | Порт сервиса | `80` |
+| `service.targetPort` | Независимый numeric/named targetPort | `8080` |
 | `ingress.enabled` | Включить Ingress | `false` |
 | `ingress.className` | Ingress class | `""` |
 | `ingress.hosts` | Список хостов | `[]` |
@@ -87,6 +99,73 @@ config:
 | `resources.limits.memory` | Memory limit | `128Mi` |
 | `autoscaling.enabled` | Включить HPA | `false` |
 | `extraEnv` | Дополнительные переменные окружения | `[]` |
+
+### HTTPS/TLS
+
+cert-manager:
+
+```yaml
+containerPort: 8443
+service:
+  targetPort: 8443
+config:
+  server:
+    listen: ":8443"
+tls:
+  enabled: true
+  certManager:
+    enabled: true
+    issuerRef:
+      name: letsencrypt-prod
+      kind: ClusterIssuer
+    dnsNames: [botx.example.com]
+```
+
+Существующий Secret с обязательными ключами `tls.crt` и `tls.key`:
+
+```bash
+kubectl create secret tls express-botx-tls --cert=cert.pem --key=key.pem
+```
+
+Имена `cert.pem` и `key.pem` здесь относятся только к локальным файлам: команда
+`kubectl create secret tls` создаёт стандартные ключи `tls.crt` и `tls.key`.
+
+```yaml
+containerPort: 8443
+service:
+  targetPort: 8443
+config:
+  server:
+    listen: ":8443"
+tls:
+  enabled: true
+  existingSecret: express-botx-tls
+```
+
+Для ingress-nginx при pod-level TLS:
+
+```yaml
+ingress:
+  annotations:
+    nginx.ingress.kubernetes.io/backend-protocol: "HTTPS"
+```
+
+Chart не добавляет controller-specific аннотации автоматически. `ingress.tls`
+настраивает клиент → Ingress, а `tls.enabled` — Ingress/kubelet → pod. При TLS
+`service.targetPort` должен совпадать с `containerPort` или именем порта `https`,
+а приложение должно слушать тот же numeric port.
+
+Chart не подменяет `EXPRESS_BOTX_SERVER_LISTEN`: оператор явно согласует
+`containerPort`, `service.targetPort` и listen из structured config, `configRaw`,
+внешнего config Secret или `extraEnv`. `service.targetPort` сохраняет буквальный
+default `8080`, чтобы старые `tpl`-выражения продолжали работать. TLS запрещён
+для `mode: worker`; `tls.certManager.enabled` и `tls.existingSecret`
+взаимоисключающие.
+
+Произвольные имена ключей TLS Secret не переназначаются. Уже существующий Secret,
+ключи которого сами называются `cert.pem`/`key.pem`, не поддерживается: при
+отсутствии `tls.crt`/`tls.key` kubelet не смонтирует volume и pod не запустит
+приложение.
 
 ### Deployment patterns
 

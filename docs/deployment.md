@@ -201,6 +201,78 @@ ingress:
 
 Для использования существующего секрета: `existingSecret: my-secret`.
 
+### HTTPS до pod
+
+`ingress.tls` настраивает клиент → Ingress, а `tls.enabled` — HTTPS для
+Ingress и kubelet probes → pod. При pod-level TLS HTTPS заменяет HTTP на том же
+адресе `config.server.listen`; отдельный listener не создаётся. Нужно согласовать
+`containerPort`, `service.targetPort` и фактический порт `config.server.listen`.
+
+Пример с Certificate от cert-manager:
+
+```yaml
+containerPort: 8443
+service:
+  targetPort: 8443
+config:
+  server:
+    listen: ":8443"
+tls:
+  enabled: true
+  reloadInterval: 60s
+  certManager:
+    enabled: true
+    issuerRef:
+      name: letsencrypt-prod
+      kind: ClusterIssuer
+    dnsNames:
+      - botx.example.com
+```
+
+Вместо cert-manager можно использовать существующий Secret. В нём обязательны
+точные ключи `tls.crt` и `tls.key`:
+
+```bash
+kubectl create secret tls express-botx-tls \
+  --cert=cert.pem \
+  --key=key.pem
+```
+
+Флаги `--cert` и `--key` принимают произвольные локальные имена файлов; команда
+выше всё равно создаёт в Secret стандартные ключи `tls.crt` и `tls.key`.
+
+```yaml
+containerPort: 8443
+service:
+  targetPort: 8443
+config:
+  server:
+    listen: ":8443"
+tls:
+  enabled: true
+  existingSecret: express-botx-tls
+```
+
+Уже существующий Secret, ключи которого сами называются `cert.pem`/`key.pem`,
+не поддерживается: kubelet не сможет смонтировать указанные chart-ом
+`tls.crt`/`tls.key`, поэтому контейнер не стартует. Helm не может проверить
+содержимое внешнего Secret при offline-render. Источники cert-manager и
+`tls.existingSecret` взаимоисключающие, а `tls.enabled` запрещён для
+`mode: worker`.
+
+Если включён Ingress, его controller должен подключаться к Service по HTTPS.
+Chart не добавляет controller-specific аннотации автоматически. Например,
+для ingress-nginx:
+
+```yaml
+ingress:
+  annotations:
+    nginx.ingress.kubernetes.io/backend-protocol: "HTTPS"
+```
+
+Эта backend-аннотация не заменяет `ingress.tls`: тот отдельно настраивает TLS
+на участке клиент → Ingress.
+
 ### Дополнительные переменные окружения
 
 Через `extraEnv` можно передавать переменные окружения в контейнер. Значения поддерживают Go-шаблоны Helm:

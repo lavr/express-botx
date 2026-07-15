@@ -10,6 +10,6 @@ spec:
     - port: {{ .Values.service.port }}
       targetPort: {{ .Values.service.targetPort }}
       protocol: TCP
-      name: http
+      name: {{ include "express-botx.portName" . }}
   selector:
     {{- include "express-botx.selectorLabels" . | nindent 4 }}

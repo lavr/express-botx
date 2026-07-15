@@ -10,7 +10,7 @@ To access the API, run:
   kubectl port-forward svc/{{ include "express-botx.fullname" . }} {{ .Values.service.port }}:{{ .Values.service.targetPort }}
 
 Then send a request:
-  curl http://localhost:{{ .Values.service.port }}/healthz
+  curl {{ if .Values.tls.enabled }}-k https{{ else }}http{{ end }}://localhost:{{ .Values.service.port }}/healthz
 {{- end }}
 
 Configured bots:

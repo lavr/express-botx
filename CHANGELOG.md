@@ -1,5 +1,15 @@
 # Changelog
 
+### Added: HTTPS/TLS serving с hot reload сертификата
+
+- `serve` и `serve --enqueue` поддерживают opt-in HTTPS через YAML, env или
+  `--tls-cert`/`--tls-key`; минимальная версия — TLS 1.2.
+- Сертификат и ключ перечитываются по content hash без остановки listener; ошибка
+  ротации не сбрасывает последнюю корректную пару.
+- Helm умеет создать cert-manager Certificate или смонтировать существующий TLS
+  Secret, переключает probes/backend port name на HTTPS и сохраняет прежний HTTP
+  render при `tls.enabled=false`.
+
 ## 0.34.0
 
 ### ⚠️ Breaking: GitLab-конфигурация только через senders

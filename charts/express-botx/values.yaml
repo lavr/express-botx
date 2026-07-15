@@ -6,6 +6,8 @@ mode: serve
 
 replicaCount: 1
 
+containerPort: 8080
+
 image:
   repository: lavr/express-botx
   # Defaults to <appVersion>-rootless (scratch-based, distroless image).
@@ -84,6 +86,22 @@ config:
 # The Secret must contain a "config.yaml" key with the full YAML config.
 existingSecret: ""
 
+tls:
+  enabled: false
+  mountPath: /etc/express-botx/tls
+  # Go duration; must be positive when TLS is enabled.
+  reloadInterval: 60s
+  certManager:
+    enabled: false
+    issuerRef:
+      name: ""
+      kind: ClusterIssuer
+    dnsNames: []
+    duration: ""
+    renewBefore: ""
+  # Existing Secret with exact keys tls.crt and tls.key.
+  existingSecret: ""
+
 service:
   type: ClusterIP
   port: 80
@@ -92,6 +110,8 @@ service:
 ingress:
   enabled: false
   className: ""
+  # With tls.enabled, configure the selected Ingress controller to connect to
+  # the Service backend over HTTPS. See docs/deployment.md for an example.
   annotations: {}
   hosts: []
     # - host: express-botx.example.com

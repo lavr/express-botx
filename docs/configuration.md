@@ -110,6 +110,37 @@ multi-bot-конфигурации каждая цель доставки дол
 `bot`; raw UUID и алиас без bot binding отклоняются на старте. Подробнее — в
 [docs/integrations.md](integrations.md#изоляция-отправителей-и-скоуп-чатов).
 
+### HTTPS/TLS для `serve`
+
+```yaml
+server:
+  listen: ":8443"
+  tls:
+    cert_file: /etc/express-botx/tls/tls.crt
+    key_file: /etc/express-botx/tls/tls.key
+    reload_interval: 60s
+```
+
+TLS действует и для прямого `serve`, и для `serve --enqueue`; HTTPS заменяет
+HTTP на том же адресе `server.listen`. Настройки объединяются с приоритетом
+YAML → env → CLI: YAML-поля `cert_file`/`key_file`, переменные
+`EXPRESS_BOTX_SERVER_TLS_CERT`/`EXPRESS_BOTX_SERVER_TLS_KEY` и флаги
+`--tls-cert`/`--tls-key`. После объединения нужны оба пути; ровно один путь
+является ошибкой. `reload_interval` можно переопределить через
+`EXPRESS_BOTX_SERVER_TLS_RELOAD_INTERVAL`; интервал по умолчанию — `60s`, и он
+должен быть положительным.
+
+Пустая YAML-секция `server.tls` или секция только с `reload_interval` не включает
+TLS: в обоих режимах сервер запускается по HTTP и пишет один startup warning о
+plaintext fallback. Если пару дополнили env или CLI, warning не выводится; итоговая
+частичная пара остаётся ошибкой. Когда секции `server.tls` нет и пути не заданы
+другими слоями, сервер запускается по HTTP без warning.
+
+Ротация использует best-effort стабильный снимок пары и сходится примерно за
+один `reload_interval`; это не транзакционная атомарность двух файлов. При
+временно смешанной, нечитаемой или некорректной паре сервер продолжает отдавать
+последний корректный сертификат.
+
 ## Переменные окружения
 
 | Переменная | Описание |
@@ -125,6 +156,9 @@ multi-bot-конфигурации каждая цель доставки дол
 | `EXPRESS_BOTX_SERVER_LISTEN` | Адрес для прослушивания (serve) |
 | `EXPRESS_BOTX_SERVER_BASE_PATH` | Базовый путь (serve) |
 | `EXPRESS_BOTX_SERVER_API_KEY` | API-ключ (serve) |
+| `EXPRESS_BOTX_SERVER_TLS_CERT` | Путь к PEM-сертификату |
+| `EXPRESS_BOTX_SERVER_TLS_KEY` | Путь к PEM-приватному ключу |
+| `EXPRESS_BOTX_SERVER_TLS_RELOAD_INTERVAL` | Интервал проверки, default `60s` |
 | `EXPRESS_BOTX_VERBOSE` | Уровень логирования: 1-3 |
 
 ## Аутентификация
