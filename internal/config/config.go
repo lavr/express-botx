@@ -103,6 +103,13 @@ type ServerConfig struct {
 	Callbacks          *CallbacksConfig        `yaml:"callbacks,omitempty"`
 	Docs               *bool                   `yaml:"docs,omitempty"`         // enable /docs endpoint (default: true)
 	ExternalURL        string                  `yaml:"external_url,omitempty"` // public URL for OpenAPI docs (e.g. http://express-botx.invitro-dev.k8s)
+	TLS                *TLSYAMLConfig          `yaml:"tls,omitempty"`
+}
+
+type TLSYAMLConfig struct {
+	CertFile       string `yaml:"cert_file,omitempty"`
+	KeyFile        string `yaml:"key_file,omitempty"`
+	ReloadInterval string `yaml:"reload_interval,omitempty"`
 }
 
 // CallbacksConfig holds settings for BotX callback handling.
@@ -1088,6 +1095,10 @@ var knownKeys = map[string]map[string]bool{
 	"server": {
 		"listen": true, "base_path": true, "api_keys": true, "allow_bot_secret_auth": true,
 		"alertmanager": true, "grafana": true, "gitlab": true, "callbacks": true, "docs": true, "external_url": true,
+		"tls": true,
+	},
+	"server.tls": {
+		"cert_file": true, "key_file": true, "reload_interval": true,
 	},
 	"server.alertmanager": {
 		"default_chat_id": true, "error_severities": true, "template": true, "template_file": true,

@@ -1,3 +1,4 @@
+{{- include "express-botx.tls.validate" . -}}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -50,8 +51,8 @@ spec:
           {{- end }}
           ports:
             {{- if ne .Values.mode "worker" }}
-            - name: http
-              containerPort: 8080
+            - name: {{ include "express-botx.portName" . }}
+              containerPort: {{ .Values.containerPort }}
               protocol: TCP
             {{- end }}
             {{- if and (eq .Values.mode "worker") .Values.config.worker }}
@@ -80,13 +81,19 @@ spec:
           livenessProbe:
             httpGet:
               path: /healthz
-              port: http
+              port: {{ include "express-botx.portName" . }}
+              {{- if .Values.tls.enabled }}
+              scheme: HTTPS
+              {{- end }}
             initialDelaySeconds: 5
             periodSeconds: 10
           readinessProbe:
             httpGet:
               path: /healthz
-              port: http
+              port: {{ include "express-botx.portName" . }}
+              {{- if .Values.tls.enabled }}
+              scheme: HTTPS
+              {{- end }}
             initialDelaySeconds: 2
             periodSeconds: 5
           {{- end }}
@@ -101,9 +108,22 @@ spec:
               readOnly: true
             - name: cache
               mountPath: /tmp/express-botx
+            {{- if .Values.tls.enabled }}
+            - name: tls
+              mountPath: {{ .Values.tls.mountPath | quote }}
+              readOnly: true
+            {{- end }}
           env:
             - name: EXPRESS_BOTX_CONFIG
               value: /etc/express-botx/config.yaml
+            {{- if .Values.tls.enabled }}
+            - name: EXPRESS_BOTX_SERVER_TLS_CERT
+              value: {{ printf "%s/tls.crt" (trimSuffix "/" .Values.tls.mountPath) | quote }}
+            - name: EXPRESS_BOTX_SERVER_TLS_KEY
+              value: {{ printf "%s/tls.key" (trimSuffix "/" .Values.tls.mountPath) | quote }}
+            - name: EXPRESS_BOTX_SERVER_TLS_RELOAD_INTERVAL
+              value: {{ .Values.tls.reloadInterval | quote }}
+            {{- end }}
             {{- with .Values.extraEnv }}
             {{- tpl (toYaml .) $ | nindent 12 }}
             {{- end }}
@@ -116,6 +136,16 @@ spec:
                 path: config.yaml
         - name: cache
           emptyDir: {}
+        {{- if .Values.tls.enabled }}
+        - name: tls
+          secret:
+            secretName: {{ include "express-botx.tls.secretName" . | quote }}
+            items:
+              - key: tls.crt
+                path: tls.crt
+              - key: tls.key
+                path: tls.key
+        {{- end }}
       {{- with .Values.nodeSelector }}
       nodeSelector:
         {{- toYaml . | nindent 8 }}

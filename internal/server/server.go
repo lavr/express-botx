@@ -2,8 +2,10 @@ package server
 
 import (
 	"context"
+	"crypto/tls"
 	"fmt"
 	"log/slog"
+	"net"
 	"net/http"
 	"os"
 	"strings"
@@ -41,6 +43,14 @@ type Config struct {
 	AsyncMode          bool              // when true, /send enqueues instead of sending directly
 	DefaultRoutingMode string            // default routing mode for async: direct, catalog, mixed
 	MaxFileSize        int64             // max file size in bytes for async mode (0 = default 1MB)
+	TLS                *TLSConfig
+}
+
+// TLSConfig configures HTTPS serving and certificate reloads.
+type TLSConfig struct {
+	CertFile       string
+	KeyFile        string
+	ReloadInterval time.Duration
 }
 
 // Server is the HTTP server for express-botx.
@@ -66,6 +76,12 @@ type Server struct {
 	callbackCtx          context.Context    // cancelled on shutdown to signal async handlers
 	callbackCancel       context.CancelFunc // cancels callbackCtx
 	srv                  *http.Server
+	tlsReloader          *certReloader
+	ready                chan struct{}
+	addrMu               sync.RWMutex
+	addr                 net.Addr
+	pollerStarted        func()
+	pollerDone           chan struct{}
 }
 
 // SendFunc sends a message via the BotX API. The server calls this for each request.
@@ -234,6 +250,10 @@ func New(cfg Config, sendFn SendFunc, chatResolver ChatResolver, opts ...Option)
 		botNameSet:     make(map[string]bool, len(cfg.BotNames)),
 		callbackCtx:    cbCtx,
 		callbackCancel: cbCancel,
+		ready:          make(chan struct{}),
+	}
+	if cfg.TLS != nil {
+		s.tlsReloader = newCertReloader(cfg.TLS.CertFile, cfg.TLS.KeyFile, cfg.TLS.ReloadInterval)
 	}
 	for _, k := range cfg.Keys {
 		s.keyMap[k.Key] = k.Name
@@ -353,6 +373,12 @@ func New(cfg Config, sendFn SendFunc, chatResolver ChatResolver, opts ...Option)
 		Handler:           handler,
 		ReadHeaderTimeout: 10 * time.Second,
 	}
+	if s.tlsReloader != nil {
+		s.srv.TLSConfig = &tls.Config{
+			GetCertificate: s.tlsReloader.GetCertificate,
+			MinVersion:     tls.VersionTLS12,
+		}
+	}
 	s.srv.SetKeepAlivesEnabled(false)
 
 	return s
@@ -413,20 +439,86 @@ func (s *Server) resolveRequestBot(ctx context.Context, requestBot, chatBot stri
 	return bot, ""
 }
 
+// Ready returns a channel that closes after the listener is bound.
+func (s *Server) Ready() <-chan struct{} {
+	return s.ready
+}
+
+// Addr returns the bound listener address, or nil before a successful bind.
+func (s *Server) Addr() net.Addr {
+	s.addrMu.RLock()
+	defer s.addrMu.RUnlock()
+	return s.addr
+}
+
+func (s *Server) setAddr(addr net.Addr) {
+	s.addrMu.Lock()
+	s.addr = addr
+	s.addrMu.Unlock()
+}
+
 // Run starts the server and blocks until ctx is cancelled. It performs graceful shutdown.
 func (s *Server) Run(ctx context.Context) error {
+	runCtx, cancelRun := context.WithCancel(ctx)
+	defer cancelRun()
 	defer s.callbackCancel()
 
-	errCh := make(chan error, 1)
-	go func() {
-		vlog.Info("server: listening on %s (base_path: %s)", s.cfg.Listen, s.cfg.BasePath)
-		if len(s.keyMap) > 0 {
-			vlog.Info("server: %d API keys loaded", len(s.keyMap))
+	if s.tlsReloader != nil {
+		if err := s.tlsReloader.loadInitial(); err != nil {
+			return fmt.Errorf("loading initial TLS certificate: %w", err)
 		}
-		if err := s.srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-			errCh <- err
+	}
+
+	ln, err := net.Listen("tcp", s.cfg.Listen)
+	if err != nil {
+		return fmt.Errorf("listening on %s: %w", s.cfg.Listen, err)
+	}
+	defer func() { _ = ln.Close() }()
+	s.setAddr(ln.Addr())
+	close(s.ready)
+
+	if s.tlsReloader != nil {
+		s.pollerDone = make(chan struct{})
+		if s.pollerStarted != nil {
+			s.pollerStarted()
+		}
+		go func() {
+			defer close(s.pollerDone)
+			s.tlsReloader.run(runCtx)
+		}()
+		defer func() {
+			cancelRun()
+			<-s.pollerDone
+		}()
+	}
+
+	protocol := "http"
+	if s.tlsReloader != nil {
+		protocol = "https"
+	}
+	vlog.Info("server: listening on %s://%s (base_path: %s)", protocol, ln.Addr(), s.cfg.BasePath)
+	if len(s.keyMap) > 0 {
+		vlog.Info("server: %d API keys loaded", len(s.keyMap))
+	}
+
+	errCh := make(chan error, 1)
+	serveDone := make(chan struct{})
+	go func() {
+		defer close(serveDone)
+		var serveErr error
+		if s.tlsReloader != nil {
+			serveErr = s.srv.ServeTLS(ln, "", "")
+		} else {
+			serveErr = s.srv.Serve(ln)
+		}
+		if serveErr != nil && serveErr != http.ErrServerClosed {
+			errCh <- serveErr
 		}
 		close(errCh)
+	}()
+	defer func() {
+		_ = ln.Close()
+		<-serveDone
 	}()
 
 	select {
@@ -435,21 +527,17 @@ func (s *Server) Run(ctx context.Context) error {
 	case <-ctx.Done():
 	}
 
-	shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
+	shutdownCtx, cancelShutdown := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancelShutdown()
 	vlog.Info("server: shutting down...")
 
-	// Stop accepting new connections first.
 	var shutdownErr error
 	if err := s.srv.Shutdown(shutdownCtx); err != nil {
 		vlog.V1("server: HTTP shutdown error: %v", err)
 		shutdownErr = err
 	}
 
-	// Signal async callback handlers to stop.
 	s.callbackCancel()
-
-	// Wait for in-flight async callback handlers to finish (bounded by shutdownCtx).
 	done := make(chan struct{})
 	go func() {
 		s.callbackWG.Wait()
@@ -464,7 +552,6 @@ func (s *Server) Run(ctx context.Context) error {
 			shutdownErr = fmt.Errorf("server: timeout waiting for async callback handlers")
 		}
 	}
-
 	return shutdownErr
 }
 

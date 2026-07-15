@@ -84,6 +84,22 @@ curl -X POST http://localhost:8080/api/v1/send \
     -d '{"message": "Test from express-botx web api"}'
 ```
 
+TLS включается, когда после объединения YAML, переменных окружения и CLI заданы
+оба пути. HTTPS заменяет HTTP на том же `--listen` и действует как для обычного
+`serve`, так и для `serve --enqueue`:
+
+```bash
+express-botx serve \
+  --listen :8443 \
+  --tls-cert /etc/express-botx/tls/tls.crt \
+  --tls-key /etc/express-botx/tls/tls.key
+
+curl --cacert ca.crt https://localhost:8443/healthz
+```
+
+Сертификат перечитывается без перезапуска. При ошибке ротации сервер продолжает
+отдавать последнюю корректную пару.
+
 
 Эндпоинты (все POST требуют `Authorization: Bearer <key>`):
 
