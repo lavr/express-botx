@@ -1,0 +1,100 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "[0-9]*"
+
+jobs:
+  test:
+    uses: ./.gitverse/workflows/test.yml
+
+  build:
+    needs: test
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        include:
+          - goos: linux
+            goarch: amd64
+          - goos: linux
+            goarch: arm64
+          - goos: darwin
+            goarch: amd64
+          - goos: darwin
+            goarch: arm64
+          - goos: windows
+            goarch: amd64
+
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+
+      - name: Build
+        env:
+          CGO_ENABLED: "0"
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+        run: |
+          EXT=""
+          if [ "$GOOS" = "windows" ]; then EXT=".exe"; fi
+          go build -tags "sentry newrelic kafka rabbitmq" -ldflags="-s -w -X main.version=${GITHUB_REF_NAME}" -o "express-botx${EXT}" .
+
+      - name: Archive
+        env:
+          GOOS: ${{ matrix.goos }}
+          GOARCH: ${{ matrix.goarch }}
+        run: |
+          if [ "$GOOS" = "windows" ]; then
+            command -v zip >/dev/null || (sudo apt-get update -q && sudo apt-get install -y -q zip)
+            zip "express-botx-${GOOS}-${GOARCH}.zip" express-botx.exe
+          else
+            tar czf "express-botx-${GOOS}-${GOARCH}.tar.gz" express-botx
+          fi
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: express-botx-${{ matrix.goos }}-${{ matrix.goarch }}
+          path: express-botx-*.*
+          retention-days: 7
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: dist
+
+      - name: Create release and upload assets
+        env:
+          GITVERSE_TOKEN: ${{ secrets.GITVERSE_TOKEN }}
+        run: |
+          API=https://api.gitverse.ru
+          REPO=lavr/express-botx
+          AUTH="Authorization: Bearer ${GITVERSE_TOKEN}"
+          ACCEPT="Accept: application/vnd.gitverse.object+json;version=1"
+
+          release_id=$(curl -sf -X POST -H "$AUTH" -H "$ACCEPT" \
+            -H "Content-Type: application/json" \
+            -d "{\"tag_name\":\"${GITHUB_REF_NAME}\",\"name\":\"${GITHUB_REF_NAME}\",\"body\":\"express-botx ${GITHUB_REF_NAME}\"}" \
+            "$API/repos/$REPO/releases" | jq -r .id)
+
+          if [ -z "$release_id" ] || [ "$release_id" = "null" ]; then
+            echo "failed to create release" >&2
+            exit 1
+          fi
+          echo "created release id=$release_id"
+
+          find dist -type f -name 'express-botx-*' | while read -r f; do
+            name=$(basename "$f")
+            echo "uploading $name"
+            curl -sf -X POST -H "$AUTH" -H "$ACCEPT" \
+              -F "attachment=@$f" \
+              "$API/repos/$REPO/releases/$release_id/assets?name=$name" >/dev/null
+          done
