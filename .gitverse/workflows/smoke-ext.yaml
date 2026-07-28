@@ -1,0 +1,10 @@
+name: Smoke ext check
+
+on: [push]
+
+jobs:
+  ext:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check .yaml extension support
+        run: echo "yaml extension works"
