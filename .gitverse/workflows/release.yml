@@ -48,8 +48,41 @@ jobs:
       - name: Test (vault integration)
         run: go test -tags vault ./... -v
 
-  build:
+  # NOTE: binaries are uploaded to the release directly from build jobs.
+  # upload/download-artifact are avoided on purpose: the gitverse.ru/sc mirror
+  # of upload-artifact@v4 intermittently serves an upstream build that refuses
+  # to run outside github.com ("GHES not supported"), depending on which runner
+  # (with which action cache) the job lands on.
+  create-release:
     needs: [test, test-vault]
+    runs-on: ubuntu-latest
+    outputs:
+      release_id: ${{ steps.create.outputs.release_id }}
+    steps:
+      - name: Create release
+        id: create
+        env:
+          RELEASE_TOKEN: ${{ secrets.RELEASE_TOKEN }}
+        run: |
+          API=https://api.gitverse.ru
+          REPO=lavr/express-botx
+          AUTH="Authorization: Bearer ${RELEASE_TOKEN}"
+          ACCEPT="Accept: application/vnd.gitverse.object+json;version=1"
+
+          release_id=$(curl -sf -X POST -H "$AUTH" -H "$ACCEPT" \
+            -H "Content-Type: application/json" \
+            -d "{\"tag_name\":\"${GITHUB_REF_NAME}\",\"name\":\"${GITHUB_REF_NAME}\",\"body\":\"express-botx ${GITHUB_REF_NAME}\"}" \
+            "$API/repos/$REPO/releases" | jq -r .id)
+
+          if [ -z "$release_id" ] || [ "$release_id" = "null" ]; then
+            echo "failed to create release" >&2
+            exit 1
+          fi
+          echo "created release id=$release_id"
+          echo "release_id=$release_id" >> "$GITHUB_OUTPUT"
+
+  build:
+    needs: create-release
     runs-on: ubuntu-latest
     strategy:
       matrix:
@@ -94,46 +127,28 @@ jobs:
             tar czf "express-botx-${GOOS}-${GOARCH}.tar.gz" express-botx
           fi
 
-      - name: Upload artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: express-botx-${{ matrix.goos }}-${{ matrix.goarch }}
-          path: express-botx-*.*
-          retention-days: 7
-
-  publish:
-    needs: build
-    runs-on: ubuntu-latest
-    steps:
-      - name: Download all artifacts
-        uses: actions/download-artifact@v4
-        with:
-          path: dist
-
-      - name: Create release and upload assets
+      - name: Upload release asset
         env:
           RELEASE_TOKEN: ${{ secrets.RELEASE_TOKEN }}
+          RELEASE_ID: ${{ needs.create-release.outputs.release_id }}
         run: |
           API=https://api.gitverse.ru
           REPO=lavr/express-botx
           AUTH="Authorization: Bearer ${RELEASE_TOKEN}"
           ACCEPT="Accept: application/vnd.gitverse.object+json;version=1"
 
-          release_id=$(curl -sf -X POST -H "$AUTH" -H "$ACCEPT" \
-            -H "Content-Type: application/json" \
-            -d "{\"tag_name\":\"${GITHUB_REF_NAME}\",\"name\":\"${GITHUB_REF_NAME}\",\"body\":\"express-botx ${GITHUB_REF_NAME}\"}" \
-            "$API/repos/$REPO/releases" | jq -r .id)
-
-          if [ -z "$release_id" ] || [ "$release_id" = "null" ]; then
-            echo "failed to create release" >&2
+          # fallback if job outputs are not propagated: look the release up by tag
+          if [ -z "$RELEASE_ID" ] || [ "$RELEASE_ID" = "null" ]; then
+            RELEASE_ID=$(curl -sf -H "$AUTH" -H "$ACCEPT" "$API/repos/$REPO/releases" \
+              | jq -r ".[] | select(.tag_name == \"${GITHUB_REF_NAME}\") | .id" | head -1)
+          fi
+          if [ -z "$RELEASE_ID" ] || [ "$RELEASE_ID" = "null" ]; then
+            echo "release for ${GITHUB_REF_NAME} not found" >&2
             exit 1
           fi
-          echo "created release id=$release_id"
 
-          find dist -type f -name 'express-botx-*' | while read -r f; do
-            name=$(basename "$f")
-            echo "uploading $name"
-            curl -sf -X POST -H "$AUTH" -H "$ACCEPT" \
-              -F "attachment=@$f" \
-              "$API/repos/$REPO/releases/$release_id/assets?name=$name" >/dev/null
-          done
+          f=$(find . -maxdepth 1 -name 'express-botx-*.tar.gz' -o -name 'express-botx-*.zip' | head -1 | sed 's|^\./||')
+          echo "uploading $f to release $RELEASE_ID"
+          curl -sf -X POST -H "$AUTH" -H "$ACCEPT" \
+            -F "attachment=@$f" \
+            "$API/repos/$REPO/releases/$RELEASE_ID/assets?name=$f" >/dev/null
