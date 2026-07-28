@@ -27,9 +27,10 @@ Push тега вида `X.Y.Z` запускает на GitVerse релизный
 Workflow-файлы живут в [`.gitverse/workflows/`](../.gitverse/workflows/):
 
 - `test.yml` — build, vet, `go test` + интеграционные тесты Vault (OpenBao);
-  запускается на push и pull request;
-- `release.yml` — по тегу `X.Y.Z`: тесты → сборка бинарников (linux/darwin
-  amd64+arm64, windows amd64) → публикация релиза с ассетами через API GitVerse.
+  запускается на push веток и pull request;
+- `release.yml` — по тегу `X.Y.Z`: тесты → создание релиза через API GitVerse →
+  сборка бинарников (linux/darwin amd64+arm64, windows amd64), каждая
+  build-джоба сама заливает свой архив ассетом в релиз.
 
 Синтаксис совместим с GitHub Actions, actions резолвятся из зеркал
 `gitverse.ru/sc/actions/*` (`actions/checkout@v5`, `actions/setup-go@v6` работают).
@@ -46,6 +47,26 @@ Workflow-файлы живут в [`.gitverse/workflows/`](../.gitverse/workflow
 - в настройках репозитория (`settings#cicd`) выбирается, какую директорию
   использовать: `.gitverse/workflows` или `.github/workflows`. Выбрано
   `.gitverse` — GitHub-workflow на GitVerse не запускаются.
+
+Подводные камни (проверено на практике, июль 2026):
+
+- **reusable workflows не работают**: джоба с
+  `uses: ./.gitverse/workflows/test.yml` навсегда зависает в «waiting»
+  (не планируется на раннер), хотя фича задокументирована. Отменить зависший
+  прогон можно только из UI (API cancel отвечает 400). Поэтому тестовые джобы
+  продублированы в `release.yml` инлайном;
+- **`upload-artifact@v4` флейкает**: зеркало `gitverse.ru/sc/actions/upload-artifact`
+  периодически отдаёт апстримную сборку, падающую с «GHES not supported»;
+  зависит от кеша экшенов на конкретном раннере. В `release.yml` артефакты
+  не используются — ассеты заливаются в релиз напрямую из build-джоб;
+- **rate limit api.github.com**: безтокенные запросы к GitHub API с общих IP
+  облачных раннеров часто упираются в лимит — версия OpenBao при недоступном
+  API берётся из пинового fallback;
+- job outputs (`$GITHUB_OUTPUT` + `needs.<job>.outputs`) работают;
+  `GITHUB_REF_NAME`, `github.ref` — тоже; `github.server_url` на GitVerse
+  равен `https://gitverse.ru/sc`;
+- смена настройки CI/CD (директории workflow) не перезапускает прогоны для
+  уже запушенных коммитов — нужен новый push.
 
 ## Секреты
 
