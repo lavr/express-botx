@@ -9,6 +9,7 @@
 #   scripts/gitverse-ci.sh jobs <run_id>   # list jobs of a run
 #   scripts/gitverse-ci.sh logs <job_id>   # print job log
 #   scripts/gitverse-ci.sh last            # jobs of the latest run
+#   scripts/gitverse-ci.sh secrets         # list CI secret names (values are not exposed)
 set -euo pipefail
 
 API="https://api.gitverse.ru"
@@ -47,6 +48,13 @@ case "${1:-}" in
     runs) runs ;;
     jobs) jobs "${2:?usage: $0 jobs <run_id>}" ;;
     logs) gv_api "actions/jobs/${2:?usage: $0 logs <job_id>}/logs" ;;
+    secrets)
+        gv_api "actions/secrets" | python3 -c '
+import json, sys
+for s in json.load(sys.stdin)["secrets"]:
+    print(f'"'"'{s["name"]}  (created {s["created_at"]})'"'"')
+'
+        ;;
     last)
         run_id=$(gv_api "actions/runs" | python3 -c 'import json,sys; print(json.load(sys.stdin)["workflow_runs"][0]["id"])')
         echo "run $run_id:"
