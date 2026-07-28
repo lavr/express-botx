@@ -49,10 +49,13 @@ Workflow-файлы живут в [`.gitverse/workflows/`](../.gitverse/workflow
 
 ## Секреты
 
-Релизному workflow нужен секрет `GITVERSE_TOKEN` (настройки репозитория →
+Релизному workflow нужен секрет `RELEASE_TOKEN` (настройки репозитория →
 секреты CI/CD): personal access token с правом «Публичное API»
 (создаётся в [настройках профиля](https://gitverse.ru/settings/tokens),
 показывается один раз).
+
+Имя секрета не может начинаться с `GITVERSE_` — этот префикс зарезервирован
+платформой.
 
 ## Чтение статусов и логов CI из терминала
 

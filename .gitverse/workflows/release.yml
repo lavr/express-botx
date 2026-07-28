@@ -73,11 +73,11 @@ jobs:
 
       - name: Create release and upload assets
         env:
-          GITVERSE_TOKEN: ${{ secrets.GITVERSE_TOKEN }}
+          RELEASE_TOKEN: ${{ secrets.RELEASE_TOKEN }}
         run: |
           API=https://api.gitverse.ru
           REPO=lavr/express-botx
-          AUTH="Authorization: Bearer ${GITVERSE_TOKEN}"
+          AUTH="Authorization: Bearer ${RELEASE_TOKEN}"
           ACCEPT="Accept: application/vnd.gitverse.object+json;version=1"
 
           release_id=$(curl -sf -X POST -H "$AUTH" -H "$ACCEPT" \
