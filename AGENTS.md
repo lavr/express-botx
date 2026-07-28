@@ -8,3 +8,6 @@
 - Manual releases, including manual tag creation or pushing, are allowed only in
   exceptional cases when the standard script is unsuitable. Document the reason
   for bypassing `release.sh` and verify the resulting versions and tags.
+- The repository is mirrored to GitVerse (`gitverse` remote). Syncing the mirror
+  is a separate manual step: `git push gitverse main --tags`. Pushing a release
+  tag there triggers the GitVerse release workflow. See `docs/gitverse.md`.

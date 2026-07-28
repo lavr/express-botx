@@ -262,6 +262,9 @@ helm install express-botx oci://ghcr.io/lavr/charts/express-botx -f values.yaml
 | [docs/async-queues.md](docs/async-queues.md) | RabbitMQ, Kafka, архитектура очередей |
 | [CHANGELOG.md](CHANGELOG.md) | История изменений (в т.ч. ломающие) |
 | [docs/quickstart.md](docs/quickstart.md) | Базовые сценарии настройки |
+| [docs/gitverse.md](docs/gitverse.md) | Зеркало на GitVerse: синхронизация, CI, релизы |
+
+Зеркало репозитория: [gitverse.ru/lavr/express-botx](https://gitverse.ru/lavr/express-botx)
 
 ## Лицензия
 
