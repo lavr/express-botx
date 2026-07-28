@@ -5,12 +5,48 @@ on:
     tags:
       - "[0-9]*"
 
+# NOTE: test jobs are inlined (copy of test.yml) — a job with
+# `uses: ./.gitverse/workflows/test.yml` never gets scheduled on GitVerse
+# (stays "waiting" forever), despite reusable workflows being documented.
 jobs:
   test:
-    uses: ./.gitverse/workflows/test.yml
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+
+      - name: Build
+        run: go build ./...
+
+      - name: Vet
+        run: go vet ./...
+
+      - name: Test
+        run: go test ./... -v
+
+  test-vault:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v5
+
+      - uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+
+      - name: Install OpenBao
+        run: |
+          BAO_VERSION=$(curl -s https://api.github.com/repos/openbao/openbao/releases/latest | jq -r .tag_name | tr -d v)
+          curl -fsSL "https://github.com/openbao/openbao/releases/download/v${BAO_VERSION}/openbao_${BAO_VERSION}_linux_amd64.deb" -o /tmp/openbao.deb
+          sudo dpkg -i /tmp/openbao.deb
+
+      - name: Test (vault integration)
+        run: go test -tags vault ./... -v
 
   build:
-    needs: test
+    needs: [test, test-vault]
     runs-on: ubuntu-latest
     strategy:
       matrix:
