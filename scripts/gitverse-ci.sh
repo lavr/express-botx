@@ -13,8 +13,14 @@
 set -euo pipefail
 
 API="https://api.gitverse.ru"
-REPO="${GITVERSE_REPO:-lavr/express-botx}"
+# repo: $GITVERSE_REPO, or derived from the "gitverse" git remote of the current repo
+REPO="${GITVERSE_REPO:-$(git remote get-url gitverse 2>/dev/null | sed -E 's|.*gitverse\.ru[:/]||; s|\.git$||' || true)}"
 TOKEN="${GITVERSE_TOKEN:-$(cat "$HOME/.gitverse_token" 2>/dev/null || true)}"
+
+if [[ -z "$REPO" ]]; then
+    echo "Error: set GITVERSE_REPO or run inside a repo with a 'gitverse' remote" >&2
+    exit 1
+fi
 
 if [[ -z "$TOKEN" ]]; then
     echo "Error: set GITVERSE_TOKEN or put token into ~/.gitverse_token" >&2
