@@ -36,7 +36,10 @@ jobs:
 
       - name: Install OpenBao
         run: |
-          BAO_VERSION=$(curl -s https://api.github.com/repos/openbao/openbao/releases/latest | jq -r .tag_name | tr -d v)
+          # unauthenticated api.github.com is often rate-limited from shared
+          # runner IPs; fall back to a pinned version when it returns garbage
+          BAO_VERSION=$(curl -s https://api.github.com/repos/openbao/openbao/releases/latest | jq -r '.tag_name // empty' | tr -d v)
+          [ -n "$BAO_VERSION" ] || BAO_VERSION=2.6.1
           curl -fsSL "https://github.com/openbao/openbao/releases/download/v${BAO_VERSION}/openbao_${BAO_VERSION}_linux_amd64.deb" -o /tmp/openbao.deb
           sudo dpkg -i /tmp/openbao.deb
 
