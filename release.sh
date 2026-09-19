@@ -94,11 +94,16 @@ require_clean_tree() {
 }
 
 current_app_tag() {
-    git tag --sort=-v:refname | grep -vE '^chart-' | grep -E '^[0-9]+\.[0-9]+\.[0-9]+$' | head -1
+    local out
+    out=$(git tag --sort=-v:refname | grep -vE '^chart-' | grep -E '^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$' || true)
+    printf '%s' "${out%%$'\n'*}"
 }
 
 current_chart_tag() {
-    git tag --sort=-v:refname | grep -E '^chart-[0-9]+\.[0-9]+\.[0-9]+$' | head -1 | sed 's/^chart-//'
+    local out
+    out=$(git tag --sort=-v:refname | grep -E '^chart-(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$' || true)
+    out="${out%%$'\n'*}"
+    printf '%s' "${out#chart-}"
 }
 
 chart_version() {
@@ -134,7 +139,7 @@ bump() {
 }
 
 have_tty() {
-    exec 3<>/dev/tty 2>/dev/null || return 1
+    { exec 3<>/dev/tty; } 2>/dev/null || return 1
     exec 3>&-
     return 0
 }
@@ -143,6 +148,15 @@ PICKED_VERSION=""
 
 pick_version() {
     local current="$1" label="$2" spec="${3:-}"
+
+    if [[ -z "$current" ]]; then
+        [[ -n "$spec" ]] || die "$label: no previous tag to bump from; pass an explicit X.Y.Z"
+        is_canonical_version "$spec" || die "$label: no previous tag to bump from; pass an explicit X.Y.Z, not $spec"
+        PICKED_VERSION="$spec"
+        return 0
+    fi
+
+    is_canonical_version "$current" || die "$label: latest tag $current is not a canonical X.Y.Z; release with an explicit version after fixing the tags"
 
     if [[ -n "$spec" ]]; then
         case "$spec" in
@@ -178,6 +192,7 @@ pick_version() {
         3) PICKED_VERSION="$v_major" ;;
         *) die "invalid choice: $choice" ;;
     esac
+    version_gt "$PICKED_VERSION" "$current" || die "$label: $PICKED_VERSION is not higher than the current $current"
 }
 
 confirm() {
@@ -203,15 +218,23 @@ status() {
     echo "  Chart.yaml appVersion: $(chart_app_version)"
 }
 
+require_chart_fields() {
+    local app_too="$1"
+    [[ -f "$CHART_FILE" ]] || die "$CHART_FILE not found"
+    [[ $(grep -cE '^version:[[:space:]]' "$CHART_FILE") -eq 1 ]] || die "$CHART_FILE must have exactly one version field"
+    if [[ "$app_too" == "yes" ]]; then
+        [[ $(grep -cE '^appVersion:[[:space:]]' "$CHART_FILE") -eq 1 ]] || die "$CHART_FILE must have exactly one appVersion field"
+    fi
+}
+
 edit_chart() {
     local chart_ver="$1" app_ver="${2:-}"
-    grep -qE '^version:' "$CHART_FILE" || die "$CHART_FILE has no version field"
-    sed -i '' "s/^version: .*/version: ${chart_ver}/" "$CHART_FILE"
-    if [[ -n "$app_ver" ]]; then
-        grep -qE '^appVersion:' "$CHART_FILE" || die "$CHART_FILE has no appVersion field"
-        sed -i '' "s/^appVersion: .*/appVersion: \"${app_ver}\"/" "$CHART_FILE"
-    fi
+    sed -i '' "s/^version:[[:space:]].*/version: ${chart_ver}/" "$CHART_FILE"
     [[ "$(chart_version)" == "$chart_ver" ]] || die "chart version was not updated in $CHART_FILE"
+    if [[ -n "$app_ver" ]]; then
+        sed -i '' "s/^appVersion:[[:space:]].*/appVersion: \"${app_ver}\"/" "$CHART_FILE"
+        [[ "$(chart_app_version)" == "$app_ver" ]] || die "chart appVersion was not updated in $CHART_FILE"
+    fi
 }
 
 release_app() {
@@ -242,6 +265,7 @@ release_chart() {
     local version="$PICKED_VERSION"
     local tag="chart-${version}"
     require_absent_tag "$tag"
+    require_chart_fields no
 
     echo ""
     echo "Plan:"
@@ -273,6 +297,7 @@ release_both() {
 
     require_absent_tag "$app_version"
     require_absent_tag "$chart_tag"
+    require_chart_fields yes
 
     local app_commit; app_commit=$(git rev-parse HEAD)
 
