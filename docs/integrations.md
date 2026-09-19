@@ -211,6 +211,9 @@ server:
 Markdown в тексте Grafana-шаблона доезжает до eXpress как есть — ссылки можно
 оформлять `[текстом](url)`, а не голым URL.
 
+Заголовок и тело склеиваются через пустую строку, поэтому свой notification template
+пишется без повторения заголовка внутри `message`: иначе он придёт дважды.
+
 ### Настройка Grafana
 
 1. Перейдите в **Alerting → Contact points → Add contact point**
