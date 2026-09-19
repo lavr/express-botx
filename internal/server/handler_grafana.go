@@ -8,13 +8,14 @@ import (
 	"text/template"
 	"time"
 
+	"github.com/lavr/express-botx/internal/config"
 	vlog "github.com/lavr/express-botx/internal/log"
 )
 
 // GrafanaConfig holds settings for the Grafana webhook endpoint.
 const (
-	GrafanaMessageSourceTemplate = "template"
-	GrafanaMessageSourceWebhook  = "webhook"
+	GrafanaMessageSourceTemplate = config.GrafanaMessageSourceTemplate
+	GrafanaMessageSourceWebhook  = config.GrafanaMessageSourceWebhook
 )
 
 type GrafanaConfig struct {

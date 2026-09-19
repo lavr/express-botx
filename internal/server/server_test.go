@@ -3008,9 +3008,14 @@ func TestSend_JSON_InlineMention_ParseError_StillSends(t *testing.T) {
 
 func grafanaCapturingServer(t *testing.T, messageSource string, captured *string) *Server {
 	t.Helper()
-	tmpl, err := ParseGrafanaTemplate(DefaultGrafanaTemplate)
+	return grafanaCapturingServerWithTemplate(t, messageSource, DefaultGrafanaTemplate, captured)
+}
+
+func grafanaCapturingServerWithTemplate(t *testing.T, messageSource, templateStr string, captured *string) *Server {
+	t.Helper()
+	tmpl, err := ParseGrafanaTemplate(templateStr)
 	if err != nil {
-		t.Fatalf("parse default grafana template: %v", err)
+		t.Fatalf("parse grafana template: %v", err)
 	}
 	cfg := Config{
 		Listen:   ":0",
@@ -3105,5 +3110,15 @@ func TestGrafana_MessageSourceTemplateIgnoresWebhookMessage(t *testing.T) {
 	}
 	if !strings.Contains(got, "Folder:") {
 		t.Fatalf("expected built-in template output, got %q", got)
+	}
+}
+
+func TestGrafana_MessageSourceWebhookFallbackUsesCustomTemplate(t *testing.T) {
+	var got string
+	srv := grafanaCapturingServerWithTemplate(t, GrafanaMessageSourceWebhook, "custom {{ .Status }} fallback", &got)
+	postGrafana(t, srv, grafanaPayloadWithMessage("[FIRING:1] HighCPU", ""))
+
+	if got != "custom firing fallback" {
+		t.Fatalf("fallback must honour the configured template, got %q", got)
 	}
 }

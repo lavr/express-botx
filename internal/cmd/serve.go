@@ -516,9 +516,8 @@ func buildGrafanaConfig(gr *config.GrafanaYAMLConfig, configPath string) (*serve
 	if messageSource == "" {
 		messageSource = server.GrafanaMessageSourceTemplate
 	}
-	if messageSource != server.GrafanaMessageSourceTemplate && messageSource != server.GrafanaMessageSourceWebhook {
-		return nil, fmt.Errorf("grafana: message_source must be %q or %q, got %q",
-			server.GrafanaMessageSourceTemplate, server.GrafanaMessageSourceWebhook, gr.MessageSource)
+	if err := config.ValidateGrafanaMessageSource(messageSource); err != nil {
+		return nil, fmt.Errorf("grafana: %w", err)
 	}
 	vlog.V1("grafana: message source %s", messageSource)
 
