@@ -148,6 +148,7 @@ type GrafanaYAMLConfig struct {
 	ErrorStates   []string `yaml:"error_states,omitempty"`
 	Template      string   `yaml:"template,omitempty"`
 	TemplateFile  string   `yaml:"template_file,omitempty"`
+	MessageSource string   `yaml:"message_source,omitempty"`
 }
 
 type GitlabYAMLConfig struct {
@@ -1105,6 +1106,7 @@ var knownKeys = map[string]map[string]bool{
 	},
 	"server.grafana": {
 		"default_chat_id": true, "error_states": true, "template": true, "template_file": true,
+		"message_source": true,
 	},
 	"server.gitlab": {
 		"senders": true,
