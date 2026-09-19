@@ -573,6 +573,15 @@ func buildGrafanaConfig(gr *config.GrafanaYAMLConfig, configPath string) (*serve
 		states = []string{"alerting"}
 	}
 
+	messageSource := gr.MessageSource
+	if messageSource == "" {
+		messageSource = server.GrafanaMessageSourceTemplate
+	}
+	if err := config.ValidateGrafanaMessageSource(messageSource); err != nil {
+		return nil, fmt.Errorf("grafana: %w", err)
+	}
+	vlog.V1("grafana: message source %s", messageSource)
+
 	var tmplStr string
 	switch {
 	case gr.TemplateFile != "":
@@ -603,6 +612,7 @@ func buildGrafanaConfig(gr *config.GrafanaYAMLConfig, configPath string) (*serve
 		DefaultChatID: gr.DefaultChatID,
 		ErrorStates:   states,
 		Template:      tmpl,
+		MessageSource: messageSource,
 	}, nil
 }
 

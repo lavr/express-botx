@@ -64,6 +64,7 @@ server:
   grafana:                                  # опционально — endpoint включён по умолчанию
     default_chat_id: alerts
     error_states: [alerting]              # по умолчанию
+    message_source: template              # template (по умолчанию) | webhook
   gitlab:                                   # опционально — endpoint включён ТОЛЬКО с этой секцией
     senders:                              # непустой список независимых отправителей
       - name: backend                     # опционально; уникальное имя для логов

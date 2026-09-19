@@ -8,14 +8,25 @@ import (
 	"text/template"
 	"time"
 
+	"github.com/lavr/express-botx/internal/config"
 	vlog "github.com/lavr/express-botx/internal/log"
 )
 
 // GrafanaConfig holds settings for the Grafana webhook endpoint.
+const (
+	GrafanaMessageSourceTemplate = config.GrafanaMessageSourceTemplate
+	GrafanaMessageSourceWebhook  = config.GrafanaMessageSourceWebhook
+)
+
 type GrafanaConfig struct {
 	DefaultChatID string   // default target chat UUID or alias (may be empty)
 	ErrorStates   []string // states that map to status "error"
 	Template      *template.Template
+	// MessageSource selects who renders the text: "template" (default) uses
+	// Template, "webhook" forwards the title and message Grafana already
+	// rendered from its own notification template, falling back to Template
+	// when the payload carries no message.
+	MessageSource string
 	// FallbackChatID is resolved at startup from the config's chats section
 	// when there is exactly one chat alias configured. Empty otherwise.
 	FallbackChatID string
@@ -75,14 +86,11 @@ func (s *Server) handleGrafana(w http.ResponseWriter, r *http.Request) {
 	vlog.V1("grafana: received %s with %d alerts (receiver: %s, state: %s)", webhook.Status, len(webhook.Alerts), webhook.Receiver, webhook.State)
 	vlog.V2("grafana: groupKey=%s title=%s", webhook.GroupKey, webhook.Title)
 
-	// Render template
-	var buf bytes.Buffer
-	if err := s.grCfg.Template.Execute(&buf, webhook); err != nil {
+	message, err := s.renderGrafanaMessage(webhook)
+	if err != nil {
 		writeError(w, http.StatusBadRequest, "template error: "+err.Error())
 		return
 	}
-
-	message := buf.String()
 	vlog.V3("grafana: rendered message:\n%s", message)
 
 	// Determine status
@@ -137,6 +145,21 @@ func (c *GrafanaConfig) singleChat(globalDefault string) string {
 		return globalDefault
 	}
 	return c.FallbackChatID
+}
+
+func (s *Server) renderGrafanaMessage(webhook GrafanaWebhook) (string, error) {
+	if s.grCfg.MessageSource == GrafanaMessageSourceWebhook && webhook.Message != "" {
+		if webhook.Title == "" {
+			return webhook.Message, nil
+		}
+		return webhook.Title + "\n\n" + webhook.Message, nil
+	}
+
+	var buf bytes.Buffer
+	if err := s.grCfg.Template.Execute(&buf, webhook); err != nil {
+		return "", err
+	}
+	return buf.String(), nil
 }
 
 func (s *Server) resolveGrafanaStatus(webhook GrafanaWebhook) string {

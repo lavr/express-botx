@@ -1,5 +1,17 @@
 # Changelog
 
+## Unreleased
+
+### Added: `message_source` для Grafana — текст сообщения рендерит Grafana
+
+- `server.grafana.message_source: webhook` отправляет в чат `title` и `message`,
+  которые Grafana уже отрендерила своим notification template, вместо того чтобы
+  собирать текст встроенным шаблоном шлюза. Формат настраивается в Grafana
+  по contact point'у, без правки конфига express-botx и без релиза.
+- Пустой `message` в пейлоаде откатывает рендер на шаблон шлюза; вебхуки
+  Alertmanager поля не содержат, на `/api/v1/alertmanager` настройка не влияет.
+- По умолчанию `template` — прежнее поведение сохранено.
+
 ## 0.35.0
 
 ### Added: HTTPS/TLS serving с hot reload сертификата

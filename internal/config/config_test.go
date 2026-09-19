@@ -3440,3 +3440,50 @@ func TestGitlabYAMLConfig_ValidateForServe(t *testing.T) {
 		})
 	}
 }
+
+func grafanaMessageSourceResults(t *testing.T, value string) []ValidationResult {
+	t.Helper()
+	raw := []byte("server:\n  grafana:\n    message_source: " + value + "\n")
+	var cfg Config
+	if err := yaml.Unmarshal(raw, &cfg); err != nil {
+		t.Fatal(err)
+	}
+	var out []ValidationResult
+	for _, r := range cfg.Validate(raw) {
+		if r.Path == "server.grafana.message_source" {
+			out = append(out, r)
+		}
+	}
+	return out
+}
+
+func TestValidate_GrafanaMessageSourceInvalid(t *testing.T) {
+	results := grafanaMessageSourceResults(t, "webhok")
+	if len(results) != 1 {
+		t.Fatalf("expected one finding for a misspelled message_source, got %+v", results)
+	}
+	if results[0].Level != ValidationError {
+		t.Fatalf("expected ValidationError, got %v", results[0].Level)
+	}
+}
+
+func TestValidate_GrafanaMessageSourceValid(t *testing.T) {
+	for _, value := range []string{GrafanaMessageSourceTemplate, GrafanaMessageSourceWebhook} {
+		if results := grafanaMessageSourceResults(t, value); len(results) != 0 {
+			t.Fatalf("%q must validate, got %+v", value, results)
+		}
+	}
+}
+
+func TestValidate_GrafanaMessageSourceOmitted(t *testing.T) {
+	raw := []byte("server:\n  grafana:\n    default_chat_id: alerts\n")
+	var cfg Config
+	if err := yaml.Unmarshal(raw, &cfg); err != nil {
+		t.Fatal(err)
+	}
+	for _, r := range cfg.Validate(raw) {
+		if r.Path == "server.grafana.message_source" {
+			t.Fatalf("omitted message_source must not be reported: %+v", r)
+		}
+	}
+}

@@ -3005,3 +3005,120 @@ func TestSend_JSON_InlineMention_ParseError_StillSends(t *testing.T) {
 		t.Fatalf("expected failed token to remain as literal text, got: %s", capturedPayload.Message)
 	}
 }
+
+func grafanaCapturingServer(t *testing.T, messageSource string, captured *string) *Server {
+	t.Helper()
+	return grafanaCapturingServerWithTemplate(t, messageSource, DefaultGrafanaTemplate, captured)
+}
+
+func grafanaCapturingServerWithTemplate(t *testing.T, messageSource, templateStr string, captured *string) *Server {
+	t.Helper()
+	tmpl, err := ParseGrafanaTemplate(templateStr)
+	if err != nil {
+		t.Fatalf("parse grafana template: %v", err)
+	}
+	cfg := Config{
+		Listen:   ":0",
+		BasePath: "/api/v1",
+		Keys:     []ResolvedKey{{Name: "t", Key: "k"}},
+	}
+	sendFn := func(ctx context.Context, p *SendPayload) (string, error) {
+		*captured = p.Message
+		return "test-sync-id", nil
+	}
+	chatResolver := func(chatID string) (ChatResolveResult, error) {
+		return ChatResolveResult{ChatID: chatID}, nil
+	}
+	return New(cfg, sendFn, chatResolver, WithGrafana(&GrafanaConfig{
+		DefaultChatID: "alert-chat-id",
+		ErrorStates:   []string{"alerting"},
+		Template:      tmpl,
+		MessageSource: messageSource,
+	}))
+}
+
+func grafanaPayloadWithMessage(title, message string) string {
+	w := GrafanaWebhook{
+		Version:     "1",
+		GroupKey:    "test-group",
+		Status:      "firing",
+		State:       "alerting",
+		Title:       title,
+		Message:     message,
+		Receiver:    "express",
+		OrgID:       1,
+		GroupLabels: map[string]string{"alertname": "TestAlert"},
+		Alerts: []GrafanaAlertItem{{
+			Status:      "firing",
+			Labels:      map[string]string{"alertname": "HighCPU", "grafana_folder": "Production"},
+			Annotations: map[string]string{"summary": "CPU > 90%"},
+		}},
+	}
+	b, _ := json.Marshal(w)
+	return string(b)
+}
+
+func postGrafana(t *testing.T, srv *Server, body string) {
+	t.Helper()
+	w := doRequest(srv, "POST", "/api/v1/grafana", strings.NewReader(body), map[string]string{
+		"X-API-Key":    "k",
+		"Content-Type": "application/json",
+	})
+	if w.Code != 200 {
+		t.Fatalf("expected 200, got %d: %s", w.Code, w.Body.String())
+	}
+}
+
+func TestGrafana_MessageSourceWebhook(t *testing.T) {
+	var got string
+	srv := grafanaCapturingServer(t, GrafanaMessageSourceWebhook, &got)
+	postGrafana(t, srv, grafanaPayloadWithMessage("[FIRING:1] HighCPU", "**Firing**\nSource: http://grafana/alerting/grafana/abc/view"))
+
+	want := "[FIRING:1] HighCPU\n\n**Firing**\nSource: http://grafana/alerting/grafana/abc/view"
+	if got != want {
+		t.Fatalf("expected Grafana-rendered message forwarded verbatim\nwant: %q\ngot:  %q", want, got)
+	}
+}
+
+func TestGrafana_MessageSourceWebhookWithoutTitle(t *testing.T) {
+	var got string
+	srv := grafanaCapturingServer(t, GrafanaMessageSourceWebhook, &got)
+	postGrafana(t, srv, grafanaPayloadWithMessage("", "body only"))
+
+	if got != "body only" {
+		t.Fatalf("expected bare message when title is empty, got %q", got)
+	}
+}
+
+func TestGrafana_MessageSourceWebhookFallsBackToTemplate(t *testing.T) {
+	var got string
+	srv := grafanaCapturingServer(t, GrafanaMessageSourceWebhook, &got)
+	postGrafana(t, srv, grafanaPayloadWithMessage("[FIRING:1] HighCPU", ""))
+
+	if !strings.Contains(got, "Folder:") {
+		t.Fatalf("expected fallback to built-in template when payload carries no message, got %q", got)
+	}
+}
+
+func TestGrafana_MessageSourceTemplateIgnoresWebhookMessage(t *testing.T) {
+	var got string
+	srv := grafanaCapturingServer(t, GrafanaMessageSourceTemplate, &got)
+	postGrafana(t, srv, grafanaPayloadWithMessage("[FIRING:1] HighCPU", "rendered by grafana"))
+
+	if strings.Contains(got, "rendered by grafana") {
+		t.Fatalf("template mode must not forward the Grafana message, got %q", got)
+	}
+	if !strings.Contains(got, "Folder:") {
+		t.Fatalf("expected built-in template output, got %q", got)
+	}
+}
+
+func TestGrafana_MessageSourceWebhookFallbackUsesCustomTemplate(t *testing.T) {
+	var got string
+	srv := grafanaCapturingServerWithTemplate(t, GrafanaMessageSourceWebhook, "custom {{ .Status }} fallback", &got)
+	postGrafana(t, srv, grafanaPayloadWithMessage("[FIRING:1] HighCPU", ""))
+
+	if got != "custom firing fallback" {
+		t.Fatalf("fallback must honour the configured template, got %q", got)
+	}
+}

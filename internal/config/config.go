@@ -35,6 +35,20 @@ func ValidateRoutingMode(mode string) error {
 	}
 }
 
+const (
+	GrafanaMessageSourceTemplate = "template"
+	GrafanaMessageSourceWebhook  = "webhook"
+)
+
+func ValidateGrafanaMessageSource(source string) error {
+	switch source {
+	case GrafanaMessageSourceTemplate, GrafanaMessageSourceWebhook:
+		return nil
+	default:
+		return fmt.Errorf("invalid grafana message source %q: must be template or webhook", source)
+	}
+}
+
 type Config struct {
 	Bots     map[string]BotConfig  `yaml:"bots,omitempty"`
 	Chats    map[string]ChatConfig `yaml:"chats,omitempty"`
@@ -148,6 +162,7 @@ type GrafanaYAMLConfig struct {
 	ErrorStates   []string `yaml:"error_states,omitempty"`
 	Template      string   `yaml:"template,omitempty"`
 	TemplateFile  string   `yaml:"template_file,omitempty"`
+	MessageSource string   `yaml:"message_source,omitempty"`
 }
 
 type GitlabYAMLConfig struct {
@@ -1109,6 +1124,7 @@ var knownKeys = map[string]map[string]bool{
 	},
 	"server.grafana": {
 		"default_chat_id": true, "error_states": true, "template": true, "template_file": true,
+		"message_source": true,
 	},
 	"server.gitlab": {
 		"senders": true,
@@ -1478,6 +1494,17 @@ func (c *Config) validateFormats() []ValidationResult {
 				Level:   ValidationError,
 				Path:    "chats." + name + ".id",
 				Message: fmt.Sprintf("invalid UUID format %q", chat.ID),
+			})
+		}
+	}
+
+	// Grafana message source
+	if c.Server.Grafana != nil && c.Server.Grafana.MessageSource != "" {
+		if err := ValidateGrafanaMessageSource(c.Server.Grafana.MessageSource); err != nil {
+			results = append(results, ValidationResult{
+				Level:   ValidationError,
+				Path:    "server.grafana.message_source",
+				Message: err.Error(),
 			})
 		}
 	}
