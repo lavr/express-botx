@@ -243,6 +243,12 @@ type BotConfig struct {
 	Secret  string `yaml:"secret,omitempty"`
 	Token   string `yaml:"token,omitempty"`   // pre-obtained token (alternative to secret)
 	Timeout int    `yaml:"timeout,omitempty"` // HTTP timeout in seconds (default: 10)
+	// MaxMessageLength caps the notification body in runes for this eXpress;
+	// an explicit 0 disables capping, an absent key takes the documented
+	// default. TruncateSuffix marks a cut body and counts inside the cap; an
+	// explicit empty string cuts without a marker.
+	MaxMessageLength *int    `yaml:"max_message_length,omitempty"`
+	TruncateSuffix   *string `yaml:"truncate_suffix,omitempty"`
 }
 
 // ChatConfig represents a chat alias with an optional default bot.
@@ -1130,6 +1136,7 @@ var knownKeys = map[string]map[string]bool{
 	},
 	"bots.*": {
 		"host": true, "id": true, "secret": true, "token": true, "timeout": true,
+		"max_message_length": true, "truncate_suffix": true,
 	},
 	"chats.*": {
 		"id": true, "bot": true, "default": true,
@@ -1513,6 +1520,18 @@ func (c *Config) validateFormats() []ValidationResult {
 				Level:   ValidationError,
 				Path:    "bots." + name + ".id",
 				Message: fmt.Sprintf("invalid UUID format %q", bot.ID),
+			})
+		}
+	}
+
+	// A negative body cap is a typo, not a way to disable truncation
+	for _, name := range sortedMapKeys(c.Bots) {
+		bot := c.Bots[name]
+		if bot.MaxMessageLength != nil && *bot.MaxMessageLength < 0 {
+			results = append(results, ValidationResult{
+				Level:   ValidationError,
+				Path:    "bots." + name + ".max_message_length",
+				Message: fmt.Sprintf("must not be negative (%d); use 0 to disable truncation", *bot.MaxMessageLength),
 			})
 		}
 	}
@@ -2497,6 +2516,8 @@ func (c *Config) ValidateBotIDs() error {
 		Secret  string
 		Token   string
 		Timeout int
+		Limit   int    // effective body cap
+		Suffix  string // effective truncation suffix
 		Alias   string // first alias seen
 	}
 
@@ -2525,12 +2546,28 @@ func (c *Config) ValidateBotIDs() error {
 				return fmt.Errorf("bot %q and %q have same id %q but different timeout (%d vs %d)",
 					name, prev.Alias, bot.ID, bot.Timeout, prev.Timeout)
 			}
+			// The delivery policy is looked up by bot_id, and BotByID walks a
+			// map, so two aliases that disagree would apply whichever one the
+			// iteration happened to reach. Effective values are compared, so an
+			// absent key and an explicitly written default still agree.
+			limit, suffix := c.BotDeliveryPolicy(name)
+			if limit != prev.Limit {
+				return fmt.Errorf("bot %q and %q have same id %q but different max_message_length (%d vs %d)",
+					name, prev.Alias, bot.ID, limit, prev.Limit)
+			}
+			if suffix != prev.Suffix {
+				return fmt.Errorf("bot %q and %q have same id %q but different truncate_suffix (%q vs %q)",
+					name, prev.Alias, bot.ID, suffix, prev.Suffix)
+			}
 		} else {
+			limit, suffix := c.BotDeliveryPolicy(name)
 			seen[bot.ID] = botRuntime{
 				Host:    bot.Host,
 				Secret:  bot.Secret,
 				Token:   bot.Token,
 				Timeout: bot.Timeout,
+				Limit:   limit,
+				Suffix:  suffix,
 				Alias:   name,
 			}
 		}

@@ -11,6 +11,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"syscall"
@@ -341,6 +342,7 @@ Options:
 	srvOpts = append(srvOpts, server.WithErrTracker(tracker))
 	srvOpts = append(srvOpts, server.WithConfigInfo(runtimeBotEntries(cfg), runtimeChatEntries(cfg)))
 	srvOpts = append(srvOpts, server.WithMentionsResolver(mentionsResolver))
+	logDeliveryPolicy(cfg)
 	if len(botMentionsResolvers) > 0 {
 		srvOpts = append(srvOpts, server.WithBotMentionsResolvers(botMentionsResolvers))
 	}
@@ -528,13 +530,15 @@ func resolveKeyScope(k config.APIKeyConfig, chats map[string]config.ChatConfig) 
 	return scope, nil
 }
 
-func buildSendRequest(p *server.SendPayload) *botapi.SendRequest {
+func buildSendRequest(p *server.SendPayload, maxLen int, suffix string) *botapi.SendRequest {
 	params := &botapi.SendParams{
-		ChatID:   p.ChatID,
-		Message:  p.Message,
-		Status:   p.Status,
-		Metadata: p.Metadata,
-		Mentions: p.Mentions,
+		ChatID:           p.ChatID,
+		Message:          p.Message,
+		Status:           p.Status,
+		Metadata:         p.Metadata,
+		Mentions:         p.Mentions,
+		MaxMessageLength: maxLen,
+		TruncateSuffix:   suffix,
 	}
 	if p.File != nil {
 		params.File = botapi.BuildFileAttachmentFromBase64(p.File.Name, p.File.Data)
@@ -877,7 +881,8 @@ func (bs *botSender) Send(ctx context.Context, p *server.SendPayload) (string, e
 		bs.client.Token = tok
 	}
 
-	sr := buildSendRequest(p)
+	maxLen, suffix := bs.cfg.BotDeliveryPolicy(bs.cfg.BotName)
+	sr := buildSendRequest(p, maxLen, suffix)
 	syncID, err := bs.client.SendWithSyncID(ctx, sr)
 	if err != nil {
 		if errors.Is(err, botapi.ErrUnauthorized) {
@@ -945,6 +950,35 @@ func buildBotSecretLookup(cfg *config.Config) (func(botID string) (string, error
 		}
 		return resolved, nil
 	}, nil
+}
+
+// logDeliveryPolicy states the body cap for every configured bot at startup.
+// The default is compiled in rather than written in the config, so without this
+// line an operator has no way to see which cap is in force.
+func logDeliveryPolicy(cfg *config.Config) {
+	names := make([]string, 0, len(cfg.Bots))
+	for name := range cfg.Bots {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	if len(names) == 0 {
+		for _, entry := range runtimeBotEntries(cfg) {
+			names = append(names, entry.Name)
+		}
+	}
+	for _, name := range names {
+		entry := config.BotEntry{Name: name}
+		limit, suffix := cfg.BotDeliveryPolicy(entry.Name)
+		source := "default"
+		if bot, ok := cfg.Bots[entry.Name]; ok && bot.MaxMessageLength != nil {
+			source = "configured"
+		}
+		if limit == 0 {
+			vlog.Info("delivery: bot %q message length is not capped (%s)", entry.Name, source)
+			continue
+		}
+		vlog.Info("delivery: bot %q caps messages at %d runes (%s), truncation suffix %q", entry.Name, limit, source, suffix)
+	}
 }
 
 // runtimeBotEntries returns bot entries reflecting the actual runtime state.

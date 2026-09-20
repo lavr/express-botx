@@ -886,7 +886,7 @@ func TestBuildSendRequest_SyncPathMentions(t *testing.T) {
 		Mentions: mentions,
 	}
 
-	sr := buildSendRequest(payload)
+	sr := buildSendRequest(payload, 0, "")
 
 	if sr.Notification == nil {
 		t.Fatal("expected notification to be set")
@@ -918,7 +918,7 @@ func TestBuildSendRequest_AsyncPathMentions(t *testing.T) {
 		},
 	}
 
-	sr := buildSendRequestFromWork(msg)
+	sr := buildSendRequestFromWork(msg, 0, "")
 
 	if sr.Notification == nil {
 		t.Fatal("expected notification to be set")
@@ -1053,7 +1053,7 @@ func TestAsyncPath_InlineMentionNormalized(t *testing.T) {
 	}
 
 	// Step 4: Build BotX request from restored message (as worker does)
-	sr := buildSendRequestFromWork(&restored)
+	sr := buildSendRequestFromWork(&restored, 0, "")
 
 	// Verify: body has BotX placeholder, not inline token
 	if strings.Contains(sr.Notification.Body, "@mention[") {

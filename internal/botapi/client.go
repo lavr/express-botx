@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/lavr/express-botx/internal/httputil"
 	vlog "github.com/lavr/express-botx/internal/log"
@@ -231,6 +232,36 @@ type SendParams struct {
 	Stealth  bool
 	ForceDND bool
 	NoNotify bool
+	// MaxMessageLength caps the notification body in runes; 0 disables capping.
+	// TruncateSuffix is appended to a cut body and counts inside the cap.
+	MaxMessageLength int
+	TruncateSuffix   string
+}
+
+// capBody applies the configured length cap to the notification body and keeps
+// the mentions array consistent with it. A body that fits, or a cap of zero,
+// passes through untouched along with the original mentions.
+func capBody(p *SendParams) (string, json.RawMessage) {
+	body, truncated := TruncateMessage(p.Message, p.TruncateSuffix, p.MaxMessageLength)
+	if !truncated {
+		return p.Message, p.Mentions
+	}
+
+	vlog.V1("send: message truncated from %d runes (%d bytes) to %d runes (%d bytes), %d lines dropped",
+		utf8.RuneCountInString(p.Message), len(p.Message),
+		utf8.RuneCountInString(body), len(body),
+		strings.Count(p.Message, "\n")-strings.Count(body, "\n"))
+
+	mentions := p.Mentions
+	if len(mentions) > 0 {
+		filtered, err := filterOrphanMentions(mentions, p.Message, body)
+		if err != nil {
+			vlog.V1("send: mentions left untouched, cannot filter after truncation: %v", err)
+		} else {
+			mentions = filtered
+		}
+	}
+	return body, mentions
 }
 
 // BuildSendRequest converts high-level SendParams into a BotX API SendRequest.
@@ -240,11 +271,12 @@ func BuildSendRequest(p *SendParams) *SendRequest {
 	}
 
 	if p.Message != "" {
+		body, mentions := capBody(p)
 		sr.Notification = &SendNotification{
 			Status:   p.Status,
-			Body:     p.Message,
+			Body:     body,
 			Metadata: p.Metadata,
-			Mentions: p.Mentions,
+			Mentions: mentions,
 		}
 		if p.Silent {
 			sr.Notification.Opts = &NotificationMsgOpts{
@@ -319,6 +351,7 @@ func (c *Client) SendWithSyncID(ctx context.Context, sr *SendRequest) (string, e
 
 	resp, err := c.HTTPClient.Do(req)
 	if err != nil {
+		vlog.V1("send: <- transport error (%dms): %v", time.Since(start).Milliseconds(), err)
 		return "", fmt.Errorf("sending: %w", err)
 	}
 	defer resp.Body.Close() //nolint:errcheck // best-effort close
@@ -340,10 +373,26 @@ func (c *Client) SendWithSyncID(ctx context.Context, sr *SendRequest) (string, e
 		return apiResp.Result.SyncID, nil
 	default:
 		respBody, _ := io.ReadAll(resp.Body)
-		vlog.V1("send: <- %d (%dms)", resp.StatusCode, elapsed.Milliseconds())
-		vlog.V3("send: <- %s", string(respBody))
+		logBody, truncated := truncateErrorBody(respBody)
+		vlog.V1("send: <- %d (%dms): %s", resp.StatusCode, elapsed.Milliseconds(), logBody)
+		if truncated {
+			vlog.V3("send: <- %s", string(respBody))
+		}
 		return "", fmt.Errorf("send failed: HTTP %d: %s", resp.StatusCode, string(respBody))
 	}
+}
+
+const maxErrorBodyLogBytes = 2 << 10
+
+func truncateErrorBody(data []byte) (string, bool) {
+	if len(data) <= maxErrorBodyLogBytes {
+		return string(data), false
+	}
+	cut := maxErrorBodyLogBytes
+	for cut > 0 && !utf8.RuneStart(data[cut]) {
+		cut--
+	}
+	return fmt.Sprintf("%s (truncated to %d of %d bytes)", data[:cut], cut, len(data)), true
 }
 
 // BuildFileAttachment reads file data and returns a SendFile with base64 data URI.

@@ -13,6 +13,10 @@ import (
 	"fmt"
 	"net/http"
 	"strings"
+
+	"github.com/go-chi/chi/v5/middleware"
+
+	vlog "github.com/lavr/express-botx/internal/log"
 )
 
 // SendResult is a single successful per-chat delivery. Exactly one of SyncID
@@ -70,6 +74,10 @@ func fanout(ctx context.Context, targets []string, deliver func(ctx context.Cont
 	for _, target := range targets {
 		res, err := deliver(ctx, target)
 		if err != nil {
+			// The response may carry a sanitized error instead of this one, so
+			// the cause is recorded here or not at all.
+			vlog.V1("send: chat %q failed [key: %s, request_id: %s]: %s",
+				target, KeyName(ctx), middleware.GetReqID(ctx), boundedCause(err))
 			errs = append(errs, SendError{Chat: target, Error: err.Error()})
 			continue
 		}
@@ -107,6 +115,21 @@ func (s *Server) fanoutSend(ctx context.Context, targets []string, requestBot, m
 		}
 		return SendResult{Chat: chat, SyncID: syncID}, nil
 	})
+}
+
+// maxCauseLogRunes bounds a logged failure cause. An upstream error quotes the
+// whole response body, which the client already logs under its own cap, so the
+// per-target line keeps only the diagnostic head.
+const maxCauseLogRunes = 512
+
+func boundedCause(err error) string {
+	msg := err.Error()
+	runes := []rune(msg)
+	if len(runes) <= maxCauseLogRunes {
+		return msg
+	}
+	return fmt.Sprintf("%s (truncated to %d of %d runes)",
+		string(runes[:maxCauseLogRunes]), maxCauseLogRunes, len(runes))
 }
 
 // writeMultiSend writes a MultiSendResponse. When at least one delivery
