@@ -481,7 +481,7 @@ IncidentRelay оставляет `message` пустым и кладёт всё �
 
 ```json
 {
-  "channel_id": "79565da8-a2bf-5800-b36f-0dd9493ccdb9",
+  "channel_id": "054af49e-5e18-4dca-ad73-4f96b6de63fa",
   "message": "",
   "props": {"attachments": [{
     "fallback": "Диск почти полон",
@@ -540,8 +540,8 @@ firing и `acknowledged` дают один и тот же `#f0ad4e`, а заре
 - **Статус сообщения ничего не подсвечивает.** Шлюз выводит его из состояния и
   передаёт и при отправке, и при правке (`payload.status` в `edit_event` BotX
   принимает, хотя в pybotx этого поля нет). Но визуального эффекта у него нет:
-  на testlab 2026-09-20 сообщение со `status: error` выглядело точно так же,
-  как со `status: ok`, и правка статуса вида не меняла. Официальный SDK
+  сообщение со `status: error` выглядит так же, как со `status: ok`, и правка
+  статуса вида не меняет. Официальный SDK
   [pybotx](https://github.com/ExpressApp/pybotx) и вовсе объявляет поле как
   `status: Literal["ok"]` — то есть это обязательный элемент протокола, а не
   переключатель оформления. Severity в eXpress принято показывать эмодзи в
@@ -558,10 +558,9 @@ firing и `acknowledged` дают один и тот же `#f0ad4e`, а заре
   `PUT`. Если привязку чата к боту поменять между отправкой и резолвом, правка
   уйдёт от другого бота и старое сообщение обновить не удастся.
 
-**BotX не подтверждает правку по существу.** Проверено на testlab 2026-09-20:
-`edit_event` отвечает `{"status":"ok","result":"bot_command_result_pushed"}` и
-на настоящий `sync_id`, и на выдуманный, включая нулевой UUID — валидации нет,
-приём асинхронный. Поэтому 502 от шлюза на `PUT` означает только транспортную
+**BotX не подтверждает правку по существу.** `edit_event` отвечает
+`{"status":"ok","result":"bot_command_result_pushed"}` и на настоящий `sync_id`,
+и на несуществующий — валидации нет, приём асинхронный. Поэтому 502 от шлюза на `PUT` означает только транспортную
 ошибку или 401; правка, которая не применилась на стороне платформы, вернётся
 в IncidentRelay как успех. Фоллбэка на отправку нового сообщения нет
 сознательно: при таймауте правка могла уже примениться, и повтор оставил бы в
@@ -634,7 +633,7 @@ curl -X POST 'http://localhost:8080/api/v1/mattermost/api/v4/posts' \
   -H "Authorization: Bearer <api-key>" \
   -H "Content-Type: application/json" \
   -d '{
-    "channel_id": "79565da8-a2bf-5800-b36f-0dd9493ccdb9",
+    "channel_id": "054af49e-5e18-4dca-ad73-4f96b6de63fa",
     "message": "",
     "props": {"attachments": [{
       "color": "#d9534f",
@@ -654,7 +653,7 @@ curl -X PUT 'http://localhost:8080/api/v1/mattermost/api/v4/posts/<id>' \
   -H "Content-Type: application/json" \
   -d '{
     "id": "<id>",
-    "channel_id": "79565da8-a2bf-5800-b36f-0dd9493ccdb9",
+    "channel_id": "054af49e-5e18-4dca-ad73-4f96b6de63fa",
     "props": {"attachments": [{
       "color": "#2e7d32",
       "title": "RESOLVED: [P2] Диск почти полон",

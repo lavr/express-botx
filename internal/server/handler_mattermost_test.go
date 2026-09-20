@@ -10,10 +10,10 @@ import (
 	"testing"
 )
 
-const mattermostChatID = "79565da8-a2bf-5800-b36f-0dd9493ccdb9"
+const mattermostChatID = "054af49e-5e18-4dca-ad73-4f96b6de63fa"
 
 const mattermostPostPayload = `{
-  "channel_id": "79565da8-a2bf-5800-b36f-0dd9493ccdb9",
+  "channel_id": "054af49e-5e18-4dca-ad73-4f96b6de63fa",
   "message": "",
   "props": {"attachments": [{
     "fallback": "Disk almost full",
@@ -337,7 +337,7 @@ func TestMattermost_State(t *testing.T) {
 func TestMattermost_UpdatePost(t *testing.T) {
 	const resolved = `{
 	  "id": "sync-42",
-	  "channel_id": "79565da8-a2bf-5800-b36f-0dd9493ccdb9",
+	  "channel_id": "054af49e-5e18-4dca-ad73-4f96b6de63fa",
 	  "message": "",
 	  "props": {"attachments": [{"color":"#2e7d32","title":"RESOLVED: Disk almost full","text":"The alert has been resolved."}]}
 	}`
