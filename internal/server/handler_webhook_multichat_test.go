@@ -8,7 +8,7 @@ import (
 	"testing"
 )
 
-// Task 3: /alertmanager and /grafana share the project-wide multi-chat contract.
+// Task 3: /alertmanager, /grafana and /incidentrelay share the project-wide multi-chat contract.
 // ?chat_id may list several chats (comma-separated) and the event fans out to
 // each best-effort; the response is always a MultiSendResponse, even for a single
 // or default chat (results[0]). These tests exercise both handlers through the
@@ -36,6 +36,10 @@ func webhookSurfaces(t *testing.T) []webhookSurface {
 	grTmpl, err := ParseGrafanaTemplate(`grafana {{ .Status }}`)
 	if err != nil {
 		t.Fatalf("parse grafana template: %v", err)
+	}
+	irTmpl, err := ParseIncidentRelayTemplate(`incidentrelay {{ .Status }}`)
+	if err != nil {
+		t.Fatalf("parse incidentrelay template: %v", err)
 	}
 	amPayload := alertmanagerPayload("firing", AlertItem{
 		Status: "firing",
@@ -74,6 +78,23 @@ func webhookSurfaces(t *testing.T) []webhookSurface {
 						DefaultChatID: webhookDefault,
 						ErrorStates:   []string{"alerting"},
 						Template:      grTmpl,
+					}),
+				)
+			},
+		},
+		{
+			name:    "incidentrelay",
+			path:    "/api/v1/incidentrelay",
+			payload: `{"text":"incidentrelay firing","status":"firing","severity":"critical"}`,
+			newServer: func(t *testing.T, webhookDefault, globalDefault string, sendFn SendFunc, chatFn ChatResolver) *Server {
+				return New(
+					Config{Listen: ":0", BasePath: "/api/v1", DefaultChatAlias: globalDefault, Keys: []ResolvedKey{{Name: "t", Key: "k"}}},
+					sendFn, chatFn,
+					WithIncidentRelay(&IncidentRelayConfig{
+						DefaultChatID:   webhookDefault,
+						ErrorSeverities: []string{"critical"},
+						Template:        irTmpl,
+						MessageSource:   IncidentRelayMessageSourceWebhook,
 					}),
 				)
 			},

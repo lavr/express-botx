@@ -40,7 +40,8 @@ type ResolvedKey struct {
 	// Chats is the key's chat scope as resolved UUIDs (lowercase). Empty means
 	// unrestricted. Aliases are resolved once at startup so request handling
 	// compares UUID against UUID and never re-reads the chat catalog.
-	Chats []string
+	Chats          []string
+	AllowQueryAuth bool
 }
 
 // Config holds the server runtime configuration.
@@ -83,6 +84,7 @@ type Server struct {
 	chatEntries          []config.ChatEntry // for GET /chats/alias/list
 	amCfg                *AlertmanagerConfig
 	grCfg                *GrafanaConfig
+	irCfg                *IncidentRelayConfig
 	gitCfg               *GitlabConfig
 	mentionsResolver     mentions.UserResolver
 	botMentionsResolvers map[string]mentions.UserResolver // per-bot resolvers for multi-host setups
@@ -127,6 +129,19 @@ func WithAlertmanager(cfg *AlertmanagerConfig) Option {
 func WithGrafana(cfg *GrafanaConfig) Option {
 	return func(s *Server) {
 		s.grCfg = cfg
+	}
+}
+
+func WithIncidentRelay(cfg *IncidentRelayConfig) Option {
+	return func(s *Server) {
+		if cfg == nil {
+			return
+		}
+		if cfg.Template == nil {
+			// The built-in template is static, so compiling it cannot fail.
+			cfg.Template, _ = ParseIncidentRelayTemplate(DefaultIncidentRelayTemplate)
+		}
+		s.irCfg = cfg
 	}
 }
 
@@ -356,6 +371,19 @@ func New(cfg Config, sendFn SendFunc, chatResolver ChatResolver, opts ...Option)
 		vlog.Info("server: grafana endpoint enabled (chat: %s)", chatInfo)
 	}
 
+	if s.irCfg != nil {
+		route("POST", "/incidentrelay", s.handleIncidentRelay)
+		chatInfo := "from ?chat_id param"
+		if s.irCfg.DefaultChatID != "" {
+			chatInfo = s.irCfg.DefaultChatID
+		} else if cfg.DefaultChatAlias != "" {
+			chatInfo = cfg.DefaultChatAlias
+		} else if s.irCfg.FallbackChatID != "" {
+			chatInfo = s.irCfg.FallbackChatID
+		}
+		vlog.Info("server: incidentrelay endpoint enabled (chat: %s, message source: %s)", chatInfo, s.irCfg.MessageSource)
+	}
+
 	if s.gitCfg != nil {
 		// GitLab cannot set Authorization/X-API-Key headers, so this route
 		// authenticates via the X-Gitlab-Token header inside the handler
@@ -389,6 +417,7 @@ func New(cfg Config, sendFn SendFunc, chatResolver ChatResolver, opts ...Option)
 
 	var handler http.Handler = r
 	handler = s.errTracker.Middleware(handler)
+	handler = stripQueryKey(handler)
 
 	s.srv = &http.Server{
 		Addr:              cfg.Listen,
