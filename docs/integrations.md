@@ -452,7 +452,7 @@ curl -X POST 'http://localhost:8080/api/v1/incidentrelay?api_key=<api-key>' \
 
 ## IncidentRelay через Mattermost-канал (`bot_api`)
 
-Второй способ принять IncidentRelay — его канал типа **`mattermost`** в режиме
+Второй способ принять IncidentRelay это его канал типа **`mattermost`** в режиме
 `bot_api`. В отличие от generic-webhook-канала он умеет ставить заголовок
 `Authorization: Bearer`, поэтому ключ не попадает ни в URL, ни в access-логи
 ingress, ни в базу IncidentRelay. Сам IncidentRelay такой URL и не примет:
@@ -470,7 +470,7 @@ ingress, ни в базу IncidentRelay. Сам IncidentRelay такой URL и 
 Это работает потому, что `api_url` канала несёт базовый путь, а хвост
 IncidentRelay дописывает сам через
 `urljoin(api_url.rstrip('/') + '/', 'api/v4/posts')`. Укажите в канале
-`api_url: https://express-botx:8080/api/v1/mattermost` — и запросы придут ровно
+`api_url: https://express-botx:8080/api/v1/mattermost`, и запросы придут ровно
 на пути выше. Переписывание в ingress не нужно.
 
 Остальной Mattermost API не реализован: только эти две ручки.
@@ -496,19 +496,19 @@ IncidentRelay оставляет `message` пустым и кладёт всё �
 ```
 
 В чат уходит склейка построчно: `title`, `text`, каждое непустое поле
-`fields[]` как `title: value`, затем `title_link` — ссылка на алерт в
+`fields[]` как `title: value`, затем `title_link`, ссылку на алерт в
 IncidentRelay. Непустой `message` идёт впереди вложений. `actions` игнорируются:
 кнопки в eXpress не отрисовываются, ack делается из UI IncidentRelay.
 
 Первая строка каждого вложения получает эмодзи по состоянию алерта. Состояние
 берётся **только из полей `fields[]`**: `_fields()` в IncidentRelay всегда
-кладёт `Status` и `Severity` с сырыми значениями. `color` не используется —
+кладёт `Status` и `Severity` с сырыми значениями. `color` не используется:
 это те же данные, спроецированные в четыре хекса с потерями (`warning` при
 firing и `acknowledged` дают один и тот же `#f0ad4e`, а зарезолвенный critical
 теряет severity совсем). Вложение без `Status` и `Severity` доставляется
 нейтральным и пишет об этом в лог на уровне `-v`.
 
-`channel_id` — это адресат, UUID чата eXpress или алиас. Если он пуст, шлюз
+`channel_id` это адресат, UUID чата eXpress или алиас. Если он пуст, шлюз
 берёт `default_chat_id`, затем глобальный дефолтный чат, затем единственный
 алиас. Фан-аута здесь нет: ответ обязан назвать ровно одно сообщение.
 
@@ -518,7 +518,7 @@ firing и `acknowledged` дают один и тот же `#f0ad4e`, а заре
 {"id": "<sync_id>", "channel_id": "<то, что запросили>"}
 ```
 
-`id` — это BotX `sync_id` доставленного сообщения. IncidentRelay сохраняет его
+`id` это BotX `sync_id` доставленного сообщения. IncidentRelay сохраняет его
 как `external_message_id` и позже присылает обратно в `PUT`. `channel_id`
 возвращается ровно тем же, что пришёл: при расхождении IncidentRelay пометит
 доставку как `channel_mismatch`.
@@ -532,7 +532,7 @@ firing и `acknowledged` дают один и тот же `#f0ad4e`, а заре
 ### Обновление на месте
 
 `PUT` вызывает BotX `POST /api/v3/botx/events/edit_event` с `sync_id`, равным
-`post_id` из пути. Сообщение в чате обновляется на месте, а не дублируется —
+`post_id` из пути. Сообщение в чате обновляется на месте, а не дублируется:
 ровно то, чего IncidentRelay ждёт от Mattermost.
 
 Два ограничения, которые стоит знать заранее:
@@ -543,7 +543,7 @@ firing и `acknowledged` дают один и тот же `#f0ad4e`, а заре
   сообщение со `status: error` выглядит так же, как со `status: ok`, и правка
   статуса вида не меняет. Официальный SDK
   [pybotx](https://github.com/ExpressApp/pybotx) и вовсе объявляет поле как
-  `status: Literal["ok"]` — то есть это обязательный элемент протокола, а не
+  `status: Literal["ok"]`, то есть это обязательный элемент протокола, а не
   переключатель оформления. Severity в eXpress принято показывать эмодзи в
   теле сообщения, как это делают встроенные шаблоны `/api/v1/grafana` и
   `/api/v1/incidentrelay`.
@@ -560,7 +560,7 @@ firing и `acknowledged` дают один и тот же `#f0ad4e`, а заре
 
 **BotX не подтверждает правку по существу.** `edit_event` отвечает
 `{"status":"ok","result":"bot_command_result_pushed"}` и на настоящий `sync_id`,
-и на несуществующий — валидации нет, приём асинхронный. Поэтому 502 от шлюза на `PUT` означает только транспортную
+и на несуществующий: валидации нет, приём асинхронный. Поэтому 502 от шлюза на `PUT` означает только транспортную
 ошибку или 401; правка, которая не применилась на стороне платформы, вернётся
 в IncidentRelay как успех. Фоллбэка на отправку нового сообщения нет
 сознательно: при таймауте правка могла уже примениться, и повтор оставил бы в
@@ -568,7 +568,7 @@ firing и `acknowledged` дают один и тот же `#f0ad4e`, а заре
 
 Существование сообщения при этом проверяемо отдельно:
 `GET /api/v3/botx/events/{sync_id}/status` отдаёт `event_not_found` для
-неизвестного `sync_id`, а для известного — `group_chat_id`, `sent_to`,
+неизвестного `sync_id`, а для известного отдаёт `group_chat_id`, `sent_to`,
 `received_by` и `read_by`. Шлюз его не вызывает.
 
 ### Конфигурация
@@ -606,10 +606,10 @@ server:
 | `fields[].Severity` из `warning_severities` | `warning` | `ok` | 🟠 |
 | прочее, включая отсутствие полей | `default` | `ok` | 🔵 |
 
-`error_severities` по умолчанию — `[critical, high]`, ровно как у
+`error_severities` по умолчанию `[critical, high]`, ровно как у
 `/api/v1/incidentrelay`: оба приёмника принимают один и тот же алерт от одного
 продукта, и расходиться в правиле им незачем. `warning_severities` по умолчанию
-`[warning, warn]`; `medium` и `low` сознательно не включены — это решение
+`[warning, warn]`; `medium` и `low` сознательно не включены, это решение
 конкретной установки. IncidentRelay нормализует severity до отправки; если у
 вас встречаются `crit` или `error`, добавьте их в список.
 

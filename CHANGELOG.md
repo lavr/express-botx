@@ -2,10 +2,10 @@
 
 ## Unreleased
 
-### Added: Mattermost-совместимый приёмник для IncidentRelay — `/api/v1/mattermost/api/v4/posts`
+### Added: Mattermost-совместимый приёмник для IncidentRelay (`/api/v1/mattermost/api/v4/posts`)
 
 - IncidentRelay умеет доставлять в канал типа `mattermost` в режиме `bot_api`,
-  и этот канал ставит `Authorization: Bearer` — ключ не уходит в URL. Ровно то,
+  и этот канал ставит `Authorization: Bearer`, так что ключ не уходит в URL. Ровно то,
   что generic-webhook-канал сделать не может: у него в конфигурации есть только
   `webhook_url`, а секреты в query сам IncidentRelay запрещает.
 - Реализованы две ручки, остального Mattermost API нет:
@@ -17,27 +17,27 @@
   дописывает сам. Переписывание в ingress не нужно.
 - Содержимое берётся из `props.attachments[0]`: `title`, `text`, непустые
   `fields[]` как `title: value` и `title_link`. `message` у IncidentRelay пуст,
-  но непустой учитывается и идёт первым. `actions` игнорируются — кнопки в
+  но непустой учитывается и идёт первым. `actions` игнорируются, потому что кнопки в
   eXpress не отрисовываются.
-- Адресат — `channel_id` из тела; при пустом берётся `default_chat_id`,
+- Адресат задаёт `channel_id` из тела; при пустом берётся `default_chat_id`,
   глобальный дефолтный чат, затем единственный алиас. Фан-аута нет: ответ обязан
   назвать ровно одно сообщение.
-- Ответ — `{"id": "<sync_id>", "channel_id": "<запрошенный>"}`. `id`
+- Ответ: `{"id": "<sync_id>", "channel_id": "<запрошенный>"}`. `id`
   IncidentRelay хранит как `external_message_id`, расхождение `channel_id`
   помечает как `channel_mismatch`.
 - `PUT` обновляет сообщение **на месте** через новый вызов BotX
   `POST /api/v3/botx/events/edit_event` (`internal/botapi/edit.go`), а не шлёт
-  дубль. `post_id` из пути — это `sync_id`. Тело капается тем же лимитом
+  дубль. `post_id` из пути это `sync_id`. Тело капается тем же лимитом
   `max_message_length`, что и отправка.
-- Состояние алерта определяется по `fields[]` первого вложения — `Status` и
-  `Severity` приходят там сырыми — и задаёт и BotX-статус, и эмодзи в начале
+- Состояние алерта определяется по `fields[]` первого вложения, где `Status` и
+  `Severity` приходят сырыми, и задаёт и BotX-статус, и эмодзи в начале
   сообщения: `resolved` → 🟢, `acknowledged` → 🟡, `Severity` из
   `error_severities` → 🔴 и `status=error`, `Severity` из `warning_severities`
   → 🟠, остальное → 🔵. `color` не используется: это те же данные, спроецированные
   в четыре хекса с потерями. Вложение без `Status` и `Severity` доставляется
   нейтральным и пишет диагностику в лог.
-- `error_severities` по умолчанию `[critical, high]` — то же правило, что у
-  `/api/v1/incidentrelay`; `warning_severities` — `[warning, warn]`.
+- `error_severities` по умолчанию `[critical, high]`, то же правило, что у
+  `/api/v1/incidentrelay`; `warning_severities` по умолчанию `[warning, warn]`.
 - Ответ BotX на `edit_event` проверяется по существу: непустой JSON со
   `status: ok`. Пустое тело, HTML от прокси и `{"status":"error"}` с кодом 200
   больше не считаются успехом.

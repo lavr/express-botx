@@ -762,7 +762,7 @@ paths:
         `notification.status: ok`; a `Severity` in `error_severities` (default
         `[critical, high]`) maps to `error`; a `Severity` in
         `warning_severities` (default `[warning, warn]`) and everything else map
-        to `ok`. The attachment's `color` is ignored — it is the same
+        to `ok`. The attachment's `color` is ignored: it is the same
         information projected lossily onto four hex values.
 
         The state also picks the emoji that leads each attachment: resolved
@@ -857,7 +857,7 @@ paths:
         a new post; the response echoes `post_id` and the requested
         `channel_id`.
 
-        Returns `501` when the runtime has no editor — an async (`--enqueue`)
+        Returns `501` when the runtime has no editor. An async (`--enqueue`)
         server never registers these endpoints, so this only shows up for a
         library caller that omitted the option.
       security:
