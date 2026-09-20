@@ -2,6 +2,54 @@
 
 ## Unreleased
 
+### Added: Mattermost-совместимый приёмник для IncidentRelay — `/api/v1/mattermost/api/v4/posts`
+
+- IncidentRelay умеет доставлять в канал типа `mattermost` в режиме `bot_api`,
+  и этот канал ставит `Authorization: Bearer` — ключ не уходит в URL. Ровно то,
+  что generic-webhook-канал сделать не может: у него в конфигурации есть только
+  `webhook_url`, а секреты в query сам IncidentRelay запрещает.
+- Реализованы две ручки, остального Mattermost API нет:
+  `POST /api/v1/mattermost/api/v4/posts` создаёт сообщение,
+  `PUT /api/v1/mattermost/api/v4/posts/{post_id}` заменяет его тело.
+- Приёмник живёт под собственным `base_path` шлюза, в корне на `/api/v4/*`
+  ничего не вешается. Работает потому, что `api_url` канала несёт базовый путь:
+  ставим `api_url: <host>/api/v1/mattermost`, хвост `api/v4/posts` IncidentRelay
+  дописывает сам. Переписывание в ingress не нужно.
+- Содержимое берётся из `props.attachments[0]`: `title`, `text`, непустые
+  `fields[]` как `title: value` и `title_link`. `message` у IncidentRelay пуст,
+  но непустой учитывается и идёт первым. `actions` игнорируются — кнопки в
+  eXpress не отрисовываются.
+- Адресат — `channel_id` из тела; при пустом берётся `default_chat_id`,
+  глобальный дефолтный чат, затем единственный алиас. Фан-аута нет: ответ обязан
+  назвать ровно одно сообщение.
+- Ответ — `{"id": "<sync_id>", "channel_id": "<запрошенный>"}`. `id`
+  IncidentRelay хранит как `external_message_id`, расхождение `channel_id`
+  помечает как `channel_mismatch`.
+- `PUT` обновляет сообщение **на месте** через новый вызов BotX
+  `POST /api/v3/botx/events/edit_event` (`internal/botapi/edit.go`), а не шлёт
+  дубль. `post_id` из пути — это `sync_id`. Тело капается тем же лимитом
+  `max_message_length`, что и отправка.
+- Статус: `color` первого attachment из `error_colors` (по умолчанию
+  `["#d9534f"]` — цвет critical/high/error у IncidentRelay) даёт BotX
+  `status=error`, остальное `ok`. `error_colors: []` отключает подсветку.
+- Секция конфига `server.mattermost` (`default_chat_id`, `error_colors`)
+  опциональна, endpoint работает и без неё.
+
+Два сознательных ограничения:
+
+- **Скоупированный ключ получает 403 на `PUT`.** `post_id` не несёт чата, в
+  котором живёт сообщение, поэтому `chats:` к нему применить нечем: ключ,
+  ограниченный чатом A, иначе мог бы передать `channel_id: A` и `post_id`
+  чужого сообщения в чате B и отредактировать его. Отказ выдаётся до вызова
+  редактора. Для IncidentRelay используйте ключ без `chats:`.
+- **Статус при `PUT` не меняется.** У `edit_event` нет поля `status`, только
+  `body` и разметка, так что текст станет `RESOLVED: …`, а красная подсветка
+  останется.
+- Пустой `sync_id` при успешном ответе BotX даёт 502, а не 200 с пустым `id`:
+  `MattermostNotifier.update` в IncidentRelay падает на отсутствующем `post_id`,
+  и такая доставка была бы необновляемой навсегда.
+
+
 ### Added: приёмник вебхуков IncidentRelay — `/api/v1/incidentrelay`
 
 - Новый endpoint принимает плоский payload generic-webhook-канала

@@ -450,6 +450,168 @@ curl -X POST 'http://localhost:8080/api/v1/incidentrelay?api_key=<api-key>' \
 
 ---
 
+## IncidentRelay через Mattermost-канал (`bot_api`)
+
+Второй способ принять IncidentRelay — его канал типа **`mattermost`** в режиме
+`bot_api`. В отличие от generic-webhook-канала он умеет ставить заголовок
+`Authorization: Bearer`, поэтому ключ не попадает ни в URL, ни в access-логи
+ingress, ни в базу IncidentRelay. Сам IncidentRelay такой URL и не примет:
+`_validate_url_syntax` отбивает секреты в query сообщением
+«webhook URL must not contain secret query parameters; use encrypted headers».
+
+Шлюз не мимикрирует под Mattermost: обе ручки живут под его собственным
+`base_path`, а не в корне.
+
+| Метод | Путь | Когда вызывается |
+|-------|------|------------------|
+| `POST` | `/api/v1/mattermost/api/v4/posts` | создание сообщения |
+| `PUT` | `/api/v1/mattermost/api/v4/posts/{post_id}` | алерт подтверждён или зарезолвен |
+
+Это работает потому, что `api_url` канала несёт базовый путь, а хвост
+IncidentRelay дописывает сам через
+`urljoin(api_url.rstrip('/') + '/', 'api/v4/posts')`. Укажите в канале
+`api_url: https://express-botx:8080/api/v1/mattermost` — и запросы придут ровно
+на пути выше. Переписывание в ingress не нужно.
+
+Остальной Mattermost API не реализован: только эти две ручки.
+
+### Что приходит в теле
+
+IncidentRelay оставляет `message` пустым и кладёт всё в первый attachment:
+
+```json
+{
+  "channel_id": "79565da8-a2bf-5800-b36f-0dd9493ccdb9",
+  "message": "",
+  "props": {"attachments": [{
+    "fallback": "Диск почти полон",
+    "color": "#d9534f",
+    "title": "[P2] Диск почти полон",
+    "text": "node-1 at 94%",
+    "title_link": "http://incidentrelay/alerts/42",
+    "fields": [{"short": true, "title": "Team", "value": "sre"}],
+    "actions": [{"id": "ack", "name": "Acknowledge"}]
+  }]}
+}
+```
+
+В чат уходит склейка построчно: `title`, `text`, каждое непустое поле
+`fields[]` как `title: value`, затем `title_link` — ссылка на алерт в
+IncidentRelay. Непустой `message` идёт впереди вложений. `actions` игнорируются:
+кнопки в eXpress не отрисовываются, ack делается из UI IncidentRelay.
+
+`channel_id` — это адресат, UUID чата eXpress или алиас. Если он пуст, шлюз
+берёт `default_chat_id`, затем глобальный дефолтный чат, затем единственный
+алиас. Фан-аута здесь нет: ответ обязан назвать ровно одно сообщение.
+
+### Ответ
+
+```json
+{"id": "<sync_id>", "channel_id": "<то, что запросили>"}
+```
+
+`id` — это BotX `sync_id` доставленного сообщения. IncidentRelay сохраняет его
+как `external_message_id` и позже присылает обратно в `PUT`. `channel_id`
+возвращается ровно тем же, что пришёл: при расхождении IncidentRelay пометит
+доставку как `channel_mismatch`.
+
+Если BotX принял сообщение, но `sync_id` в ответе не оказалось, шлюз отвечает
+**502**, а не 200 с пустым `id`. Пустой `id` создал бы доставку, любое будущее
+обновление которой обречено: `MattermostNotifier.update` падает на отсутствующем
+`post_id`, а автоматического отката на отправку нового сообщения в IncidentRelay
+нет.
+
+### Обновление на месте
+
+`PUT` вызывает BotX `POST /api/v3/botx/events/edit_event` с `sync_id`, равным
+`post_id` из пути. Сообщение в чате обновляется на месте, а не дублируется —
+ровно то, чего IncidentRelay ждёт от Mattermost.
+
+Два ограничения, которые стоит знать заранее:
+
+- **Статус сообщения не редактируется.** `edit_event` принимает только `body`
+  (и разметку), поля `status` у него нет. Поэтому текст сменится на
+  `RESOLVED: …`, а красная подсветка, выставленная при создании, останется.
+- **Скоупированный ключ не может редактировать.** `post_id` не несёт чата, в
+  котором живёт сообщение, поэтому скоуп ключа к нему применить нечем: ключ,
+  ограниченный чатом A, мог бы передать `channel_id: A` и `post_id` чужого
+  сообщения в чате B. Шлюз отвечает таким ключам **403** до вызова редактора.
+  Для канала IncidentRelay используйте ключ **без** `chats:`; если чат нужно
+  ограничить, ограничьте его на стороне IncidentRelay полем `channel_id`.
+
+Если `edit_event` вернёт ошибку (например, сообщение слишком старое), шлюз
+отвечает 502 и не шлёт вместо правки новое сообщение: при таймауте правка могла
+уже примениться, и повтор оставил бы в чате дубль.
+
+### Конфигурация
+
+Endpoint включён по умолчанию, секция опциональна:
+
+```yaml
+server:
+  api_keys:
+    - name: incidentrelay
+      key: env:INCIDENTRELAY_API_KEY
+  mattermost:                     # опционально
+    default_chat_id: alerts       # если IncidentRelay не прислал channel_id
+    error_colors:                 # цвета, которые дают BotX status=error
+      - "#d9534f"
+```
+
+`error_colors` по умолчанию — `["#d9534f"]`: именно его IncidentRelay ставит для
+`critical`, `crit`, `high` и `error` (`_color_for_alert`). Зелёный `#2e7d32`
+(resolved) и янтарный `#f0ad4e` (acknowledged, warning) дают `ok`. Обратите
+внимание, что это отображение **severity**, а не статуса алерта: `warning` в
+состоянии firing уедет как `ok`. Пустой список (`error_colors: []`) отключает
+error-подсветку совсем; отсутствие ключа даёт дефолт.
+
+### Настройка IncidentRelay
+
+1. **Settings → Channels → Add channel**, тип **Mattermost**
+2. `api_url`: `https://express-botx:8080/api/v1/mattermost`
+3. `bot_token`: API-ключ express-botx (без `chats:`, см. ограничение выше)
+4. `channel_id`: UUID чата eXpress
+5. Режим `bot_api` включается наличием всех трёх полей
+6. Привяжите канал к цепочке эскалации
+
+### Проверка вручную
+
+```bash
+curl -X POST 'http://localhost:8080/api/v1/mattermost/api/v4/posts' \
+  -H "Authorization: Bearer <api-key>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "channel_id": "79565da8-a2bf-5800-b36f-0dd9493ccdb9",
+    "message": "",
+    "props": {"attachments": [{
+      "color": "#d9534f",
+      "title": "[P2] Диск почти полон",
+      "text": "node-1 at 94%",
+      "title_link": "http://incidentrelay/alerts/42",
+      "fields": [{"short": true, "title": "Team", "value": "sre"}]
+    }]}
+  }'
+```
+
+Ответ вернёт `id`; им же обновляется сообщение:
+
+```bash
+curl -X PUT 'http://localhost:8080/api/v1/mattermost/api/v4/posts/<id>' \
+  -H "Authorization: Bearer <api-key>" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "id": "<id>",
+    "channel_id": "79565da8-a2bf-5800-b36f-0dd9493ccdb9",
+    "props": {"attachments": [{
+      "color": "#2e7d32",
+      "title": "RESOLVED: [P2] Диск почти полон",
+      "text": "The alert has been resolved."
+    }]}
+  }'
+```
+
+---
+
 ## GitLab (универсальный приёмник событий)
 
 Endpoint `/api/v1/gitlab` принимает **любые** group/project-вебхуки GitLab

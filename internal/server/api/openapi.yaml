@@ -733,6 +733,182 @@ paths:
               schema:
                 $ref: "#/components/schemas/MultiSendResponse"
 
+  /mattermost/api/v4/posts:
+    post:
+      operationId: mattermostCreatePost
+      summary: Mattermost-compatible post (IncidentRelay bot_api channel)
+      description: |
+        Accepts the post that IncidentRelay's `mattermost` channel sends in
+        `bot_api` mode, so IncidentRelay can deliver to eXpress without a
+        generic webhook and without a key in the URL: the channel authenticates
+        with `Authorization: Bearer <api-key>`, which this gateway already
+        understands.
+
+        Only the two post endpoints are implemented, and they live under
+        express-botx's own base path rather than at the bare Mattermost path.
+        Point the channel's `api_url` at `<external_url>/api/v1/mattermost` and
+        IncidentRelay appends `api/v4/posts` itself.
+
+        **Content.** IncidentRelay leaves `message` empty and puts everything in
+        `props.attachments[0]`. The delivered notification is the attachment's
+        `title`, `text`, each non-empty `fields[]` entry as `title: value`, and
+        `title_link` (the alert's URL in IncidentRelay) on its own line. A
+        non-empty `message` is kept ahead of the attachments. `actions` are
+        ignored: eXpress does not render buttons.
+
+        **Status.** The first attachment's `color` maps to BotX
+        `notification.status`: a colour listed in `error_colors` (default
+        `["#d9534f"]`, which IncidentRelay uses for `critical`/`high`/`error`)
+        becomes `error`, anything else `ok`.
+
+        **Chat.** `channel_id` is the target chat UUID or alias. When it is
+        absent the endpoint falls back to `default_chat_id`, then the global
+        default chat, then the single configured chat alias. There is no
+        fan-out: the response must name exactly one message.
+
+        **Response.** `id` is the BotX `sync_id` of the delivered message, which
+        IncidentRelay stores as `external_message_id` and later sends back to
+        the update endpoint. `channel_id` is echoed exactly as requested;
+        IncidentRelay flags a `channel_mismatch` otherwise.
+      security:
+        - bearerAuth: []
+        - apiKeyHeader: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/MattermostPost"
+            example:
+              channel_id: 79565da8-a2bf-5800-b36f-0dd9493ccdb9
+              message: ""
+              props:
+                attachments:
+                  - fallback: Disk almost full
+                    color: "#d9534f"
+                    title: "[P2] Disk almost full"
+                    text: "node-1 at 94%"
+                    title_link: http://incidentrelay/alerts/42
+                    fields:
+                      - short: true
+                        title: Team
+                        value: sre
+                      - short: true
+                        title: Severity
+                        value: critical
+      responses:
+        "200":
+          description: Message delivered
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MattermostPostResponse"
+        "400":
+          description: Request-level error (malformed JSON, no content in payload, no chat to address)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "401":
+          description: No credentials provided
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "403":
+          description: Invalid credentials, or the target chat is outside this API key's chat scope
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "502":
+          description: Delivery failed upstream
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /mattermost/api/v4/posts/{post_id}:
+    put:
+      operationId: mattermostUpdatePost
+      summary: Replace an already delivered post
+      description: |
+        Replaces the body of a message already delivered through
+        `POST /mattermost/api/v4/posts`. IncidentRelay calls this when an alert
+        is acknowledged or resolved, passing the `id` it got back.
+
+        `post_id` is the BotX `sync_id`, and the edit goes to BotX
+        `POST /api/v3/botx/events/edit_event`, so the notification is updated in
+        place rather than duplicated. The body is rendered exactly as it is for
+        a new post; the response echoes `post_id` and the requested
+        `channel_id`.
+
+        Returns `501` when the runtime has no editor — an async (`--enqueue`)
+        server never registers these endpoints, so this only shows up for a
+        library caller that omitted the option.
+      security:
+        - bearerAuth: []
+        - apiKeyHeader: []
+      parameters:
+        - name: post_id
+          in: path
+          required: true
+          description: The `id` returned when the post was created (a BotX `sync_id`)
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/MattermostPost"
+            example:
+              id: 0197c2cd-0b0e-7c8e-9d4a-6f1a2b3c4d5e
+              channel_id: 79565da8-a2bf-5800-b36f-0dd9493ccdb9
+              message: ""
+              props:
+                attachments:
+                  - color: "#2e7d32"
+                    title: "RESOLVED: [P2] Disk almost full"
+                    text: The alert has been resolved.
+      responses:
+        "200":
+          description: Message replaced
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MattermostPostResponse"
+        "400":
+          description: Request-level error (malformed JSON, no content in payload, no chat to address)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "401":
+          description: No credentials provided
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "403":
+          description: Invalid credentials, or the target chat is outside this API key's chat scope
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "501":
+          description: This server cannot edit messages
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "502":
+          description: The upstream edit failed
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
   /gitlab:
     post:
       operationId: gitlab
@@ -1124,6 +1300,82 @@ components:
         message:
           type: string
           description: Pre-formatted alert message from Grafana (markdown)
+
+    MattermostPost:
+      type: object
+      description: |
+        The subset of a Mattermost post that IncidentRelay's `bot_api` channel
+        sends (`MattermostNotifier._build_post_payload`). Fields outside this
+        list are accepted and ignored.
+      properties:
+        id:
+          type: string
+          description: Present on an update; the endpoint uses the `post_id` from the path instead.
+        channel_id:
+          type: string
+          description: Target chat UUID or alias. Falls back to the configured default when empty.
+        message:
+          type: string
+          description: Plain post text. IncidentRelay leaves it empty and uses `props.attachments`.
+        props:
+          type: object
+          properties:
+            attachments:
+              type: array
+              items:
+                $ref: "#/components/schemas/MattermostAttachment"
+
+    MattermostAttachment:
+      type: object
+      properties:
+        fallback:
+          type: string
+          description: Ignored; `title` and `text` carry the same content.
+        color:
+          type: string
+          description: Border colour; drives the BotX notification status through `error_colors`.
+        title:
+          type: string
+        title_link:
+          type: string
+          format: uri
+          description: The alert's URL in IncidentRelay; appended on its own line.
+        text:
+          type: string
+        fields:
+          type: array
+          items:
+            $ref: "#/components/schemas/MattermostField"
+        actions:
+          type: array
+          description: Ignored; eXpress does not render buttons.
+          items:
+            type: object
+
+    MattermostField:
+      type: object
+      properties:
+        title:
+          type: string
+        value:
+          description: "Rendered as `title: value`; an empty value drops the line."
+        short:
+          type: boolean
+          description: Ignored; eXpress notifications are plain text.
+
+    MattermostPostResponse:
+      type: object
+      required: [id, channel_id]
+      properties:
+        id:
+          type: string
+          description: BotX `sync_id` of the delivered message; IncidentRelay stores it as `external_message_id`.
+        channel_id:
+          type: string
+          description: Echoed exactly as requested.
+      example:
+        id: 0197c2cd-0b0e-7c8e-9d4a-6f1a2b3c4d5e
+        channel_id: 79565da8-a2bf-5800-b36f-0dd9493ccdb9
 
     IncidentRelayWebhook:
       type: object

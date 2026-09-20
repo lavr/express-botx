@@ -129,6 +129,7 @@ type ServerConfig struct {
 	Alertmanager       *AlertmanagerYAMLConfig  `yaml:"alertmanager,omitempty"`
 	Grafana            *GrafanaYAMLConfig       `yaml:"grafana,omitempty"`
 	IncidentRelay      *IncidentRelayYAMLConfig `yaml:"incidentrelay,omitempty"`
+	Mattermost         *MattermostYAMLConfig    `yaml:"mattermost,omitempty"`
 	Gitlab             *GitlabYAMLConfig        `yaml:"gitlab,omitempty"`
 	Callbacks          *CallbacksConfig         `yaml:"callbacks,omitempty"`
 	Docs               *bool                    `yaml:"docs,omitempty"`         // enable /docs endpoint (default: true)
@@ -188,6 +189,12 @@ type IncidentRelayYAMLConfig struct {
 	Template        string   `yaml:"template,omitempty"`
 	TemplateFile    string   `yaml:"template_file,omitempty"`
 	MessageSource   string   `yaml:"message_source,omitempty"`
+}
+
+// MattermostYAMLConfig holds YAML settings for the Mattermost-compatible post endpoints.
+type MattermostYAMLConfig struct {
+	DefaultChatID string   `yaml:"default_chat_id,omitempty"`
+	ErrorColors   []string `yaml:"error_colors,omitempty"`
 }
 
 type GitlabYAMLConfig struct {
