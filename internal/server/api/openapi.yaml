@@ -885,9 +885,16 @@ paths:
                   - color: "#2e7d32"
                     title: "RESOLVED: [P2] Disk almost full"
                     text: The alert has been resolved.
+                    fields:
+                      - short: true
+                        title: Status
+                        value: resolved
       responses:
         "200":
-          description: Message replaced
+          description: |
+            Edit accepted upstream. BotX acknowledges the edit asynchronously and
+            does not validate the `sync_id`, so this does not confirm that the
+            message was actually changed.
           content:
             application/json:
               schema:
@@ -905,7 +912,10 @@ paths:
               schema:
                 $ref: "#/components/schemas/ErrorResponse"
         "403":
-          description: Invalid credentials, or the target chat is outside this API key's chat scope
+          description: |
+            Invalid credentials, or the key carries any chat scope at all: a
+            `post_id` does not identify the chat its message lives in, so the
+            scope cannot be applied and every scoped key is refused.
           content:
             application/json:
               schema:

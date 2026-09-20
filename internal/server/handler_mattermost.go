@@ -31,14 +31,6 @@ const (
 	MattermostStateDefault      = "default"
 )
 
-var MattermostStates = []string{
-	MattermostStateResolved,
-	MattermostStateAcknowledged,
-	MattermostStateError,
-	MattermostStateWarning,
-	MattermostStateDefault,
-}
-
 type MattermostConfig struct {
 	DefaultChatID     string
 	ErrorSeverities   []string
