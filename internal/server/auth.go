@@ -12,10 +12,15 @@ import (
 type ctxKey int
 
 const (
-	keyNameKey  ctxKey = iota
-	authBotKey         // bot name bound by X-Bot-Signature auth
-	keyScopeKey        // chat scope of the API key that authenticated the request
+	keyNameKey     ctxKey = iota
+	authBotKey            // bot name bound by X-Bot-Signature auth
+	keyScopeKey           // chat scope of the API key that authenticated the request
+	queryKeyCtxKey        // API key lifted out of the query string before logging
 )
+
+func withQueryKey(ctx context.Context, key string) context.Context {
+	return context.WithValue(ctx, queryKeyCtxKey, key)
+}
 
 // KeyName returns the API key name from the request context.
 func KeyName(ctx context.Context) string {
@@ -177,8 +182,8 @@ func (s *Server) deliveryError(ctx context.Context, stage string, err error) str
 func (s *Server) authMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// 1. Try API key (Bearer or X-API-Key)
-		if key := extractKey(r); key != "" {
-			if rk, ok := s.keyMap[key]; ok {
+		if key, viaQuery := s.requestKey(r); key != "" {
+			if rk, ok := s.keyMap[key]; ok && (!viaQuery || rk.AllowQueryAuth) {
 				vlog.V1("server: %s %s [key: %s]", r.Method, r.URL.Path, rk.Name)
 				ctx := context.WithValue(r.Context(), keyNameKey, rk.Name)
 				if len(rk.Chats) > 0 {
@@ -213,6 +218,25 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 			writeError(w, http.StatusForbidden, "forbidden")
 		}
 	})
+}
+
+func (s *Server) requestKey(r *http.Request) (string, bool) {
+	if key := extractKey(r); key != "" {
+		return key, false
+	}
+	if hasAuthHeader(r) {
+		return "", false
+	}
+	return queryKey(r), true
+}
+
+func hasAuthHeader(r *http.Request) bool {
+	for _, name := range []string{"Authorization", "X-API-Key"} {
+		if _, ok := r.Header[http.CanonicalHeaderKey(name)]; ok {
+			return true
+		}
+	}
+	return false
 }
 
 func extractKey(r *http.Request) string {

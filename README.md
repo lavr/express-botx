@@ -109,6 +109,7 @@ curl --cacert ca.crt https://localhost:8443/healthz
 | `POST` | `/api/v1/send` | Отправка сообщения |
 | `POST` | `/api/v1/alertmanager` | Вебхук Alertmanager |
 | `POST` | `/api/v1/grafana` | Вебхук Grafana |
+| `POST` | `/api/v1/incidentrelay` | Вебхук IncidentRelay (плоский payload, ключ можно передать в `?api_key=`) |
 | `POST` | `/api/v1/gitlab` | Универсальный вебхук GitLab — любые события, фильтры + шаблоны (auth: `X-Gitlab-Token`) |
 
 Сервер автоматически добавляет заголовок `X-Request-ID` к каждому ответу (если клиент не передал свой, генерируется уникальный). Все HTTP-запросы логируются в stderr (метод, путь, статус, время выполнения).
@@ -189,7 +190,13 @@ chats:
 
 ## Интеграции
 
-В режиме веб-сервера есть методы для интеграции с alertmanager, grafana и gitlab.
+В режиме веб-сервера есть методы для интеграции с alertmanager, grafana,
+incidentrelay и gitlab.
+IncidentRelay шлёт плоский payload без `alerts[]`, поэтому у него свой приёмник;
+готовый текст нотификации берётся из поля `text`. Так как его webhook-канал не
+умеет выставлять заголовки, ключ можно передать параметром `?api_key=` —
+это разрешается отдельному ключу через `allow_query_auth: true`, см.
+[описание интеграции](docs/integrations.md#incidentrelay).
 GitLab-эндпоинт принимает любые события; каждый `server.gitlab.senders[]`
 владеет своим `X-Gitlab-Token`, скоупом чатов, фильтрами, шаблонами и
 маршрутами. `?chat_id=` обходит routes внутри скоупа (400 на пустой, 403
