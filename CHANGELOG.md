@@ -29,11 +29,16 @@
   `POST /api/v3/botx/events/edit_event` (`internal/botapi/edit.go`), а не шлёт
   дубль. `post_id` из пути — это `sync_id`. Тело капается тем же лимитом
   `max_message_length`, что и отправка.
-- Статус: `color` первого attachment из `error_colors` (по умолчанию
-  `["#d9534f"]` — цвет critical/high/error у IncidentRelay) даёт BotX
-  `status=error`, остальное `ok`. `error_colors: []` отключает подсветку.
-- Секция конфига `server.mattermost` (`default_chat_id`, `error_colors`)
-  опциональна, endpoint работает и без неё.
+- Состояние алерта определяется по `fields[]` первого вложения — `Status` и
+  `Severity` приходят там сырыми, — и задаёт и BotX-статус, и эмодзи в начале
+  сообщения: `resolved` → 🟢, `acknowledged` → 🟡, `Severity` из
+  `error_severities` → 🔴 и `status=error`, остальное → 🔵. `color` служит
+  запасным ключом, только когда `fields[]` нет вовсе: он проекция тех же
+  данных в четыре хекса с потерями.
+- `error_severities` по умолчанию `[critical, high]` — то же правило, что у
+  `/api/v1/incidentrelay`.
+- Секция конфига `server.mattermost` (`default_chat_id`, `error_severities`,
+  `error_colors`, `icons`) опциональна, endpoint работает и без неё.
 
 Два сознательных ограничения:
 
@@ -42,9 +47,11 @@
   ограниченный чатом A, иначе мог бы передать `channel_id: A` и `post_id`
   чужого сообщения в чате B и отредактировать его. Отказ выдаётся до вызова
   редактора. Для IncidentRelay используйте ключ без `chats:`.
-- **Статус при `PUT` не меняется.** У `edit_event` нет поля `status`, только
-  `body` и разметка, так что текст станет `RESOLVED: …`, а красная подсветка
-  останется.
+- При `PUT` вместе с телом уходит и `payload.status`, выведенный из `color`
+  того же attachment, так что статус сообщения остаётся согласован с его новым
+  текстом. Поля `status` нет в pybotx, но BotX его принимает — проверено на
+  testlab. Подсветки статус при этом не даёт: `error` и `ok` в клиенте
+  выглядят одинаково, а pybotx объявляет поле как `Literal["ok"]`.
 - **Неудачную правку BotX не сообщает.** `edit_event` отвечает `ok` и на
   выдуманный `sync_id` (проверено на testlab), поэтому 502 на `PUT` ловит
   только транспорт и 401.

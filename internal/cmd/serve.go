@@ -938,6 +938,7 @@ func (bs *botSender) Edit(ctx context.Context, p *server.EditPayload) error {
 	er := botapi.BuildEditRequest(&botapi.EditParams{
 		SyncID:           p.SyncID,
 		Message:          p.Message,
+		Status:           p.Status,
 		MaxMessageLength: maxLen,
 		TruncateSuffix:   suffix,
 	})
@@ -957,13 +958,27 @@ func (bs *botSender) Edit(ctx context.Context, p *server.EditPayload) error {
 }
 
 func buildMattermostConfig(mm *config.MattermostYAMLConfig) *server.MattermostConfig {
+	severities := mm.ErrorSeverities
+	if severities == nil {
+		severities = server.DefaultMattermostErrorSeverities
+	}
 	colors := mm.ErrorColors
 	if colors == nil {
 		colors = server.DefaultMattermostErrorColors
 	}
+	icons := mm.Icons
+	if icons == nil {
+		icons = server.DefaultMattermostIcons
+	}
+	normalized := make(map[string]string, len(icons))
+	for state, icon := range icons {
+		normalized[strings.ToLower(strings.TrimSpace(state))] = icon
+	}
 	return &server.MattermostConfig{
-		DefaultChatID: mm.DefaultChatID,
-		ErrorColors:   colors,
+		DefaultChatID:   mm.DefaultChatID,
+		ErrorSeverities: severities,
+		ErrorColors:     colors,
+		Icons:           normalized,
 	}
 }
 

@@ -48,13 +48,33 @@ func TestBuildEditRequest(t *testing.T) {
 }
 
 func TestEditRequestWireFormat(t *testing.T) {
-	encoded, err := json.Marshal(BuildEditRequest(&EditParams{SyncID: "sync-1", Message: "resolved"}))
-	if err != nil {
-		t.Fatalf("marshal: %v", err)
+	tests := []struct {
+		name   string
+		params EditParams
+		want   string
+	}{
+		{
+			name:   "an omitted status is left out so BotX keeps the current one",
+			params: EditParams{SyncID: "sync-1", Message: "resolved"},
+			want:   `{"sync_id":"sync-1","payload":{"body":"resolved"}}`,
+		},
+		{
+			name:   "an explicit status travels with the body",
+			params: EditParams{SyncID: "sync-1", Message: "resolved", Status: "ok"},
+			want:   `{"sync_id":"sync-1","payload":{"body":"resolved","status":"ok"}}`,
+		},
 	}
-	want := `{"sync_id":"sync-1","payload":{"body":"resolved"}}`
-	if string(encoded) != want {
-		t.Errorf("wire format = %s, want %s", encoded, want)
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			encoded, err := json.Marshal(BuildEditRequest(&tt.params))
+			if err != nil {
+				t.Fatalf("marshal: %v", err)
+			}
+			if string(encoded) != tt.want {
+				t.Errorf("wire format = %s, want %s", encoded, tt.want)
+			}
+		})
 	}
 }
 

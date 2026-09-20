@@ -756,10 +756,19 @@ paths:
         non-empty `message` is kept ahead of the attachments. `actions` are
         ignored: eXpress does not render buttons.
 
-        **Status.** The first attachment's `color` maps to BotX
-        `notification.status`: a colour listed in `error_colors` (default
-        `["#d9534f"]`, which IncidentRelay uses for `critical`/`high`/`error`)
-        becomes `error`, anything else `ok`.
+        **State.** The first attachment's `fields[]` decide, because
+        IncidentRelay always puts the raw `Status` and `Severity` there:
+        `Status: resolved` and `Status: acknowledged` map to BotX
+        `notification.status: ok`, a `Severity` listed in `error_severities`
+        (default `[critical, high]`) maps to `error`, anything else to `ok`.
+        The attachment's `color` is only a fallback for a payload with no
+        `fields[]` at all — it is the same information projected lossily onto
+        four hex values.
+
+        The state also picks the emoji that leads each attachment:
+        `resolved` green, `acknowledged` yellow, `error` red, everything else
+        blue. The BotX status itself has no visible effect in eXpress, so the
+        emoji is the severity signal the on-call actually sees.
 
         **Chat.** `channel_id` is the target chat UUID or alias. When it is
         absent the endpoint falls back to `default_chat_id`, then the global
@@ -1333,7 +1342,7 @@ components:
           description: Ignored; `title` and `text` carry the same content.
         color:
           type: string
-          description: Border colour; drives the BotX notification status through `error_colors`.
+          description: Border colour; a fallback state key used only when `fields[]` is absent.
         title:
           type: string
         title_link:
@@ -1357,6 +1366,7 @@ components:
       properties:
         title:
           type: string
+          description: "`Status` and `Severity` additionally decide the alert state; every field is rendered."
         value:
           description: "Rendered as `title: value`; an empty value drops the line."
         short:

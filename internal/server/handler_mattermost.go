@@ -11,12 +11,30 @@ import (
 	vlog "github.com/lavr/express-botx/internal/log"
 )
 
+var DefaultMattermostErrorSeverities = []string{"critical", "high"}
+
 var DefaultMattermostErrorColors = []string{"#d9534f"}
 
+var DefaultMattermostIcons = map[string]string{
+	MattermostStateResolved:     "\U0001F7E2",
+	MattermostStateAcknowledged: "\U0001F7E1",
+	MattermostStateError:        "\U0001F534",
+	MattermostStateDefault:      "\U0001F535",
+}
+
+const (
+	MattermostStateResolved     = "resolved"
+	MattermostStateAcknowledged = "acknowledged"
+	MattermostStateError        = "error"
+	MattermostStateDefault      = "default"
+)
+
 type MattermostConfig struct {
-	DefaultChatID  string
-	ErrorColors    []string
-	FallbackChatID string
+	DefaultChatID   string
+	ErrorSeverities []string
+	ErrorColors     []string
+	Icons           map[string]string
+	FallbackChatID  string
 }
 
 type MattermostPost struct {
@@ -90,11 +108,11 @@ func (s *Server) handleMattermostCreatePost(w http.ResponseWriter, r *http.Reque
 		return
 	}
 	if syncID == "" {
-		vlog.Info("mattermost: chat %q accepted the post but returned no sync_id [key: %s] -> 502 (%dms)", req.target, keyName, elapsed.Milliseconds())
-		writeError(w, http.StatusBadGateway, "message delivered without a sync_id, so it could never be updated")
+		vlog.Info("mattermost: upstream accepted the post for chat %q without a sync_id [key: %s] -> 502 (%dms)", req.target, keyName, elapsed.Milliseconds())
+		writeError(w, http.StatusBadGateway, "upstream accepted the message without a sync_id, so it could never be updated")
 		return
 	}
-	vlog.V1("mattermost: created post %s in chat %q [key: %s] (%dms)", syncID, req.target, keyName, elapsed.Milliseconds())
+	vlog.V1("mattermost: post %s submitted to chat %q [key: %s] (%dms)", syncID, req.target, keyName, elapsed.Milliseconds())
 
 	writeMattermostPost(w, syncID, req.post.ChannelID)
 }
@@ -124,6 +142,7 @@ func (s *Server) handleMattermostUpdatePost(w http.ResponseWriter, r *http.Reque
 		Bot:     req.bot,
 		SyncID:  postID,
 		Message: req.message,
+		Status:  s.resolveMattermostStatus(req.post),
 	})
 	elapsed := time.Since(start)
 
@@ -133,7 +152,7 @@ func (s *Server) handleMattermostUpdatePost(w http.ResponseWriter, r *http.Reque
 		writeError(w, http.StatusBadGateway, s.deliveryError(r.Context(), "editing", err))
 		return
 	}
-	vlog.V1("mattermost: updated post %s in chat %q [key: %s] (%dms)", postID, req.target, keyName, elapsed.Milliseconds())
+	vlog.V1("mattermost: edit of post %s accepted for chat %q [key: %s] (%dms)", postID, req.target, keyName, elapsed.Milliseconds())
 
 	writeMattermostPost(w, postID, req.post.ChannelID)
 }
@@ -166,7 +185,7 @@ func (s *Server) prepareMattermostPost(w http.ResponseWriter, r *http.Request) (
 		return nil, false
 	}
 
-	message := renderMattermostPost(post)
+	message := renderMattermostPost(post, s.mmCfg)
 	if message == "" {
 		writeError(w, http.StatusBadRequest, "no content in payload: message and props.attachments are both empty")
 		return nil, false
@@ -203,26 +222,23 @@ func writeMattermostPost(w http.ResponseWriter, id, channelID string) {
 	json.NewEncoder(w).Encode(mattermostPostResponse{ID: id, ChannelID: channelID}) //nolint:errcheck
 }
 
-func renderMattermostPost(post MattermostPost) string {
-	var b strings.Builder
-	line := func(s string) {
-		if s == "" {
-			return
-		}
-		if b.Len() > 0 {
-			b.WriteString("\n")
-		}
-		b.WriteString(s)
+func renderMattermostPost(post MattermostPost, cfg *MattermostConfig) string {
+	var blocks []string
+
+	if msg := strings.TrimSpace(post.Message); msg != "" {
+		blocks = append(blocks, msg)
 	}
 
-	line(strings.TrimSpace(post.Message))
-
 	for _, att := range post.Props.Attachments {
-		if b.Len() > 0 {
-			b.WriteString("\n")
+		var lines []string
+		add := func(s string) {
+			if s != "" {
+				lines = append(lines, s)
+			}
 		}
-		line(strings.TrimSpace(att.Title))
-		line(strings.TrimSpace(att.Text))
+
+		add(strings.TrimSpace(att.Title))
+		add(strings.TrimSpace(att.Text))
 		for _, f := range att.Fields {
 			value := mattermostFieldValue(f.Value)
 			if value == "" {
@@ -231,12 +247,20 @@ func renderMattermostPost(post MattermostPost) string {
 			if title := strings.TrimSpace(f.Title); title != "" {
 				value = title + ": " + value
 			}
-			line(value)
+			add(value)
 		}
-		line(strings.TrimSpace(att.TitleLink))
+		add(strings.TrimSpace(att.TitleLink))
+
+		if len(lines) == 0 {
+			continue
+		}
+		if icon := cfg.icon(att); icon != "" {
+			lines[0] = icon + " " + lines[0]
+		}
+		blocks = append(blocks, strings.Join(lines, "\n"))
 	}
 
-	return strings.TrimSpace(b.String())
+	return strings.TrimSpace(strings.Join(blocks, "\n\n"))
 }
 
 func mattermostFieldValue(v any) string {
@@ -259,18 +283,71 @@ func mattermostFieldValue(v any) string {
 	}
 }
 
-func (s *Server) resolveMattermostStatus(post MattermostPost) string {
-	if len(post.Props.Attachments) == 0 {
-		return "ok"
-	}
-	color := strings.ToLower(strings.TrimSpace(post.Props.Attachments[0].Color))
-	if color == "" {
-		return "ok"
-	}
-	for _, c := range s.mmCfg.ErrorColors {
-		if strings.ToLower(strings.TrimSpace(c)) == color {
-			return "error"
+func mattermostFields(att MattermostAttachment) map[string]string {
+	out := make(map[string]string, len(att.Fields))
+	for _, f := range att.Fields {
+		title := strings.ToLower(strings.TrimSpace(f.Title))
+		if title == "" {
+			continue
 		}
+		out[title] = strings.ToLower(strings.TrimSpace(mattermostFieldValue(f.Value)))
+	}
+	return out
+}
+
+func containsFold(list []string, want string) bool {
+	for _, item := range list {
+		if strings.ToLower(strings.TrimSpace(item)) == want {
+			return true
+		}
+	}
+	return false
+}
+
+func (c *MattermostConfig) state(att MattermostAttachment) string {
+	fields := mattermostFields(att)
+	status, severity := fields["status"], fields["severity"]
+
+	switch status {
+	case MattermostStateResolved:
+		return MattermostStateResolved
+	case MattermostStateAcknowledged:
+		return MattermostStateAcknowledged
+	}
+
+	if severity != "" && severity != "-" {
+		if containsFold(c.ErrorSeverities, severity) {
+			return MattermostStateError
+		}
+		return MattermostStateDefault
+	}
+	if status != "" {
+		return MattermostStateDefault
+	}
+
+	if containsFold(c.ErrorColors, strings.ToLower(strings.TrimSpace(att.Color))) {
+		return MattermostStateError
+	}
+	return MattermostStateDefault
+}
+
+func (c *MattermostConfig) postState(post MattermostPost) string {
+	if len(post.Props.Attachments) == 0 {
+		return MattermostStateDefault
+	}
+	return c.state(post.Props.Attachments[0])
+}
+
+func (c *MattermostConfig) icon(att MattermostAttachment) string {
+	if len(c.Icons) == 0 {
+		return ""
+	}
+	return c.Icons[c.state(att)]
+}
+
+func (s *Server) resolveMattermostStatus(post MattermostPost) string {
+	if s.mmCfg.postState(post) == MattermostStateError {
+		return "error"
 	}
 	return "ok"
 }

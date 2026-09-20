@@ -500,6 +500,13 @@ IncidentRelay оставляет `message` пустым и кладёт всё �
 IncidentRelay. Непустой `message` идёт впереди вложений. `actions` игнорируются:
 кнопки в eXpress не отрисовываются, ack делается из UI IncidentRelay.
 
+Первая строка каждого вложения получает эмодзи по состоянию алерта. Состояние
+берётся из **полей `fields[]`**, а не из `color`: `_fields()` в IncidentRelay
+всегда кладёт `Status` и `Severity` с сырыми значениями, тогда как `color` —
+это их проекция в четыре хекса с потерями (`warning` при firing и
+`acknowledged` дают один и тот же `#f0ad4e`, а зарезолвенный critical теряет
+severity совсем). `color` остаётся запасным вариантом, если полей нет вовсе.
+
 `channel_id` — это адресат, UUID чата eXpress или алиас. Если он пуст, шлюз
 берёт `default_chat_id`, затем глобальный дефолтный чат, затем единственный
 алиас. Фан-аута здесь нет: ответ обязан назвать ровно одно сообщение.
@@ -529,9 +536,16 @@ IncidentRelay. Непустой `message` идёт впереди вложени
 
 Два ограничения, которые стоит знать заранее:
 
-- **Статус сообщения не редактируется.** `edit_event` принимает только `body`
-  (и разметку), поля `status` у него нет. Поэтому текст сменится на
-  `RESOLVED: …`, а красная подсветка, выставленная при создании, останется.
+- **Статус сообщения ничего не подсвечивает.** Шлюз выводит его из состояния и
+  передаёт и при отправке, и при правке (`payload.status` в `edit_event` BotX
+  принимает, хотя в pybotx этого поля нет). Но визуального эффекта у него нет:
+  на testlab 2026-09-20 сообщение со `status: error` выглядело точно так же,
+  как со `status: ok`, и правка статуса вида не меняла. Официальный SDK
+  [pybotx](https://github.com/ExpressApp/pybotx) и вовсе объявляет поле как
+  `status: Literal["ok"]` — то есть это обязательный элемент протокола, а не
+  переключатель оформления. Severity в eXpress принято показывать эмодзи в
+  теле сообщения, как это делают встроенные шаблоны `/api/v1/grafana` и
+  `/api/v1/incidentrelay`.
 - **Скоупированный ключ не может редактировать.** `post_id` не несёт чата, в
   котором живёт сообщение, поэтому скоуп ключа к нему применить нечем: ключ,
   ограниченный чатом A, мог бы передать `channel_id: A` и `post_id` чужого
@@ -564,16 +578,32 @@ server:
       key: env:INCIDENTRELAY_API_KEY
   mattermost:                     # опционально
     default_chat_id: alerts       # если IncidentRelay не прислал channel_id
-    error_colors:                 # цвета, которые дают BotX status=error
+    error_severities:             # поле Severity, дающее BotX status=error
+      - critical
+      - high
+    error_colors:                 # запасной ключ, если fields[] нет вовсе
       - "#d9534f"
+    icons:                        # эмодзи по состоянию
+      resolved: "🟢"
+      acknowledged: "🟡"
+      error: "🔴"
+      default: "🔵"
 ```
 
-`error_colors` по умолчанию — `["#d9534f"]`: именно его IncidentRelay ставит для
-`critical`, `crit`, `high` и `error` (`_color_for_alert`). Зелёный `#2e7d32`
-(resolved) и янтарный `#f0ad4e` (acknowledged, warning) дают `ok`. Обратите
-внимание, что это отображение **severity**, а не статуса алерта: `warning` в
-состоянии firing уедет как `ok`. Пустой список (`error_colors: []`) отключает
-error-подсветку совсем; отсутствие ключа даёт дефолт.
+Состояние вычисляется по первому вложению в таком порядке:
+
+1. `fields[].Status == resolved` → `resolved`, BotX-статус `ok`
+2. `fields[].Status == acknowledged` → `acknowledged`, `ok`
+3. `fields[].Severity` из `error_severities` → `error`, BotX-статус `error`
+4. `fields[].Severity` есть, но не в списке → `default`, `ok`
+5. полей нет — `color` из `error_colors` → `error`, иначе `default`
+
+`error_severities` по умолчанию — `[critical, high]`, ровно как у
+`/api/v1/incidentrelay`: оба приёмника принимают один и тот же алерт от одного
+продукта, и расходиться в правиле им незачем. IncidentRelay нормализует
+severity до отправки; если в вашей установке встречаются `crit` или `error`,
+добавьте их в список. Пустое значение (`[]` / `{}`) отключает соответствующее
+правило, отсутствие ключа даёт дефолт.
 
 ### Настройка IncidentRelay
 

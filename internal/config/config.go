@@ -193,8 +193,10 @@ type IncidentRelayYAMLConfig struct {
 
 // MattermostYAMLConfig holds YAML settings for the Mattermost-compatible post endpoints.
 type MattermostYAMLConfig struct {
-	DefaultChatID string   `yaml:"default_chat_id,omitempty"`
-	ErrorColors   []string `yaml:"error_colors,omitempty"`
+	DefaultChatID   string            `yaml:"default_chat_id,omitempty"`
+	ErrorSeverities []string          `yaml:"error_severities,omitempty"`
+	ErrorColors     []string          `yaml:"error_colors,omitempty"`
+	Icons           map[string]string `yaml:"icons,omitempty"`
 }
 
 type GitlabYAMLConfig struct {
@@ -1154,7 +1156,7 @@ var knownKeys = map[string]map[string]bool{
 	"server": {
 		"listen": true, "base_path": true, "api_keys": true, "allow_bot_secret_auth": true,
 		"allow_request_trace": true,
-		"alertmanager":        true, "grafana": true, "incidentrelay": true, "gitlab": true, "callbacks": true, "docs": true, "external_url": true,
+		"alertmanager":        true, "grafana": true, "incidentrelay": true, "mattermost": true, "gitlab": true, "callbacks": true, "docs": true, "external_url": true,
 		"tls": true,
 	},
 	"server.tls": {
@@ -1170,6 +1172,9 @@ var knownKeys = map[string]map[string]bool{
 	"server.incidentrelay": {
 		"default_chat_id": true, "error_severities": true, "template": true, "template_file": true,
 		"message_source": true,
+	},
+	"server.mattermost": {
+		"default_chat_id": true, "error_severities": true, "error_colors": true, "icons": true,
 	},
 	"server.gitlab": {
 		"senders": true,

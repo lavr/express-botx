@@ -9,26 +9,55 @@ import (
 
 func TestBuildMattermostConfig(t *testing.T) {
 	tests := []struct {
-		name       string
-		yaml       config.MattermostYAMLConfig
-		wantChat   string
-		wantColors []string
+		name           string
+		yaml           config.MattermostYAMLConfig
+		wantChat       string
+		wantSeverities []string
+		wantColors     []string
+		wantIcons      map[string]string
 	}{
 		{
-			name:       "empty config takes the built-in error colours",
-			yaml:       config.MattermostYAMLConfig{},
-			wantColors: server.DefaultMattermostErrorColors,
+			name:           "empty config takes every built-in default",
+			yaml:           config.MattermostYAMLConfig{},
+			wantSeverities: server.DefaultMattermostErrorSeverities,
+			wantColors:     server.DefaultMattermostErrorColors,
+			wantIcons:      server.DefaultMattermostIcons,
 		},
 		{
-			name:       "default_chat_id propagates",
-			yaml:       config.MattermostYAMLConfig{DefaultChatID: "infra"},
-			wantChat:   "infra",
-			wantColors: server.DefaultMattermostErrorColors,
+			name:           "default_chat_id propagates",
+			yaml:           config.MattermostYAMLConfig{DefaultChatID: "infra"},
+			wantChat:       "infra",
+			wantSeverities: server.DefaultMattermostErrorSeverities,
+			wantColors:     server.DefaultMattermostErrorColors,
+			wantIcons:      server.DefaultMattermostIcons,
 		},
 		{
-			name:       "configured error colours replace the defaults",
-			yaml:       config.MattermostYAMLConfig{ErrorColors: []string{"#ff0000", "#d9534f"}},
-			wantColors: []string{"#ff0000", "#d9534f"},
+			name:           "configured severities replace the defaults",
+			yaml:           config.MattermostYAMLConfig{ErrorSeverities: []string{"critical", "crit", "error"}},
+			wantSeverities: []string{"critical", "crit", "error"},
+			wantColors:     server.DefaultMattermostErrorColors,
+			wantIcons:      server.DefaultMattermostIcons,
+		},
+		{
+			name:           "configured icons replace the defaults and are normalized",
+			yaml:           config.MattermostYAMLConfig{Icons: map[string]string{"  ERROR ": "\U0001F525"}},
+			wantSeverities: server.DefaultMattermostErrorSeverities,
+			wantColors:     server.DefaultMattermostErrorColors,
+			wantIcons:      map[string]string{server.MattermostStateError: "\U0001F525"},
+		},
+		{
+			name:           "an explicitly empty icon map disables icons",
+			yaml:           config.MattermostYAMLConfig{Icons: map[string]string{}},
+			wantSeverities: server.DefaultMattermostErrorSeverities,
+			wantColors:     server.DefaultMattermostErrorColors,
+			wantIcons:      map[string]string{},
+		},
+		{
+			name:           "an explicitly empty severity list disables the field rule",
+			yaml:           config.MattermostYAMLConfig{ErrorSeverities: []string{}},
+			wantSeverities: []string{},
+			wantColors:     server.DefaultMattermostErrorColors,
+			wantIcons:      server.DefaultMattermostIcons,
 		},
 	}
 
@@ -38,14 +67,28 @@ func TestBuildMattermostConfig(t *testing.T) {
 			if got.DefaultChatID != tt.wantChat {
 				t.Errorf("DefaultChatID = %q, want %q", got.DefaultChatID, tt.wantChat)
 			}
-			if len(got.ErrorColors) != len(tt.wantColors) {
-				t.Fatalf("ErrorColors = %v, want %v", got.ErrorColors, tt.wantColors)
+			assertStrings(t, "ErrorSeverities", got.ErrorSeverities, tt.wantSeverities)
+			assertStrings(t, "ErrorColors", got.ErrorColors, tt.wantColors)
+			if len(got.Icons) != len(tt.wantIcons) {
+				t.Fatalf("Icons = %v, want %v", got.Icons, tt.wantIcons)
 			}
-			for i, c := range tt.wantColors {
-				if got.ErrorColors[i] != c {
-					t.Errorf("ErrorColors[%d] = %q, want %q", i, got.ErrorColors[i], c)
+			for state, icon := range tt.wantIcons {
+				if got.Icons[state] != icon {
+					t.Errorf("Icons[%q] = %q, want %q", state, got.Icons[state], icon)
 				}
 			}
 		})
+	}
+}
+
+func assertStrings(t *testing.T, field string, got, want []string) {
+	t.Helper()
+	if len(got) != len(want) {
+		t.Fatalf("%s = %v, want %v", field, got, want)
+	}
+	for i := range want {
+		if got[i] != want[i] {
+			t.Errorf("%s[%d] = %q, want %q", field, i, got[i], want[i])
+		}
 	}
 }

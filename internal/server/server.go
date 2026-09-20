@@ -112,6 +112,7 @@ type EditPayload struct {
 	Bot     string
 	SyncID  string
 	Message string
+	Status  string
 }
 
 type EditFunc func(ctx context.Context, req *EditPayload) error

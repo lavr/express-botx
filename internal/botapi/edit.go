@@ -18,12 +18,14 @@ type EditRequest struct {
 }
 
 type EditPayload struct {
-	Body string `json:"body"`
+	Body   string `json:"body"`
+	Status string `json:"status,omitempty"`
 }
 
 type EditParams struct {
 	SyncID           string
 	Message          string
+	Status           string
 	MaxMessageLength int
 	TruncateSuffix   string
 }
@@ -35,7 +37,7 @@ func BuildEditRequest(p *EditParams) *EditRequest {
 	}
 	return &EditRequest{
 		SyncID:  p.SyncID,
-		Payload: EditPayload{Body: body},
+		Payload: EditPayload{Body: body, Status: p.Status},
 	}
 }
 
