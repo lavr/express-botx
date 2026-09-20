@@ -733,6 +733,206 @@ paths:
               schema:
                 $ref: "#/components/schemas/MultiSendResponse"
 
+  /mattermost/api/v4/posts:
+    post:
+      operationId: mattermostCreatePost
+      summary: Mattermost Bot API post (bridge for monitoring systems)
+      description: |
+        Accepts the post a monitoring system's Mattermost channel sends in Bot
+        API mode, so such a sender can deliver to eXpress without a generic
+        webhook and without a key in the URL: the channel authenticates with
+        `Authorization: Bearer <api-key>`, which this gateway already
+        understands.
+
+        Only the two post endpoints are implemented, and they live under
+        express-botx's own base path rather than at the bare Mattermost path.
+        Point the channel's base URL at `<external_url>/api/v1/mattermost`; the
+        sender appends `api/v4/posts` itself.
+
+        **Content.** Such senders leave `message` empty and put everything in
+        `props.attachments[0]`. The delivered notification is the attachment's
+        `title`, `text`, each non-empty `fields[]` entry as `title: value`, and
+        `title_link` (the alert's URL at the source) on its own line. A
+        non-empty `message` is kept ahead of the attachments. `actions` are
+        ignored: eXpress does not render buttons.
+
+        **State.** The first attachment's `fields[]` decide, because senders
+        put the raw `Status` and `Severity` there.
+        `Status: resolved` and `Status: acknowledged` map to BotX
+        `notification.status: ok`; a `Severity` in `error_severities` (default
+        `[critical, high]`) maps to `error`; a `Severity` in
+        `warning_severities` (default `[warning, warn]`) and everything else map
+        to `ok`. The attachment's `color` is ignored: it is the same
+        information projected lossily onto four hex values.
+
+        The state also picks the emoji that leads each attachment: resolved
+        green, acknowledged yellow, error red, warning orange, anything else
+        blue. The BotX status has no visible effect in eXpress, so the emoji is
+        the severity signal the on-call actually sees.
+
+        **Chat.** `channel_id` is the target chat UUID or alias. When it is
+        absent the endpoint falls back to `default_chat_id`, then the global
+        default chat, then the single configured chat alias. There is no
+        fan-out: the response must name exactly one message.
+
+        **Response.** `id` is the BotX `sync_id` of the delivered message, which
+        the sender stores and later sends back to the update endpoint.
+        `channel_id` is echoed exactly as requested; Mattermost clients compare
+        it with the one they asked for and flag a mismatch otherwise.
+      security:
+        - bearerAuth: []
+        - apiKeyHeader: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/MattermostPost"
+            example:
+              channel_id: 054af49e-5e18-4dca-ad73-4f96b6de63fa
+              message: ""
+              props:
+                attachments:
+                  - fallback: Disk almost full
+                    color: "#d9534f"
+                    title: "[P2] Disk almost full"
+                    text: "node-1 at 94%"
+                    title_link: http://incidentrelay/alerts/42
+                    fields:
+                      - short: true
+                        title: Team
+                        value: sre
+                      - short: true
+                        title: Severity
+                        value: critical
+      responses:
+        "200":
+          description: Message delivered
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MattermostPostResponse"
+        "400":
+          description: Request-level error (malformed JSON, no content in payload, no chat to address)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "401":
+          description: No credentials provided
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "403":
+          description: Invalid credentials, or the target chat is outside this API key's chat scope
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "502":
+          description: Delivery failed upstream
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /mattermost/api/v4/posts/{post_id}:
+    put:
+      operationId: mattermostUpdatePost
+      summary: Replace an already delivered post
+      description: |
+        Replaces the body of a message already delivered through
+        `POST /mattermost/api/v4/posts`. A sender calls this when an alert is
+        acknowledged or resolved, passing the `id` it got back.
+
+        `post_id` is the BotX `sync_id`, and the edit goes to BotX
+        `POST /api/v3/botx/events/edit_event`, so the notification is updated in
+        place rather than duplicated. The bot that performs the edit is resolved
+        from `channel_id`, not stored against `post_id`, so re-binding a chat to
+        a different bot between the create and the update breaks the update.
+
+        A chat-scoped API key is refused with `403`: a `post_id` does not carry
+        the chat its message lives in, so the key's scope cannot be applied. The body is rendered exactly as it is for
+        a new post; the response echoes `post_id` and the requested
+        `channel_id`.
+
+        Returns `501` when the runtime has no editor. An async (`--enqueue`)
+        server never registers these endpoints, so this only shows up for a
+        library caller that omitted the option.
+      security:
+        - bearerAuth: []
+        - apiKeyHeader: []
+      parameters:
+        - name: post_id
+          in: path
+          required: true
+          description: The `id` returned when the post was created (a BotX `sync_id`)
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/MattermostPost"
+            example:
+              id: 0197c2cd-0b0e-7c8e-9d4a-6f1a2b3c4d5e
+              channel_id: 054af49e-5e18-4dca-ad73-4f96b6de63fa
+              message: ""
+              props:
+                attachments:
+                  - color: "#2e7d32"
+                    title: "RESOLVED: [P2] Disk almost full"
+                    text: The alert has been resolved.
+                    fields:
+                      - short: true
+                        title: Status
+                        value: resolved
+      responses:
+        "200":
+          description: |
+            Edit accepted upstream. BotX acknowledges the edit asynchronously and
+            does not validate the `sync_id`, so this does not confirm that the
+            message was actually changed.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MattermostPostResponse"
+        "400":
+          description: Request-level error (malformed JSON, no content in payload, no chat to address)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "401":
+          description: No credentials provided
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "403":
+          description: |
+            Invalid credentials, or the key carries any chat scope at all: a
+            `post_id` does not identify the chat its message lives in, so the
+            scope cannot be applied and every scoped key is refused.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "501":
+          description: This server cannot edit messages
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "502":
+          description: The upstream edit failed
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
   /gitlab:
     post:
       operationId: gitlab
@@ -1124,6 +1324,82 @@ components:
         message:
           type: string
           description: Pre-formatted alert message from Grafana (markdown)
+
+    MattermostPost:
+      type: object
+      description: |
+        The subset of a Mattermost post that a monitoring system's Bot API
+        channel sends. Fields outside this list are accepted and ignored.
+      properties:
+        id:
+          type: string
+          description: Present on an update; the endpoint uses the `post_id` from the path instead.
+        channel_id:
+          type: string
+          description: Target chat UUID or alias. Falls back to the configured default when empty.
+        message:
+          type: string
+          description: Plain post text. Such senders leave it empty and use `props.attachments`.
+        props:
+          type: object
+          properties:
+            attachments:
+              type: array
+              items:
+                $ref: "#/components/schemas/MattermostAttachment"
+
+    MattermostAttachment:
+      type: object
+      properties:
+        fallback:
+          type: string
+          description: Ignored; `title` and `text` carry the same content.
+        color:
+          type: string
+          description: Border colour; ignored, the state comes from `fields[]`.
+        title:
+          type: string
+        title_link:
+          type: string
+          format: uri
+          description: The alert's URL at the source; appended on its own line.
+        text:
+          type: string
+        fields:
+          type: array
+          items:
+            $ref: "#/components/schemas/MattermostField"
+        actions:
+          type: array
+          description: Ignored; eXpress does not render buttons.
+          items:
+            type: object
+
+    MattermostField:
+      type: object
+      properties:
+        title:
+          type: string
+          description: "`Status` and `Severity` additionally decide the alert state; every field is rendered."
+        value:
+          description: "Rendered as `title: value`; an empty value drops the line."
+        short:
+          type: boolean
+          description: Ignored; eXpress notifications are plain text.
+
+    MattermostPostResponse:
+      type: object
+      required: [id, channel_id]
+      properties:
+        id:
+          type: string
+          description: BotX `sync_id` of the delivered message; the sender stores it and replays it on update.
+        channel_id:
+          type: string
+          description: Echoed exactly as requested.
+      example:
+        id: 0197c2cd-0b0e-7c8e-9d4a-6f1a2b3c4d5e
+        channel_id: 054af49e-5e18-4dca-ad73-4f96b6de63fa
 
     IncidentRelayWebhook:
       type: object

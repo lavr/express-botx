@@ -110,6 +110,8 @@ curl --cacert ca.crt https://localhost:8443/healthz
 | `POST` | `/api/v1/alertmanager` | Вебхук Alertmanager |
 | `POST` | `/api/v1/grafana` | Вебхук Grafana |
 | `POST` | `/api/v1/incidentrelay` | Вебхук IncidentRelay (плоский payload, ключ можно передать в `?api_key=`) |
+| `POST` | `/api/v1/mattermost/api/v4/posts` | Приёмник постов Mattermost Bot API: мост для систем мониторинга с интеграцией в Mattermost |
+| `PUT` | `/api/v1/mattermost/api/v4/posts/{post_id}` | Обновление ранее отправленного сообщения на месте (BotX `edit_event`) |
 | `POST` | `/api/v1/gitlab` | Универсальный вебхук GitLab — любые события, фильтры + шаблоны (auth: `X-Gitlab-Token`) |
 
 Сервер автоматически добавляет заголовок `X-Request-ID` к каждому ответу (если клиент не передал свой, генерируется уникальный). Все HTTP-запросы логируются в stderr (метод, путь, статус, время выполнения).

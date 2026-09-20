@@ -75,6 +75,7 @@ type TLSConfig struct {
 type Server struct {
 	cfg                  Config
 	send                 SendFunc
+	edit                 EditFunc
 	chats                ChatResolver
 	keyMap               map[string]ResolvedKey // key value -> the key itself (name + chat scope)
 	botNameSet           map[string]bool        // valid bot names for multi-bot mode
@@ -85,6 +86,7 @@ type Server struct {
 	amCfg                *AlertmanagerConfig
 	grCfg                *GrafanaConfig
 	irCfg                *IncidentRelayConfig
+	mmCfg                *MattermostConfig
 	gitCfg               *GitlabConfig
 	mentionsResolver     mentions.UserResolver
 	botMentionsResolvers map[string]mentions.UserResolver // per-bot resolvers for multi-host setups
@@ -105,6 +107,15 @@ type Server struct {
 
 // SendFunc sends a message via the BotX API. The server calls this for each request.
 type SendFunc func(ctx context.Context, req *SendPayload) (syncID string, err error)
+
+type EditPayload struct {
+	Bot     string
+	SyncID  string
+	Message string
+	Status  string
+}
+
+type EditFunc func(ctx context.Context, req *EditPayload) error
 
 // ChatResolveResult holds the resolved chat UUID and optional bound bot name.
 type ChatResolveResult struct {
@@ -129,6 +140,21 @@ func WithAlertmanager(cfg *AlertmanagerConfig) Option {
 func WithGrafana(cfg *GrafanaConfig) Option {
 	return func(s *Server) {
 		s.grCfg = cfg
+	}
+}
+
+func WithMattermost(cfg *MattermostConfig) Option {
+	return func(s *Server) {
+		if cfg == nil {
+			return
+		}
+		s.mmCfg = cfg
+	}
+}
+
+func WithMessageEditor(fn EditFunc) Option {
+	return func(s *Server) {
+		s.edit = fn
 	}
 }
 
@@ -382,6 +408,20 @@ func New(cfg Config, sendFn SendFunc, chatResolver ChatResolver, opts ...Option)
 			chatInfo = s.irCfg.FallbackChatID
 		}
 		vlog.Info("server: incidentrelay endpoint enabled (chat: %s, message source: %s)", chatInfo, s.irCfg.MessageSource)
+	}
+
+	if s.mmCfg != nil {
+		route("POST", "/mattermost/api/v4/posts", s.handleMattermostCreatePost)
+		route("PUT", "/mattermost/api/v4/posts/{post_id}", s.handleMattermostUpdatePost)
+		chatInfo := "from channel_id in the body"
+		if s.mmCfg.DefaultChatID != "" {
+			chatInfo += ", default " + s.mmCfg.DefaultChatID
+		} else if cfg.DefaultChatAlias != "" {
+			chatInfo += ", default " + cfg.DefaultChatAlias
+		} else if s.mmCfg.FallbackChatID != "" {
+			chatInfo += ", default " + s.mmCfg.FallbackChatID
+		}
+		vlog.Info("server: mattermost endpoints enabled at %s/mattermost/api/v4/posts (chat: %s, edit: %v)", base, chatInfo, s.edit != nil)
 	}
 
 	if s.gitCfg != nil {

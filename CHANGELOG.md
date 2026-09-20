@@ -2,6 +2,32 @@
 
 ## Unreleased
 
+### Added: приёмник постов Mattermost Bot API (`/api/v1/mattermost/api/v4/posts`)
+
+Многие системы мониторинга умеют доставлять уведомления в Mattermost, но не
+умеют произвольный вебхук с заголовками. Новый приёмник принимает подмножество
+Mattermost Bot API, поэтому такой источник настраивается штатно, а токен уходит
+заголовком, а не в составе URL.
+
+- `POST /api/v1/mattermost/api/v4/posts` создаёт сообщение,
+  `PUT /api/v1/mattermost/api/v4/posts/{post_id}` заменяет его тело через BotX
+  `events/edit_event`, то есть правит на месте, а не шлёт дубль. Остального
+  Mattermost API нет.
+- Ручки живут под `base_path` шлюза; в корне на `/api/v4/*` ничего не вешается.
+- Содержимое собирается из `props.attachments[]`, состояние алерта берётся из
+  полей `Status` и `Severity` и задаёт BotX-статус и эмодзи в начале строки.
+- Ответ: `{"id": "<sync_id>", "channel_id": "<запрошенный>"}`.
+- Новая опциональная секция конфига `server.mattermost` (`default_chat_id`,
+  `error_severities`, `warning_severities`, `icons`).
+- Новый клиентский вызов `botapi.EditMessage` поверх
+  `POST /api/v3/botx/events/edit_event` с проверкой тела ответа.
+
+Ограничения и полное описание формата: [docs/integrations.md](docs/integrations.md#mattermost-bot-api-мост-для-систем-мониторинга).
+Коротко: скоупированный ключ получает 403 на `PUT`, потому что `post_id` не
+идентифицирует чат; BotX подтверждает правку асинхронно и не валидирует
+`sync_id`; статус сообщения видимого эффекта не даёт, severity показывается
+эмодзи.
+
 ### Added: приёмник вебхуков IncidentRelay — `/api/v1/incidentrelay`
 
 - Новый endpoint принимает плоский payload generic-webhook-канала

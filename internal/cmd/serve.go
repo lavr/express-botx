@@ -257,6 +257,7 @@ Options:
 	// bots that failed auth are retried in the background every 10 seconds.
 	// Requests to unavailable bots return 503 until auth succeeds.
 	var sendFn server.SendFunc
+	var editFn server.EditFunc
 	var mentionsResolver mentions.UserResolver
 	var botMentionsResolvers map[string]mentions.UserResolver
 
@@ -283,6 +284,13 @@ Options:
 		sendFn = func(ctx context.Context, p *server.SendPayload) (string, error) {
 			return senders[p.Bot].Send(ctx, p)
 		}
+		editFn = func(ctx context.Context, p *server.EditPayload) error {
+			sender, ok := senders[p.Bot]
+			if !ok {
+				return fmt.Errorf("unknown bot %q", p.Bot)
+			}
+			return sender.Edit(ctx, p)
+		}
 		// Create per-bot resolvers so that email lookups target the correct
 		// eXpress host when bots reside on different instances. The first
 		// bot's resolver is used as the default fallback for requests where
@@ -303,6 +311,7 @@ Options:
 			return err
 		}
 		sendFn = sender.Send
+		editFn = sender.Edit
 		srvCfg.SingleBotName = cfg.BotName
 		// Use a separate client so the resolver can refresh the token
 		// independently of botSender, avoiding races on the shared token.
@@ -397,6 +406,21 @@ Options:
 		}
 	}
 	srvOpts = append(srvOpts, server.WithIncidentRelay(irCfg))
+
+	// Mattermost-compatible endpoints (always enabled)
+	mm := cfg.Server.Mattermost
+	if mm == nil {
+		mm = &config.MattermostYAMLConfig{}
+	}
+	mmCfg := buildMattermostConfig(mm)
+	if mmCfg.DefaultChatID == "" && len(cfg.Chats) == 1 {
+		for alias := range cfg.Chats {
+			mmCfg.FallbackChatID = alias
+			vlog.V1("mattermost: using single chat alias %q as fallback", alias)
+		}
+	}
+	srvOpts = append(srvOpts, server.WithMattermost(mmCfg))
+	srvOpts = append(srvOpts, server.WithMessageEditor(editFn))
 
 	// GitLab endpoint (only enabled when configured — it needs a secret token)
 	if gl := cfg.Server.Gitlab; gl != nil {
@@ -899,6 +923,63 @@ func (bs *botSender) Send(ctx context.Context, p *server.SendPayload) (string, e
 		return "", err
 	}
 	return syncID, nil
+}
+
+func (bs *botSender) Edit(ctx context.Context, p *server.EditPayload) error {
+	if bs.client.Token == "" {
+		tok, err := refreshToken(bs.cfg, bs.cache)
+		if err != nil {
+			return fmt.Errorf("authenticating bot: %w", err)
+		}
+		bs.client.Token = tok
+	}
+
+	maxLen, suffix := bs.cfg.BotDeliveryPolicy(bs.cfg.BotName)
+	er := botapi.BuildEditRequest(&botapi.EditParams{
+		SyncID:           p.SyncID,
+		Message:          p.Message,
+		Status:           p.Status,
+		MaxMessageLength: maxLen,
+		TruncateSuffix:   suffix,
+	})
+	err := bs.client.EditMessage(ctx, er)
+	if err != nil && errors.Is(err, botapi.ErrUnauthorized) {
+		if bs.cfg.BotToken != "" {
+			return fmt.Errorf("bot token rejected (401), re-configure token for bot %q", bs.cfg.BotName)
+		}
+		newTok, refreshErr := refreshToken(bs.cfg, bs.cache)
+		if refreshErr != nil {
+			return fmt.Errorf("refreshing token: %w", refreshErr)
+		}
+		bs.client.Token = newTok
+		return bs.client.EditMessage(ctx, er)
+	}
+	return err
+}
+
+func buildMattermostConfig(mm *config.MattermostYAMLConfig) *server.MattermostConfig {
+	severities := mm.ErrorSeverities
+	if severities == nil {
+		severities = server.DefaultMattermostErrorSeverities
+	}
+	warnings := mm.WarningSeverities
+	if warnings == nil {
+		warnings = server.DefaultMattermostWarningSeverities
+	}
+	icons := mm.Icons
+	if icons == nil {
+		icons = server.DefaultMattermostIcons
+	}
+	normalized := make(map[string]string, len(icons))
+	for state, icon := range icons {
+		normalized[strings.ToLower(strings.TrimSpace(state))] = icon
+	}
+	return &server.MattermostConfig{
+		DefaultChatID:     mm.DefaultChatID,
+		ErrorSeverities:   severities,
+		WarningSeverities: warnings,
+		Icons:             normalized,
+	}
 }
 
 func generateAPIKey() (string, error) {

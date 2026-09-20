@@ -129,6 +129,7 @@ type ServerConfig struct {
 	Alertmanager       *AlertmanagerYAMLConfig  `yaml:"alertmanager,omitempty"`
 	Grafana            *GrafanaYAMLConfig       `yaml:"grafana,omitempty"`
 	IncidentRelay      *IncidentRelayYAMLConfig `yaml:"incidentrelay,omitempty"`
+	Mattermost         *MattermostYAMLConfig    `yaml:"mattermost,omitempty"`
 	Gitlab             *GitlabYAMLConfig        `yaml:"gitlab,omitempty"`
 	Callbacks          *CallbacksConfig         `yaml:"callbacks,omitempty"`
 	Docs               *bool                    `yaml:"docs,omitempty"`         // enable /docs endpoint (default: true)
@@ -188,6 +189,14 @@ type IncidentRelayYAMLConfig struct {
 	Template        string   `yaml:"template,omitempty"`
 	TemplateFile    string   `yaml:"template_file,omitempty"`
 	MessageSource   string   `yaml:"message_source,omitempty"`
+}
+
+// MattermostYAMLConfig holds YAML settings for the Mattermost-compatible post endpoints.
+type MattermostYAMLConfig struct {
+	DefaultChatID     string            `yaml:"default_chat_id,omitempty"`
+	ErrorSeverities   []string          `yaml:"error_severities,omitempty"`
+	WarningSeverities []string          `yaml:"warning_severities,omitempty"`
+	Icons             map[string]string `yaml:"icons,omitempty"`
 }
 
 type GitlabYAMLConfig struct {
@@ -1147,7 +1156,7 @@ var knownKeys = map[string]map[string]bool{
 	"server": {
 		"listen": true, "base_path": true, "api_keys": true, "allow_bot_secret_auth": true,
 		"allow_request_trace": true,
-		"alertmanager":        true, "grafana": true, "incidentrelay": true, "gitlab": true, "callbacks": true, "docs": true, "external_url": true,
+		"alertmanager":        true, "grafana": true, "incidentrelay": true, "mattermost": true, "gitlab": true, "callbacks": true, "docs": true, "external_url": true,
 		"tls": true,
 	},
 	"server.tls": {
@@ -1163,6 +1172,12 @@ var knownKeys = map[string]map[string]bool{
 	"server.incidentrelay": {
 		"default_chat_id": true, "error_severities": true, "template": true, "template_file": true,
 		"message_source": true,
+	},
+	"server.mattermost": {
+		"default_chat_id": true, "error_severities": true, "warning_severities": true, "icons": true,
+	},
+	"server.mattermost.icons": {
+		"resolved": true, "acknowledged": true, "error": true, "warning": true, "default": true,
 	},
 	"server.gitlab": {
 		"senders": true,
