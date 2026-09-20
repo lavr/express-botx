@@ -7,15 +7,15 @@ import (
 	"gopkg.in/yaml.v3"
 )
 
-func TestMattermostErrorColorsNilVsEmpty(t *testing.T) {
+func TestMattermostErrorSeveritiesNilVsEmpty(t *testing.T) {
 	tests := []struct {
 		name    string
 		yaml    string
 		wantNil bool
 	}{
 		{name: "absent key stays nil", yaml: "default_chat_id: a\n", wantNil: true},
-		{name: "explicit empty list is not nil", yaml: "error_colors: []\n", wantNil: false},
-		{name: "populated list is not nil", yaml: "error_colors: [\"#d9534f\"]\n", wantNil: false},
+		{name: "explicit empty list is not nil", yaml: "error_severities: []\n", wantNil: false},
+		{name: "populated list is not nil", yaml: "error_severities: [critical]\n", wantNil: false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -23,8 +23,8 @@ func TestMattermostErrorColorsNilVsEmpty(t *testing.T) {
 			if err := yaml.Unmarshal([]byte(tt.yaml), &c); err != nil {
 				t.Fatalf("unmarshal: %v", err)
 			}
-			if (c.ErrorColors == nil) != tt.wantNil {
-				t.Errorf("ErrorColors nil = %v, want %v (value %#v)", c.ErrorColors == nil, tt.wantNil, c.ErrorColors)
+			if (c.ErrorSeverities == nil) != tt.wantNil {
+				t.Errorf("ErrorSeverities nil = %v, want %v (value %#v)", c.ErrorSeverities == nil, tt.wantNil, c.ErrorSeverities)
 			}
 		})
 	}
@@ -43,9 +43,13 @@ server:
   mattermost:
     default_chat_id: alerts
     error_severities: [critical, high]
-    error_colors: ["#d9534f"]
+    warning_severities: [warning, warn]
     icons:
       resolved: "x"
+      acknowledged: "x"
+      error: "x"
+      warning: "x"
+      default: "x"
 `,
 		},
 		{
@@ -56,6 +60,16 @@ server:
     default_chat_ids: alerts
 `,
 			wantUnknown: []string{"default_chat_ids"},
+		},
+		{
+			name: "a typo in an icon state is reported",
+			yaml: `
+server:
+  mattermost:
+    icons:
+      resovled: "x"
+`,
+			wantUnknown: []string{"resovled"},
 		},
 		{
 			name: "a typo in the section name is reported",

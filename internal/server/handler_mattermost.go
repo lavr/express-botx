@@ -13,12 +13,13 @@ import (
 
 var DefaultMattermostErrorSeverities = []string{"critical", "high"}
 
-var DefaultMattermostErrorColors = []string{"#d9534f"}
+var DefaultMattermostWarningSeverities = []string{"warning", "warn"}
 
 var DefaultMattermostIcons = map[string]string{
 	MattermostStateResolved:     "\U0001F7E2",
 	MattermostStateAcknowledged: "\U0001F7E1",
 	MattermostStateError:        "\U0001F534",
+	MattermostStateWarning:      "\U0001F7E0",
 	MattermostStateDefault:      "\U0001F535",
 }
 
@@ -26,15 +27,24 @@ const (
 	MattermostStateResolved     = "resolved"
 	MattermostStateAcknowledged = "acknowledged"
 	MattermostStateError        = "error"
+	MattermostStateWarning      = "warning"
 	MattermostStateDefault      = "default"
 )
 
+var MattermostStates = []string{
+	MattermostStateResolved,
+	MattermostStateAcknowledged,
+	MattermostStateError,
+	MattermostStateWarning,
+	MattermostStateDefault,
+}
+
 type MattermostConfig struct {
-	DefaultChatID   string
-	ErrorSeverities []string
-	ErrorColors     []string
-	Icons           map[string]string
-	FallbackChatID  string
+	DefaultChatID     string
+	ErrorSeverities   []string
+	WarningSeverities []string
+	Icons             map[string]string
+	FallbackChatID    string
 }
 
 type MattermostPost struct {
@@ -315,18 +325,17 @@ func (c *MattermostConfig) state(att MattermostAttachment) string {
 		return MattermostStateAcknowledged
 	}
 
-	if severity != "" && severity != "-" {
-		if containsFold(c.ErrorSeverities, severity) {
-			return MattermostStateError
+	if severity == "" || severity == "-" {
+		if status == "" {
+			vlog.V1("mattermost: attachment carries neither a Status nor a Severity field, classified as %q", MattermostStateDefault)
 		}
 		return MattermostStateDefault
 	}
-	if status != "" {
-		return MattermostStateDefault
-	}
-
-	if containsFold(c.ErrorColors, strings.ToLower(strings.TrimSpace(att.Color))) {
+	if containsFold(c.ErrorSeverities, severity) {
 		return MattermostStateError
+	}
+	if containsFold(c.WarningSeverities, severity) {
+		return MattermostStateWarning
 	}
 	return MattermostStateDefault
 }

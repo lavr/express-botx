@@ -22,6 +22,10 @@ type EditPayload struct {
 	Status string `json:"status,omitempty"`
 }
 
+type editAPIResponse struct {
+	Status string `json:"status"`
+}
+
 type EditParams struct {
 	SyncID           string
 	Message          string
@@ -75,6 +79,22 @@ func (c *Client) EditMessage(ctx context.Context, er *EditRequest) error {
 
 	switch resp.StatusCode {
 	case http.StatusOK, http.StatusCreated, http.StatusAccepted:
+		respBody, readErr := io.ReadAll(resp.Body)
+		if readErr != nil {
+			vlog.V1("edit: <- %d but the body could not be read (%dms): %v", resp.StatusCode, elapsed.Milliseconds(), readErr)
+			return fmt.Errorf("edit failed: HTTP %d with an unreadable body: %w", resp.StatusCode, readErr)
+		}
+		var apiResp editAPIResponse
+		if err := json.Unmarshal(respBody, &apiResp); err != nil {
+			logBody, _ := truncateErrorBody(respBody)
+			vlog.V1("edit: <- %d with a non-JSON body (%dms): %s", resp.StatusCode, elapsed.Milliseconds(), logBody)
+			return fmt.Errorf("edit failed: HTTP %d with a non-JSON body: %s", resp.StatusCode, string(respBody))
+		}
+		if apiResp.Status != "ok" {
+			logBody, _ := truncateErrorBody(respBody)
+			vlog.V1("edit: <- %d but status is %q (%dms): %s", resp.StatusCode, apiResp.Status, elapsed.Milliseconds(), logBody)
+			return fmt.Errorf("edit failed: HTTP %d with status %q: %s", resp.StatusCode, apiResp.Status, string(respBody))
+		}
 		vlog.V1("edit: <- %d %s (%dms)", resp.StatusCode, http.StatusText(resp.StatusCode), elapsed.Milliseconds())
 		return nil
 	default:

@@ -962,9 +962,9 @@ func buildMattermostConfig(mm *config.MattermostYAMLConfig) *server.MattermostCo
 	if severities == nil {
 		severities = server.DefaultMattermostErrorSeverities
 	}
-	colors := mm.ErrorColors
-	if colors == nil {
-		colors = server.DefaultMattermostErrorColors
+	warnings := mm.WarningSeverities
+	if warnings == nil {
+		warnings = server.DefaultMattermostWarningSeverities
 	}
 	icons := mm.Icons
 	if icons == nil {
@@ -975,10 +975,10 @@ func buildMattermostConfig(mm *config.MattermostYAMLConfig) *server.MattermostCo
 		normalized[strings.ToLower(strings.TrimSpace(state))] = icon
 	}
 	return &server.MattermostConfig{
-		DefaultChatID:   mm.DefaultChatID,
-		ErrorSeverities: severities,
-		ErrorColors:     colors,
-		Icons:           normalized,
+		DefaultChatID:     mm.DefaultChatID,
+		ErrorSeverities:   severities,
+		WarningSeverities: warnings,
+		Icons:             normalized,
 	}
 }
 

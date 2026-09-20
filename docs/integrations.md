@@ -501,11 +501,12 @@ IncidentRelay. Непустой `message` идёт впереди вложени
 кнопки в eXpress не отрисовываются, ack делается из UI IncidentRelay.
 
 Первая строка каждого вложения получает эмодзи по состоянию алерта. Состояние
-берётся из **полей `fields[]`**, а не из `color`: `_fields()` в IncidentRelay
-всегда кладёт `Status` и `Severity` с сырыми значениями, тогда как `color` —
-это их проекция в четыре хекса с потерями (`warning` при firing и
-`acknowledged` дают один и тот же `#f0ad4e`, а зарезолвенный critical теряет
-severity совсем). `color` остаётся запасным вариантом, если полей нет вовсе.
+берётся **только из полей `fields[]`**: `_fields()` в IncidentRelay всегда
+кладёт `Status` и `Severity` с сырыми значениями. `color` не используется —
+это те же данные, спроецированные в четыре хекса с потерями (`warning` при
+firing и `acknowledged` дают один и тот же `#f0ad4e`, а зарезолвенный critical
+теряет severity совсем). Вложение без `Status` и `Severity` доставляется
+нейтральным и пишет об этом в лог на уровне `-v`.
 
 `channel_id` — это адресат, UUID чата eXpress или алиас. Если он пуст, шлюз
 берёт `default_chat_id`, затем глобальный дефолтный чат, затем единственный
@@ -552,6 +553,10 @@ severity совсем). `color` остаётся запасным вариант
   сообщения в чате B. Шлюз отвечает таким ключам **403** до вызова редактора.
   Для канала IncidentRelay используйте ключ **без** `chats:`; если чат нужно
   ограничить, ограничьте его на стороне IncidentRelay полем `channel_id`.
+- **Бот для правки выбирается по текущей привязке чата.** Соответствие
+  `post_id` боту нигде не хранится, бот определяется из `channel_id` в теле
+  `PUT`. Если привязку чата к боту поменять между отправкой и резолвом, правка
+  уйдёт от другого бота и старое сообщение обновить не удастся.
 
 **BotX не подтверждает правку по существу.** Проверено на testlab 2026-09-20:
 `edit_event` отвечает `{"status":"ok","result":"bot_command_result_pushed"}` и
@@ -578,32 +583,40 @@ server:
       key: env:INCIDENTRELAY_API_KEY
   mattermost:                     # опционально
     default_chat_id: alerts       # если IncidentRelay не прислал channel_id
-    error_severities:             # поле Severity, дающее BotX status=error
+    error_severities:             # Severity, дающая BotX status=error
       - critical
       - high
-    error_colors:                 # запасной ключ, если fields[] нет вовсе
-      - "#d9534f"
+    warning_severities:           # Severity, дающая жёлтое предупреждение
+      - warning
+      - warn
     icons:                        # эмодзи по состоянию
       resolved: "🟢"
       acknowledged: "🟡"
       error: "🔴"
+      warning: "🟠"
       default: "🔵"
 ```
 
 Состояние вычисляется по первому вложению в таком порядке:
 
-1. `fields[].Status == resolved` → `resolved`, BotX-статус `ok`
-2. `fields[].Status == acknowledged` → `acknowledged`, `ok`
-3. `fields[].Severity` из `error_severities` → `error`, BotX-статус `error`
-4. `fields[].Severity` есть, но не в списке → `default`, `ok`
-5. полей нет — `color` из `error_colors` → `error`, иначе `default`
+| Условие | Состояние | BotX-статус | Эмодзи |
+|---|---|---|---|
+| `fields[].Status == resolved` | `resolved` | `ok` | 🟢 |
+| `fields[].Status == acknowledged` | `acknowledged` | `ok` | 🟡 |
+| `fields[].Severity` из `error_severities` | `error` | `error` | 🔴 |
+| `fields[].Severity` из `warning_severities` | `warning` | `ok` | 🟠 |
+| прочее, включая отсутствие полей | `default` | `ok` | 🔵 |
 
 `error_severities` по умолчанию — `[critical, high]`, ровно как у
 `/api/v1/incidentrelay`: оба приёмника принимают один и тот же алерт от одного
-продукта, и расходиться в правиле им незачем. IncidentRelay нормализует
-severity до отправки; если в вашей установке встречаются `crit` или `error`,
-добавьте их в список. Пустое значение (`[]` / `{}`) отключает соответствующее
-правило, отсутствие ключа даёт дефолт.
+продукта, и расходиться в правиле им незачем. `warning_severities` по умолчанию
+`[warning, warn]`; `medium` и `low` сознательно не включены — это решение
+конкретной установки. IncidentRelay нормализует severity до отправки; если у
+вас встречаются `crit` или `error`, добавьте их в список.
+
+Пустое значение (`[]` / `{}`) отключает правило, отсутствие ключа даёт дефолт.
+Имена состояний в `icons` проверяются при загрузке конфига, поэтому опечатка
+вроде `resovled` будет названа, а не молча уберёт значки.
 
 ### Настройка IncidentRelay
 

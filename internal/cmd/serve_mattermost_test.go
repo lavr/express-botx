@@ -13,14 +13,14 @@ func TestBuildMattermostConfig(t *testing.T) {
 		yaml           config.MattermostYAMLConfig
 		wantChat       string
 		wantSeverities []string
-		wantColors     []string
+		wantWarnings   []string
 		wantIcons      map[string]string
 	}{
 		{
 			name:           "empty config takes every built-in default",
 			yaml:           config.MattermostYAMLConfig{},
 			wantSeverities: server.DefaultMattermostErrorSeverities,
-			wantColors:     server.DefaultMattermostErrorColors,
+			wantWarnings:   server.DefaultMattermostWarningSeverities,
 			wantIcons:      server.DefaultMattermostIcons,
 		},
 		{
@@ -28,35 +28,42 @@ func TestBuildMattermostConfig(t *testing.T) {
 			yaml:           config.MattermostYAMLConfig{DefaultChatID: "infra"},
 			wantChat:       "infra",
 			wantSeverities: server.DefaultMattermostErrorSeverities,
-			wantColors:     server.DefaultMattermostErrorColors,
+			wantWarnings:   server.DefaultMattermostWarningSeverities,
 			wantIcons:      server.DefaultMattermostIcons,
 		},
 		{
 			name:           "configured severities replace the defaults",
 			yaml:           config.MattermostYAMLConfig{ErrorSeverities: []string{"critical", "crit", "error"}},
 			wantSeverities: []string{"critical", "crit", "error"},
-			wantColors:     server.DefaultMattermostErrorColors,
+			wantWarnings:   server.DefaultMattermostWarningSeverities,
 			wantIcons:      server.DefaultMattermostIcons,
 		},
 		{
 			name:           "configured icons replace the defaults and are normalized",
 			yaml:           config.MattermostYAMLConfig{Icons: map[string]string{"  ERROR ": "\U0001F525"}},
 			wantSeverities: server.DefaultMattermostErrorSeverities,
-			wantColors:     server.DefaultMattermostErrorColors,
+			wantWarnings:   server.DefaultMattermostWarningSeverities,
 			wantIcons:      map[string]string{server.MattermostStateError: "\U0001F525"},
 		},
 		{
 			name:           "an explicitly empty icon map disables icons",
 			yaml:           config.MattermostYAMLConfig{Icons: map[string]string{}},
 			wantSeverities: server.DefaultMattermostErrorSeverities,
-			wantColors:     server.DefaultMattermostErrorColors,
+			wantWarnings:   server.DefaultMattermostWarningSeverities,
 			wantIcons:      map[string]string{},
 		},
 		{
-			name:           "an explicitly empty severity list disables the field rule",
+			name:           "an explicitly empty severity list disables the error rule",
 			yaml:           config.MattermostYAMLConfig{ErrorSeverities: []string{}},
 			wantSeverities: []string{},
-			wantColors:     server.DefaultMattermostErrorColors,
+			wantWarnings:   server.DefaultMattermostWarningSeverities,
+			wantIcons:      server.DefaultMattermostIcons,
+		},
+		{
+			name:           "configured warning severities replace the defaults",
+			yaml:           config.MattermostYAMLConfig{WarningSeverities: []string{"medium"}},
+			wantSeverities: server.DefaultMattermostErrorSeverities,
+			wantWarnings:   []string{"medium"},
 			wantIcons:      server.DefaultMattermostIcons,
 		},
 	}
@@ -68,7 +75,7 @@ func TestBuildMattermostConfig(t *testing.T) {
 				t.Errorf("DefaultChatID = %q, want %q", got.DefaultChatID, tt.wantChat)
 			}
 			assertStrings(t, "ErrorSeverities", got.ErrorSeverities, tt.wantSeverities)
-			assertStrings(t, "ErrorColors", got.ErrorColors, tt.wantColors)
+			assertStrings(t, "WarningSeverities", got.WarningSeverities, tt.wantWarnings)
 			if len(got.Icons) != len(tt.wantIcons) {
 				t.Fatalf("Icons = %v, want %v", got.Icons, tt.wantIcons)
 			}

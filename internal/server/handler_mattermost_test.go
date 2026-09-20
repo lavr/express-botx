@@ -139,7 +139,7 @@ func TestMattermost_CreatePostRendersAttachment(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			var call mattermostCall
-			srv := mattermostServer(t, &MattermostConfig{ErrorSeverities: DefaultMattermostErrorSeverities, ErrorColors: DefaultMattermostErrorColors}, &call)
+			srv := mattermostServer(t, &MattermostConfig{ErrorSeverities: DefaultMattermostErrorSeverities, WarningSeverities: DefaultMattermostWarningSeverities}, &call)
 
 			w := doRequest(srv, "POST", "/api/v1/mattermost/api/v4/posts", strings.NewReader(tt.payload), webhookHeaders())
 			if w.Code != tt.wantCode {
@@ -157,7 +157,7 @@ func TestMattermost_CreatePostRendersAttachment(t *testing.T) {
 
 func TestMattermost_CreatePostResponse(t *testing.T) {
 	var call mattermostCall
-	srv := mattermostServer(t, &MattermostConfig{ErrorSeverities: DefaultMattermostErrorSeverities, ErrorColors: DefaultMattermostErrorColors}, &call)
+	srv := mattermostServer(t, &MattermostConfig{ErrorSeverities: DefaultMattermostErrorSeverities, WarningSeverities: DefaultMattermostWarningSeverities}, &call)
 
 	w := doRequest(srv, "POST", "/api/v1/mattermost/api/v4/posts", strings.NewReader(mattermostPostPayload), webhookHeaders())
 	if w.Code != 200 {
@@ -241,61 +241,72 @@ func TestMattermost_ChatTarget(t *testing.T) {
 	}
 }
 
-func TestMattermost_Status(t *testing.T) {
+func TestMattermost_State(t *testing.T) {
 	tests := []struct {
 		name       string
 		attachment string
 		wantStatus string
+		wantIcon   string
 	}{
 		{
-			name:       "a critical severity field is an error",
+			name:       "a critical alert is an error",
 			attachment: `{"title":"T","fields":[{"title":"Status","value":"firing"},{"title":"Severity","value":"critical"}]}`,
 			wantStatus: "error",
+			wantIcon:   "\U0001F534",
 		},
 		{
-			name:       "resolved is ok whatever the severity",
+			name:       "resolved wins over the severity",
 			attachment: `{"title":"T","fields":[{"title":"Status","value":"resolved"},{"title":"Severity","value":"critical"}]}`,
 			wantStatus: "ok",
+			wantIcon:   "\U0001F7E2",
 		},
 		{
-			name:       "acknowledged is ok whatever the severity",
+			name:       "acknowledged wins over the severity",
 			attachment: `{"title":"T","fields":[{"title":"Status","value":"acknowledged"},{"title":"Severity","value":"critical"}]}`,
 			wantStatus: "ok",
+			wantIcon:   "\U0001F7E1",
 		},
 		{
-			name:       "a severity outside error_severities is ok",
+			name:       "a warning severity is its own state, distinct from acknowledged",
 			attachment: `{"title":"T","fields":[{"title":"Status","value":"firing"},{"title":"Severity","value":"warning"}]}`,
 			wantStatus: "ok",
+			wantIcon:   "\U0001F7E0",
+		},
+		{
+			name:       "an info severity stays neutral, distinct from warning",
+			attachment: `{"title":"T","fields":[{"title":"Status","value":"firing"},{"title":"Severity","value":"info"}]}`,
+			wantStatus: "ok",
+			wantIcon:   "\U0001F535",
 		},
 		{
 			name:       "field case does not matter",
 			attachment: `{"title":"T","fields":[{"title":"SEVERITY","value":"CRITICAL"}]}`,
 			wantStatus: "error",
+			wantIcon:   "\U0001F534",
 		},
 		{
-			name:       "a placeholder severity falls through to the colour",
-			attachment: `{"title":"T","color":"#d9534f","fields":[{"title":"Severity","value":"-"}]}`,
-			wantStatus: "error",
+			name:       "a placeholder severity is neutral",
+			attachment: `{"title":"T","fields":[{"title":"Severity","value":"-"}]}`,
+			wantStatus: "ok",
+			wantIcon:   "\U0001F535",
 		},
 		{
-			name:       "the colour decides when no fields are present",
+			name:       "a colour alone no longer decides anything",
 			attachment: `{"title":"T","color":"#d9534f"}`,
+			wantStatus: "ok",
+			wantIcon:   "\U0001F535",
+		},
+		{
+			name:       "fields decide even against a contradicting colour",
+			attachment: `{"title":"T","color":"#2e7d32","fields":[{"title":"Severity","value":"critical"}]}`,
 			wantStatus: "error",
+			wantIcon:   "\U0001F534",
 		},
 		{
-			name:       "fields win over a contradicting colour",
-			attachment: `{"title":"T","color":"#d9534f","fields":[{"title":"Status","value":"resolved"}]}`,
+			name:       "an attachment with no usable fields is neutral",
+			attachment: `{"title":"T","fields":[{"title":"Team","value":"sre"}]}`,
 			wantStatus: "ok",
-		},
-		{
-			name:       "a non-error colour with no fields is ok",
-			attachment: `{"title":"T","color":"#2e7d32"}`,
-			wantStatus: "ok",
-		},
-		{
-			name:       "neither fields nor colour is ok",
-			attachment: `{"title":"T"}`,
-			wantStatus: "ok",
+			wantIcon:   "\U0001F535",
 		},
 	}
 
@@ -303,8 +314,9 @@ func TestMattermost_Status(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			var call mattermostCall
 			srv := mattermostServer(t, &MattermostConfig{
-				ErrorSeverities: DefaultMattermostErrorSeverities,
-				ErrorColors:     DefaultMattermostErrorColors,
+				ErrorSeverities:   DefaultMattermostErrorSeverities,
+				WarningSeverities: DefaultMattermostWarningSeverities,
+				Icons:             DefaultMattermostIcons,
 			}, &call)
 
 			payload := fmt.Sprintf(`{"channel_id":%q,"props":{"attachments":[%s]}}`, mattermostChatID, tt.attachment)
@@ -313,7 +325,10 @@ func TestMattermost_Status(t *testing.T) {
 				t.Fatalf("status = %d, want 200 (body: %s)", w.Code, w.Body.String())
 			}
 			if call.sent.Status != tt.wantStatus {
-				t.Errorf("status = %q, want %q", call.sent.Status, tt.wantStatus)
+				t.Errorf("BotX status = %q, want %q", call.sent.Status, tt.wantStatus)
+			}
+			if !strings.HasPrefix(call.sent.Message, tt.wantIcon+" ") {
+				t.Errorf("message = %q, want it to lead with %q", call.sent.Message, tt.wantIcon)
 			}
 		})
 	}
@@ -328,7 +343,7 @@ func TestMattermost_UpdatePost(t *testing.T) {
 	}`
 
 	var call mattermostCall
-	srv := mattermostServer(t, &MattermostConfig{ErrorSeverities: DefaultMattermostErrorSeverities, ErrorColors: DefaultMattermostErrorColors}, &call)
+	srv := mattermostServer(t, &MattermostConfig{ErrorSeverities: DefaultMattermostErrorSeverities, WarningSeverities: DefaultMattermostWarningSeverities}, &call)
 
 	w := doRequest(srv, "PUT", "/api/v1/mattermost/api/v4/posts/sync-42", strings.NewReader(resolved), webhookHeaders())
 	if w.Code != 200 {
@@ -600,19 +615,30 @@ func TestMattermost_ScopedKeyCannotEdit(t *testing.T) {
 func TestMattermost_UpdateCarriesStatus(t *testing.T) {
 	tests := []struct {
 		name       string
-		color      string
+		fields     string
 		wantStatus string
 	}{
-		{name: "the resolved colour clears the error status", color: "#2e7d32", wantStatus: "ok"},
-		{name: "a still-critical update keeps the error status", color: "#d9534f", wantStatus: "error"},
+		{
+			name:       "the resolve clears the error status",
+			fields:     `[{"title":"Status","value":"resolved"},{"title":"Severity","value":"critical"}]`,
+			wantStatus: "ok",
+		},
+		{
+			name:       "a still-firing update keeps the error status",
+			fields:     `[{"title":"Status","value":"firing"},{"title":"Severity","value":"critical"}]`,
+			wantStatus: "error",
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			var call mattermostCall
-			srv := mattermostServer(t, &MattermostConfig{ErrorSeverities: DefaultMattermostErrorSeverities, ErrorColors: DefaultMattermostErrorColors}, &call)
+			srv := mattermostServer(t, &MattermostConfig{
+				ErrorSeverities:   DefaultMattermostErrorSeverities,
+				WarningSeverities: DefaultMattermostWarningSeverities,
+			}, &call)
 
-			payload := fmt.Sprintf(`{"channel_id":%q,"props":{"attachments":[{"color":%q,"title":"RESOLVED: T"}]}}`, mattermostChatID, tt.color)
+			payload := fmt.Sprintf(`{"channel_id":%q,"props":{"attachments":[{"title":"RESOLVED: T","fields":%s}]}}`, mattermostChatID, tt.fields)
 			w := doRequest(srv, "PUT", "/api/v1/mattermost/api/v4/posts/sync-42", strings.NewReader(payload), webhookHeaders())
 			if w.Code != 200 {
 				t.Fatalf("status = %d, want 200 (body: %s)", w.Code, w.Body.String())
@@ -624,54 +650,31 @@ func TestMattermost_UpdateCarriesStatus(t *testing.T) {
 	}
 }
 
-func TestMattermost_Icon(t *testing.T) {
+func TestMattermost_IconConfig(t *testing.T) {
 	tests := []struct {
 		name        string
-		attachment  string
 		icons       map[string]string
 		wantMessage string
 	}{
 		{
-			name:        "a critical alert leads with a red circle",
-			attachment:  `{"title":"T","text":"B","fields":[{"title":"Status","value":"firing"},{"title":"Severity","value":"critical"}]}`,
+			name:        "the defaults mark a critical alert red",
 			icons:       DefaultMattermostIcons,
-			wantMessage: "\U0001F534 T\nB\nStatus: firing\nSeverity: critical",
-		},
-		{
-			name:        "a resolved alert leads with a green circle",
-			attachment:  `{"title":"T","text":"B","fields":[{"title":"Status","value":"resolved"},{"title":"Severity","value":"critical"}]}`,
-			icons:       DefaultMattermostIcons,
-			wantMessage: "\U0001F7E2 T\nB\nStatus: resolved\nSeverity: critical",
-		},
-		{
-			name:        "an acknowledged alert leads with a yellow circle",
-			attachment:  `{"title":"T","text":"B","fields":[{"title":"Status","value":"acknowledged"},{"title":"Severity","value":"critical"}]}`,
-			icons:       DefaultMattermostIcons,
-			wantMessage: "\U0001F7E1 T\nB\nStatus: acknowledged\nSeverity: critical",
-		},
-		{
-			name:        "a non-error severity leads with a blue circle",
-			attachment:  `{"title":"T","text":"B","fields":[{"title":"Status","value":"firing"},{"title":"Severity","value":"info"}]}`,
-			icons:       DefaultMattermostIcons,
-			wantMessage: "\U0001F535 T\nB\nStatus: firing\nSeverity: info",
-		},
-		{
-			name:        "an attachment with neither fields nor colour is neutral",
-			attachment:  `{"title":"T","text":"B"}`,
-			icons:       DefaultMattermostIcons,
-			wantMessage: "\U0001F535 T\nB",
+			wantMessage: "\U0001F534 T\nB\nSeverity: critical",
 		},
 		{
 			name:        "an empty map disables icons",
-			attachment:  `{"title":"T","text":"B","fields":[{"title":"Severity","value":"critical"}]}`,
 			icons:       map[string]string{},
 			wantMessage: "T\nB\nSeverity: critical",
 		},
 		{
 			name:        "a custom map replaces the defaults",
-			attachment:  `{"title":"T","text":"B","fields":[{"title":"Severity","value":"critical"}]}`,
 			icons:       map[string]string{MattermostStateError: "\U0001F525"},
 			wantMessage: "\U0001F525 T\nB\nSeverity: critical",
+		},
+		{
+			name:        "a map without the matching state leaves the line bare",
+			icons:       map[string]string{MattermostStateResolved: "\U0001F7E2"},
+			wantMessage: "T\nB\nSeverity: critical",
 		},
 	}
 
@@ -679,12 +682,12 @@ func TestMattermost_Icon(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			var call mattermostCall
 			srv := mattermostServer(t, &MattermostConfig{
-				ErrorSeverities: DefaultMattermostErrorSeverities,
-				ErrorColors:     DefaultMattermostErrorColors,
-				Icons:           tt.icons,
+				ErrorSeverities:   DefaultMattermostErrorSeverities,
+				WarningSeverities: DefaultMattermostWarningSeverities,
+				Icons:             tt.icons,
 			}, &call)
 
-			payload := fmt.Sprintf(`{"channel_id":%q,"props":{"attachments":[%s]}}`, mattermostChatID, tt.attachment)
+			payload := fmt.Sprintf(`{"channel_id":%q,"props":{"attachments":[{"title":"T","text":"B","fields":[{"title":"Severity","value":"critical"}]}]}}`, mattermostChatID)
 			w := doRequest(srv, "POST", "/api/v1/mattermost/api/v4/posts", strings.NewReader(payload), webhookHeaders())
 			if w.Code != 200 {
 				t.Fatalf("status = %d, want 200 (body: %s)", w.Code, w.Body.String())
@@ -698,7 +701,7 @@ func TestMattermost_Icon(t *testing.T) {
 
 func TestMattermost_IconMarksEachAttachment(t *testing.T) {
 	var call mattermostCall
-	srv := mattermostServer(t, &MattermostConfig{ErrorSeverities: DefaultMattermostErrorSeverities, Icons: DefaultMattermostIcons}, &call)
+	srv := mattermostServer(t, &MattermostConfig{ErrorSeverities: DefaultMattermostErrorSeverities, WarningSeverities: DefaultMattermostWarningSeverities, Icons: DefaultMattermostIcons}, &call)
 
 	payload := fmt.Sprintf(`{"channel_id":%q,"props":{"attachments":[
 		{"title":"Firing","fields":[{"title":"Severity","value":"critical"}]},
@@ -716,7 +719,7 @@ func TestMattermost_IconMarksEachAttachment(t *testing.T) {
 
 func TestMattermost_IconSurvivesTheResolveUpdate(t *testing.T) {
 	var call mattermostCall
-	srv := mattermostServer(t, &MattermostConfig{ErrorSeverities: DefaultMattermostErrorSeverities, Icons: DefaultMattermostIcons}, &call)
+	srv := mattermostServer(t, &MattermostConfig{ErrorSeverities: DefaultMattermostErrorSeverities, WarningSeverities: DefaultMattermostWarningSeverities, Icons: DefaultMattermostIcons}, &call)
 
 	payload := fmt.Sprintf(`{"channel_id":%q,"props":{"attachments":[{"title":"RESOLVED: Disk almost full","text":"The alert has been resolved.","fields":[{"title":"Status","value":"resolved"}]}]}}`, mattermostChatID)
 	w := doRequest(srv, "PUT", "/api/v1/mattermost/api/v4/posts/sync-42", strings.NewReader(payload), webhookHeaders())

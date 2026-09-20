@@ -85,8 +85,12 @@ func TestEditMessage(t *testing.T) {
 		body       string
 		wantErr    string
 	}{
-		{name: "200 succeeds", statusCode: 200, body: `{"status":"ok"}`},
-		{name: "202 succeeds", statusCode: 202, body: `{"status":"ok"}`},
+		{name: "200 with status ok succeeds", statusCode: 200, body: `{"status":"ok"}`},
+		{name: "202 with status ok succeeds", statusCode: 202, body: `{"status":"ok"}`},
+		{name: "200 with status error is not a success", statusCode: 200, body: `{"status":"error","reason":"nope"}`, wantErr: `status "error"`},
+		{name: "200 with an empty body is not a success", statusCode: 200, body: ``, wantErr: "non-JSON body"},
+		{name: "200 with proxy HTML is not a success", statusCode: 200, body: `<html>gateway</html>`, wantErr: "non-JSON body"},
+		{name: "200 with no status field is not a success", statusCode: 200, body: `{}`, wantErr: `status ""`},
 		{name: "401 is reported as unauthorized", statusCode: 401, body: ``, wantErr: "unauthorized"},
 		{name: "404 carries the upstream body", statusCode: 404, body: `{"reason":"message_not_found"}`, wantErr: "message_not_found"},
 		{name: "500 is an error", statusCode: 500, body: `boom`, wantErr: "HTTP 500"},

@@ -757,18 +757,18 @@ paths:
         ignored: eXpress does not render buttons.
 
         **State.** The first attachment's `fields[]` decide, because
-        IncidentRelay always puts the raw `Status` and `Severity` there:
+        IncidentRelay always puts the raw `Status` and `Severity` there.
         `Status: resolved` and `Status: acknowledged` map to BotX
-        `notification.status: ok`, a `Severity` listed in `error_severities`
-        (default `[critical, high]`) maps to `error`, anything else to `ok`.
-        The attachment's `color` is only a fallback for a payload with no
-        `fields[]` at all — it is the same information projected lossily onto
-        four hex values.
+        `notification.status: ok`; a `Severity` in `error_severities` (default
+        `[critical, high]`) maps to `error`; a `Severity` in
+        `warning_severities` (default `[warning, warn]`) and everything else map
+        to `ok`. The attachment's `color` is ignored — it is the same
+        information projected lossily onto four hex values.
 
-        The state also picks the emoji that leads each attachment:
-        `resolved` green, `acknowledged` yellow, `error` red, everything else
-        blue. The BotX status itself has no visible effect in eXpress, so the
-        emoji is the severity signal the on-call actually sees.
+        The state also picks the emoji that leads each attachment: resolved
+        green, acknowledged yellow, error red, warning orange, anything else
+        blue. The BotX status has no visible effect in eXpress, so the emoji is
+        the severity signal the on-call actually sees.
 
         **Chat.** `channel_id` is the target chat UUID or alias. When it is
         absent the endpoint falls back to `default_chat_id`, then the global
@@ -848,7 +848,12 @@ paths:
 
         `post_id` is the BotX `sync_id`, and the edit goes to BotX
         `POST /api/v3/botx/events/edit_event`, so the notification is updated in
-        place rather than duplicated. The body is rendered exactly as it is for
+        place rather than duplicated. The bot that performs the edit is resolved
+        from `channel_id`, not stored against `post_id`, so re-binding a chat to
+        a different bot between the create and the update breaks the update.
+
+        A chat-scoped API key is refused with `403`: a `post_id` does not carry
+        the chat its message lives in, so the key's scope cannot be applied. The body is rendered exactly as it is for
         a new post; the response echoes `post_id` and the requested
         `channel_id`.
 
@@ -1342,7 +1347,7 @@ components:
           description: Ignored; `title` and `text` carry the same content.
         color:
           type: string
-          description: Border colour; a fallback state key used only when `fields[]` is absent.
+          description: Border colour; ignored, the state comes from `fields[]`.
         title:
           type: string
         title_link:
