@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.37.0
 
 ### Added: сырое тело входящего вебхука в trace-логе (`-vvv`)
 
