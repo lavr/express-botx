@@ -323,6 +323,133 @@ curl -X POST http://localhost:8080/api/v1/grafana \
 
 ---
 
+## IncidentRelay
+
+### Чем отличается от Grafana и Alertmanager
+
+[IncidentRelay](https://incidentrelay.io/) шлёт из generic-webhook-канала
+**плоский** JSON: одна нотификация — один объект, массива `alerts[]` в нём нет.
+Поэтому `/api/v1/alertmanager` и `/api/v1/grafana` такой пейлоад отвергают с
+400 `no alerts in payload`, и для него есть свой endpoint.
+
+Готовый рендер нотификации лежит в поле `text` — это те же строки, что
+IncidentRelay шлёт в Telegram и почту (`NOTIFICATION: <заголовок>`, `Team:`,
+`Service:`, `Status:`, `Severity:`, `Priority:`, `Assignee:`, `Source:`,
+`Message:`, `Alert URL:`, плюс блоки service context и correlation). По
+умолчанию шлюз отправляет его в чат без изменений.
+
+### Настройка express-botx
+
+Endpoint `/api/v1/incidentrelay` включён по умолчанию. Секция `incidentrelay`
+нужна только для кастомизации:
+
+```yaml
+server:
+  listen: ":8080"
+  base_path: /api/v1
+  api_keys:
+    - name: incidentrelay
+      key: env:INCIDENTRELAY_API_KEY
+      allow_query_auth: true            # см. «Аутентификация» ниже
+      chats: [alerts]                   # ключ ограничен одним чатом
+  incidentrelay:                        # опционально — endpoint работает и без этой секции
+    default_chat_id: alerts             # чат по умолчанию
+    error_severities:                   # при каких severity ставить статус "error"
+      - critical
+      - high
+    message_source: webhook             # кто рендерит текст: webhook | template
+```
+
+### Аутентификация: ключ в query-параметре
+
+В IncidentRelay generic-webhook-канал настраивается **единственным** полем
+`webhook_url`. Заголовков в конфигурации канала нет вообще, и тело POST'а зашито
+в коде, поэтому ни `Authorization: Bearer`, ни `X-API-Key` выставить нельзя.
+
+Для таких отправителей есть третий способ передать ключ — query-параметр
+`?api_key=`:
+
+```
+http://express-botx:8080/api/v1/incidentrelay?api_key=<api-key>&chat_id=alerts
+```
+
+Правила:
+
+- заголовки остаются приоритетными. `?api_key=` читается, только если нет ни
+  `Authorization`, ни `X-API-Key`. Невалидный заголовок **не** даёт откатиться
+  на query-ключ — запрос отвергается;
+- разрешение выдаётся **отдельному ключу**, а не всей установке:
+  `allow_query_auth: true` в его описании. Без этого флага ключ в query даёт 401;
+- дубликат (`?api_key=a&api_key=a`) считается неоднозначным и отвергается;
+- значение вырезается из URL до логирования, трассировки и отправки в Sentry или
+  APM, поэтому в `access_log`, в трейсе и в отчётах об ошибках его нет.
+
+> **Ключ всё равно оказывается в URL.** Вырезание работает внутри express-botx и
+> не распространяется на то, что снаружи: ключ осядет в логах обратного прокси
+> или ingress и в базе IncidentRelay внутри сохранённого `webhook_url`. Поэтому
+> под такой канал заводите **отдельный** ключ и ограничивайте его через `chats:`.
+> Флаг `allow_query_auth` ограничивает транспорт, но не набор ручек: ключ с ним
+> по-прежнему ходит в остальные endpoint'ы в пределах своего скоупа.
+
+### Кто рендерит текст сообщения
+
+- **`webhook`** (по умолчанию) — в чат уходит `text`, как его отрендерил
+  IncidentRelay. Если `text` пуст, шлюз склеивает `title` и `message` через
+  пустую строку (или берёт то из них, что непустое). Пейлоад, в котором пусты
+  все три поля, отвергается раньше — до шаблона в этом режиме дело не доходит.
+- **`template`** — `text` игнорируется, текст собирается из встроенного шаблона
+  либо из `template`/`template_file`. Шаблону доступны все поля пейлоада:
+  `.Text`, `.Title`, `.Message`, `.Severity`, `.Status`, `.Priority`,
+  `.PriorityLabel`, `.Team`, `.Service`, `.Assignee`, `.Source`, `.AlertURL`,
+  `.SourceEventURL`, `.ServiceLinks`, `.ServiceRunbooks`.
+
+Пейлоад, в котором пусты сразу `text`, `title` и `message`, отвергается с 400:
+пустая нотификация в чате хуже отсутствующей. Поэтому собственный шаблон
+применяется только при явном `message_source: template`.
+
+### Статус сообщения
+
+`status: resolved` → статус `ok`. При любом другом статусе (`firing`,
+`acknowledged`, `maintenance`) смотрится `severity`: если он перечислен в
+`error_severities`, статус `error`, иначе `ok`.
+
+IncidentRelay нормализует severity до отправки, так что в `error_severities`
+перечисляются приведённые значения: `critical`, `high`, `medium`, `warning`,
+`low`, `info`. По умолчанию — `critical` и `high`.
+
+### Настройка IncidentRelay
+
+1. **Settings → Channels → Add channel**, тип **Webhook**
+2. В `webhook_url` укажите полный URL вместе с ключом и чатом:
+   `http://express-botx:8080/api/v1/incidentrelay?api_key=<api-key>&chat_id=alerts`
+3. При необходимости ограничьте канал фильтром `notify_on_severities`
+4. Привяжите канал к цепочке эскалации
+
+### Несколько чатов
+
+Как и у остальных приёмников: фан-аут через запятую
+(`?chat_id=infra-alerts,app-alerts`) либо отдельный канал на каждый чат.
+
+### Проверка вручную
+
+```bash
+curl -X POST 'http://localhost:8080/api/v1/incidentrelay?api_key=<api-key>' \
+  -H "Content-Type: application/json" \
+  -d '{
+    "text": "NOTIFICATION: [P2] Диск почти полон\nTeam: sre\nStatus: firing\nSeverity: critical",
+    "alert_id": 42,
+    "alert_url": "http://incidentrelay/alerts/42",
+    "status": "firing",
+    "source": "grafana",
+    "title": "Диск почти полон",
+    "message": "node-1 at 94%",
+    "severity": "critical",
+    "team": "sre"
+  }'
+```
+
+---
+
 ## GitLab (универсальный приёмник событий)
 
 Endpoint `/api/v1/gitlab` принимает **любые** group/project-вебхуки GitLab

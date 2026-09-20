@@ -381,6 +381,23 @@ Options:
 	}
 	srvOpts = append(srvOpts, server.WithGrafana(grCfg))
 
+	// IncidentRelay endpoint (always enabled)
+	ir := cfg.Server.IncidentRelay
+	if ir == nil {
+		ir = &config.IncidentRelayYAMLConfig{}
+	}
+	irCfg, err := buildIncidentRelayConfig(ir, cfg.ConfigPath())
+	if err != nil {
+		return err
+	}
+	if irCfg.DefaultChatID == "" && len(cfg.Chats) == 1 {
+		for alias := range cfg.Chats {
+			irCfg.FallbackChatID = alias
+			vlog.V1("incidentrelay: using single chat alias %q as fallback", alias)
+		}
+	}
+	srvOpts = append(srvOpts, server.WithIncidentRelay(irCfg))
+
 	// GitLab endpoint (only enabled when configured — it needs a secret token)
 	if gl := cfg.Server.Gitlab; gl != nil {
 		gitCfg, err := buildGitlabConfig(gl, cfg.ConfigPath(), cfg.Chats, cfg.IsMultiBot())
@@ -462,7 +479,10 @@ func resolveAPIKeys(keys []config.APIKeyConfig, chats map[string]config.ChatConf
 		if err != nil {
 			return nil, err
 		}
-		resolved = append(resolved, server.ResolvedKey{Name: k.Name, Key: val, Chats: scope})
+		if k.AllowQueryAuth {
+			vlog.Info("config: key %q may authenticate through the %s query parameter", k.Name, server.QueryKeyParam)
+		}
+		resolved = append(resolved, server.ResolvedKey{Name: k.Name, Key: val, Chats: scope, AllowQueryAuth: k.AllowQueryAuth})
 	}
 	return resolved, nil
 }
@@ -618,6 +638,55 @@ func buildGrafanaConfig(gr *config.GrafanaYAMLConfig, configPath string) (*serve
 		ErrorStates:   states,
 		Template:      tmpl,
 		MessageSource: messageSource,
+	}, nil
+}
+
+func buildIncidentRelayConfig(ir *config.IncidentRelayYAMLConfig, configPath string) (*server.IncidentRelayConfig, error) {
+	severities := ir.ErrorSeverities
+	if len(severities) == 0 {
+		severities = []string{"critical", "high"}
+	}
+
+	messageSource := ir.MessageSource
+	if messageSource == "" {
+		messageSource = server.IncidentRelayMessageSourceWebhook
+	}
+	if err := config.ValidateIncidentRelayMessageSource(messageSource); err != nil {
+		return nil, fmt.Errorf("incidentrelay: %w", err)
+	}
+	vlog.V1("incidentrelay: message source %s", messageSource)
+
+	var tmplStr string
+	switch {
+	case ir.TemplateFile != "":
+		path := ir.TemplateFile
+		if !filepath.IsAbs(path) && configPath != "" {
+			path = filepath.Join(filepath.Dir(configPath), path)
+		}
+		data, err := os.ReadFile(path)
+		if err != nil {
+			return nil, fmt.Errorf("reading incidentrelay template %s: %w", path, err)
+		}
+		tmplStr = string(data)
+		vlog.V1("incidentrelay: loaded template from %s", path)
+	case ir.Template != "":
+		tmplStr = ir.Template
+		vlog.V1("incidentrelay: using inline template")
+	default:
+		tmplStr = server.DefaultIncidentRelayTemplate
+		vlog.V1("incidentrelay: using default template")
+	}
+
+	tmpl, err := server.ParseIncidentRelayTemplate(tmplStr)
+	if err != nil {
+		return nil, err
+	}
+
+	return &server.IncidentRelayConfig{
+		DefaultChatID:   ir.DefaultChatID,
+		ErrorSeverities: severities,
+		Template:        tmpl,
+		MessageSource:   messageSource,
 	}, nil
 }
 

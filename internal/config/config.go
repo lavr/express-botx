@@ -40,6 +40,20 @@ const (
 	GrafanaMessageSourceWebhook  = "webhook"
 )
 
+const (
+	IncidentRelayMessageSourceTemplate = "template"
+	IncidentRelayMessageSourceWebhook  = "webhook"
+)
+
+func ValidateIncidentRelayMessageSource(source string) error {
+	switch source {
+	case IncidentRelayMessageSourceTemplate, IncidentRelayMessageSourceWebhook:
+		return nil
+	default:
+		return fmt.Errorf("invalid incidentrelay message source %q: must be template or webhook", source)
+	}
+}
+
 func ValidateGrafanaMessageSource(source string) error {
 	switch source {
 	case GrafanaMessageSourceTemplate, GrafanaMessageSourceWebhook:
@@ -107,18 +121,19 @@ type CatalogConfig struct {
 
 // ServerConfig holds HTTP server settings for the "serve" subcommand.
 type ServerConfig struct {
-	Listen             string                  `yaml:"listen,omitempty"`
-	BasePath           string                  `yaml:"base_path,omitempty"`
-	APIKeys            []APIKeyConfig          `yaml:"api_keys,omitempty"`
-	AllowBotSecretAuth bool                    `yaml:"allow_bot_secret_auth,omitempty"`
-	AllowRequestTrace  bool                    `yaml:"allow_request_trace,omitempty"`
-	Alertmanager       *AlertmanagerYAMLConfig `yaml:"alertmanager,omitempty"`
-	Grafana            *GrafanaYAMLConfig      `yaml:"grafana,omitempty"`
-	Gitlab             *GitlabYAMLConfig       `yaml:"gitlab,omitempty"`
-	Callbacks          *CallbacksConfig        `yaml:"callbacks,omitempty"`
-	Docs               *bool                   `yaml:"docs,omitempty"`         // enable /docs endpoint (default: true)
-	ExternalURL        string                  `yaml:"external_url,omitempty"` // public URL for OpenAPI docs (e.g. http://express-botx.invitro-dev.k8s)
-	TLS                *TLSYAMLConfig          `yaml:"tls,omitempty"`
+	Listen             string                   `yaml:"listen,omitempty"`
+	BasePath           string                   `yaml:"base_path,omitempty"`
+	APIKeys            []APIKeyConfig           `yaml:"api_keys,omitempty"`
+	AllowBotSecretAuth bool                     `yaml:"allow_bot_secret_auth,omitempty"`
+	AllowRequestTrace  bool                     `yaml:"allow_request_trace,omitempty"`
+	Alertmanager       *AlertmanagerYAMLConfig  `yaml:"alertmanager,omitempty"`
+	Grafana            *GrafanaYAMLConfig       `yaml:"grafana,omitempty"`
+	IncidentRelay      *IncidentRelayYAMLConfig `yaml:"incidentrelay,omitempty"`
+	Gitlab             *GitlabYAMLConfig        `yaml:"gitlab,omitempty"`
+	Callbacks          *CallbacksConfig         `yaml:"callbacks,omitempty"`
+	Docs               *bool                    `yaml:"docs,omitempty"`         // enable /docs endpoint (default: true)
+	ExternalURL        string                   `yaml:"external_url,omitempty"` // public URL for OpenAPI docs (e.g. http://express-botx.invitro-dev.k8s)
+	TLS                *TLSYAMLConfig           `yaml:"tls,omitempty"`
 }
 
 type TLSYAMLConfig struct {
@@ -166,6 +181,15 @@ type GrafanaYAMLConfig struct {
 	MessageSource string   `yaml:"message_source,omitempty"`
 }
 
+// IncidentRelayYAMLConfig holds YAML settings for the IncidentRelay webhook endpoint.
+type IncidentRelayYAMLConfig struct {
+	DefaultChatID   string   `yaml:"default_chat_id,omitempty"`
+	ErrorSeverities []string `yaml:"error_severities,omitempty"`
+	Template        string   `yaml:"template,omitempty"`
+	TemplateFile    string   `yaml:"template_file,omitempty"`
+	MessageSource   string   `yaml:"message_source,omitempty"`
+}
+
 type GitlabYAMLConfig struct {
 	Senders []GitlabSenderYAMLConfig `yaml:"senders"`
 }
@@ -209,7 +233,8 @@ type APIKeyConfig struct {
 	// Chats optionally restricts this key to a fixed set of chats (aliases or
 	// UUIDs). A key without Chats may address any chat, preserving the
 	// behaviour of configs written before scoping existed.
-	Chats []string `yaml:"chats,omitempty" json:"chats,omitempty"`
+	Chats          []string `yaml:"chats,omitempty" json:"chats,omitempty"`
+	AllowQueryAuth bool     `yaml:"allow_query_auth,omitempty" json:"allow_query_auth,omitempty"`
 }
 
 type BotConfig struct {
@@ -1122,7 +1147,7 @@ var knownKeys = map[string]map[string]bool{
 	"server": {
 		"listen": true, "base_path": true, "api_keys": true, "allow_bot_secret_auth": true,
 		"allow_request_trace": true,
-		"alertmanager":        true, "grafana": true, "gitlab": true, "callbacks": true, "docs": true, "external_url": true,
+		"alertmanager":        true, "grafana": true, "incidentrelay": true, "gitlab": true, "callbacks": true, "docs": true, "external_url": true,
 		"tls": true,
 	},
 	"server.tls": {
@@ -1133,6 +1158,10 @@ var knownKeys = map[string]map[string]bool{
 	},
 	"server.grafana": {
 		"default_chat_id": true, "error_states": true, "template": true, "template_file": true,
+		"message_source": true,
+	},
+	"server.incidentrelay": {
+		"default_chat_id": true, "error_severities": true, "template": true, "template_file": true,
 		"message_source": true,
 	},
 	"server.gitlab": {
@@ -1163,7 +1192,7 @@ var knownKeys = map[string]map[string]bool{
 		"type": true, "command": true, "url": true, "timeout": true,
 	},
 	"server.api_keys.*": {
-		"name": true, "key": true, "chats": true,
+		"name": true, "key": true, "chats": true, "allow_query_auth": true,
 	},
 	"queue": {
 		"driver": true, "url": true, "name": true, "reply_queue": true, "group": true, "max_file_size": true,
@@ -1530,6 +1559,17 @@ func (c *Config) validateFormats() []ValidationResult {
 		}
 	}
 
+	// IncidentRelay message source
+	if c.Server.IncidentRelay != nil && c.Server.IncidentRelay.MessageSource != "" {
+		if err := ValidateIncidentRelayMessageSource(c.Server.IncidentRelay.MessageSource); err != nil {
+			results = append(results, ValidationResult{
+				Level:   ValidationError,
+				Path:    "server.incidentrelay.message_source",
+				Message: err.Error(),
+			})
+		}
+	}
+
 	// Routing mode
 	if c.Producer.RoutingMode != "" {
 		if err := ValidateRoutingMode(c.Producer.RoutingMode); err != nil {
@@ -1727,6 +1767,20 @@ func (c *Config) validateCrossReferences() []ValidationResult {
 				results = append(results, ValidationResult{
 					Level:   ValidationError,
 					Path:    "server.grafana.default_chat_id",
+					Message: fmt.Sprintf("references unknown chat alias %q", chatID),
+				})
+			}
+		}
+	}
+
+	// IncidentRelay default_chat_id must reference existing chat alias
+	if c.Server.IncidentRelay != nil && c.Server.IncidentRelay.DefaultChatID != "" {
+		chatID := c.Server.IncidentRelay.DefaultChatID
+		if !IsUUID(chatID) {
+			if _, ok := c.Chats[chatID]; !ok {
+				results = append(results, ValidationResult{
+					Level:   ValidationError,
+					Path:    "server.incidentrelay.default_chat_id",
 					Message: fmt.Sprintf("references unknown chat alias %q", chatID),
 				})
 			}

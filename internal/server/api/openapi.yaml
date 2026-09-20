@@ -21,6 +21,7 @@ servers:
 security:
   - bearerAuth: []
   - apiKeyHeader: []
+  - apiKeyQuery: []
 
 paths:
   /healthz:
@@ -616,6 +617,122 @@ paths:
               schema:
                 $ref: "#/components/schemas/MultiSendResponse"
 
+  /incidentrelay:
+    post:
+      operationId: incidentrelay
+      summary: IncidentRelay webhook
+      description: |
+        Receives notifications from IncidentRelay's generic webhook channel.
+
+        IncidentRelay posts a flat, single-alert JSON object with no `alerts[]`
+        array, so `/alertmanager` and `/grafana` reject it. Its `text` field
+        already holds the fully rendered notification, which this endpoint
+        forwards unchanged by default.
+
+        **Message source.** `message_source: webhook` (the default) sends
+        `text`; when it is empty it falls back to `title` + `message`.
+        `message_source: template` ignores `text` and renders the Go template.
+        A payload whose `text`, `title` and `message` are all empty is rejected
+        rather than delivered as an empty notification, so the template is only
+        reached through the explicit `template` mode.
+
+        **Status.** `resolved` maps to `ok`; any other status maps to `error`
+        when `severity` is listed in `error_severities` (default
+        `[critical, high]`), otherwise to `ok`.
+
+        **Authentication.** IncidentRelay's webhook channel has no header
+        configuration, so this endpoint is normally reached with `?api_key=`;
+        see the `apiKeyQuery` security scheme.
+
+        **Multi-chat fan-out.** `?chat_id=` may list several chats separated by
+        commas; the notification is delivered best-effort to each. The response
+        is always a `MultiSendResponse`.
+
+        Chat resolution priority:
+        1. `?chat_id=` query parameter (comma-separated for fan-out)
+        2. `default_chat_id` from webhook config
+        3. Global default chat (`default: true` in chats section)
+        4. Single chat alias from config
+      parameters:
+        - name: chat_id
+          in: query
+          description: Target chat UUID or alias; comma-separated for multi-chat fan-out (overrides config default)
+          schema:
+            type: string
+        - name: bot
+          in: query
+          description: Bot name (required in multi-bot mode unless chat has a default bot binding)
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/IncidentRelayWebhook"
+            example:
+              text: "NOTIFICATION: [P2] Disk almost full\nTeam: sre\nService: storage\nStatus: firing\nSeverity: critical\nAlert URL: http://incidentrelay/alerts/42"
+              alert_id: 42
+              alert_url: http://incidentrelay/alerts/42
+              source_event_url: null
+              team: sre
+              status: firing
+              source: grafana
+              title: Disk almost full
+              message: "node-1 at 94%"
+              severity: critical
+              priority: P2
+              priority_label: P2 High
+              assignee: ivanov
+              service: storage
+              service_id: 7
+              service_name: Storage
+              service_slug: storage
+              service_links:
+                - id: 1
+                  type: dashboard
+                  label: Board
+                  url: http://grafana:3000/d/1
+              service_runbooks:
+                - id: 2
+                  title: Disk runbook
+                  url: http://wiki/runbooks/disk
+                  severity: critical
+              correlation: null
+      responses:
+        "200":
+          description: |
+            Notification delivered to at least one chat. Body is a `MultiSendResponse`
+            (`results` with a per-chat `sync_id`; partial failures in `errors`).
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MultiSendResponse"
+        "400":
+          description: Request-level error (malformed JSON, no content in payload, empty chat_id, template error)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "401":
+          description: No credentials provided, or a query key whose config does not allow query authentication
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "403":
+          description: Invalid credentials, or the target chat is outside this API key's chat scope
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "502":
+          description: Delivery to every listed chat failed (`MultiSendResponse` with `ok:false`)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MultiSendResponse"
+
   /gitlab:
     post:
       operationId: gitlab
@@ -792,6 +909,18 @@ components:
       in: header
       name: X-API-Key
       description: "X-API-Key: <api-key>"
+    apiKeyQuery:
+      type: apiKey
+      in: query
+      name: api_key
+      description: |
+        `?api_key=<api-key>` — fallback for senders that cannot set headers at
+        all, such as IncidentRelay's generic webhook channel. Consulted only
+        when neither `Authorization` nor `X-API-Key` is present, and only for a
+        key configured with `allow_query_auth: true`. The value is removed from
+        the request URL before logging, tracing and error reporting, but it
+        still reaches reverse-proxy logs and whatever stores the URL, so use a
+        dedicated key scoped with `chats:`.
     botSignature:
       type: apiKey
       in: header
@@ -995,6 +1124,109 @@ components:
         message:
           type: string
           description: Pre-formatted alert message from Grafana (markdown)
+
+    IncidentRelayWebhook:
+      type: object
+      description: |
+        Flat notification payload from IncidentRelay's generic webhook channel
+        (`IncomingWebhookNotifier`). There is no `alerts[]` array: one POST
+        carries one alert group.
+      properties:
+        text:
+          type: string
+          description: |
+            Notification already rendered by IncidentRelay. Delivered unchanged
+            when `message_source` is `webhook` (the default).
+        alert_id:
+          type: integer
+        alert_url:
+          type: string
+          format: uri
+          nullable: true
+        source_event_url:
+          type: string
+          format: uri
+          nullable: true
+        team:
+          type: string
+          nullable: true
+        status:
+          type: string
+          enum: [firing, resolved, acknowledged, maintenance]
+        source:
+          type: string
+          description: Integration the alert came from (grafana, zabbix, ...)
+        title:
+          type: string
+        message:
+          type: string
+          nullable: true
+        severity:
+          type: string
+          enum: [critical, high, medium, warning, low, info]
+          nullable: true
+          description: |
+            Normalized by IncidentRelay before delivery (crit/error/fatal
+            collapse to critical, warn to warning). Compared against
+            `error_severities` to pick the eXpress message status.
+        priority:
+          type: string
+          nullable: true
+        priority_label:
+          type: string
+          nullable: true
+        assignee:
+          type: string
+          nullable: true
+        service:
+          type: string
+          nullable: true
+        service_id:
+          type: integer
+          nullable: true
+        service_name:
+          type: string
+          nullable: true
+        service_slug:
+          type: string
+          nullable: true
+        service_links:
+          type: array
+          items:
+            $ref: "#/components/schemas/IncidentRelayLink"
+        service_runbooks:
+          type: array
+          items:
+            $ref: "#/components/schemas/IncidentRelayRunbook"
+        correlation:
+          nullable: true
+          description: Correlation context, opaque to express-botx
+
+    IncidentRelayLink:
+      type: object
+      properties:
+        id:
+          type: integer
+        type:
+          type: string
+        label:
+          type: string
+        url:
+          type: string
+          format: uri
+
+    IncidentRelayRunbook:
+      type: object
+      properties:
+        id:
+          type: integer
+        title:
+          type: string
+        url:
+          type: string
+          format: uri
+        severity:
+          type: string
 
     GrafanaAlertItem:
       type: object
