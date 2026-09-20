@@ -49,6 +49,7 @@ type Config struct {
 	BasePath           string
 	Keys               []ResolvedKey
 	AllowBotSecretAuth bool
+	AllowRequestTrace  bool
 	BotSignatures      map[string]string // signature -> bot name (multi-bot) or "" (single-bot)
 	BotNames           []string          // available bot names; if len > 1, bot is required in requests
 	SingleBotName      string            // name of the single bot (when not multi-bot); used to reject mismatched chat bindings

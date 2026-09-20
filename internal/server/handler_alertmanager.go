@@ -50,8 +50,15 @@ func (s *Server) handleAlertmanager(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	trace := s.newPayloadTrace(r)
+	body, err := readRawBody(r, trace, "alertmanager")
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "cannot read request body: "+err.Error())
+		return
+	}
+
 	var webhook AlertmanagerWebhook
-	if err := json.NewDecoder(r.Body).Decode(&webhook); err != nil {
+	if err := json.NewDecoder(bytes.NewReader(body)).Decode(&webhook); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
 		return
 	}
@@ -72,7 +79,7 @@ func (s *Server) handleAlertmanager(w http.ResponseWriter, r *http.Request) {
 	}
 
 	message := buf.String()
-	vlog.V3("alertmanager: rendered message:\n%s", message)
+	trace.renderedMessage("alertmanager", message)
 
 	// Determine status
 	status := s.resolveAlertStatus(webhook)

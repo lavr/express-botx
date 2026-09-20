@@ -2439,6 +2439,43 @@ unknown_top: true
 	}
 }
 
+func TestValidate_AllowRequestTraceIsKnown(t *testing.T) {
+	cases := []struct {
+		name  string
+		value string
+		want  bool
+	}{
+		{name: "omitted", value: "", want: false},
+		{name: "false", value: "  allow_request_trace: false\n", want: false},
+		{name: "true", value: "  allow_request_trace: true\n", want: true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			rawYAML := []byte(`
+bots:
+  main:
+    host: express.example.com
+    id: 00000000-0000-0000-0000-000000000001
+    token: static-token
+server:
+  listen: ":8080"
+` + tc.value)
+			var cfg Config
+			if err := yaml.Unmarshal(rawYAML, &cfg); err != nil {
+				t.Fatalf("unmarshal: %v", err)
+			}
+			if cfg.Server.AllowRequestTrace != tc.want {
+				t.Errorf("AllowRequestTrace = %v, want %v", cfg.Server.AllowRequestTrace, tc.want)
+			}
+			for _, r := range cfg.Validate(rawYAML) {
+				if strings.Contains(r.Message, "allow_request_trace") {
+					t.Errorf("documented key reported as unknown: [%v] %s: %s", r.Level, r.Path, r.Message)
+				}
+			}
+		})
+	}
+}
+
 func TestValidate_MissingRequiredFields(t *testing.T) {
 	rawYAML := []byte(`
 bots:
