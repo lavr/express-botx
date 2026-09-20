@@ -264,8 +264,15 @@ func (s *Server) handleGitlab(w http.ResponseWriter, r *http.Request) {
 	senderLabel := sender.Label // WithGitlab normalizes missing labels at construction
 	vlog.V1("gitlab: authenticated sender %s", senderLabel)
 
+	trace := s.newPayloadTrace(r)
+	body, err := readRawBody(r, trace, "gitlab")
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "cannot read request body: "+err.Error())
+		return
+	}
+
 	var raw map[string]any
-	if err := json.NewDecoder(r.Body).Decode(&raw); err != nil {
+	if err := json.NewDecoder(bytes.NewReader(body)).Decode(&raw); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
 		return
 	}
@@ -284,7 +291,7 @@ func (s *Server) handleGitlab(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "template error: "+err.Error())
 		return
 	}
-	vlog.V3("gitlab: rendered message:\n%s", message)
+	trace.renderedMessage("gitlab", message)
 
 	if strings.TrimSpace(message) == "" {
 		vlog.V2("gitlab: %s rendered empty message -> ignored", view.EventKey)

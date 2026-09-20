@@ -111,6 +111,7 @@ type ServerConfig struct {
 	BasePath           string                  `yaml:"base_path,omitempty"`
 	APIKeys            []APIKeyConfig          `yaml:"api_keys,omitempty"`
 	AllowBotSecretAuth bool                    `yaml:"allow_bot_secret_auth,omitempty"`
+	AllowRequestTrace  bool                    `yaml:"allow_request_trace,omitempty"`
 	Alertmanager       *AlertmanagerYAMLConfig `yaml:"alertmanager,omitempty"`
 	Grafana            *GrafanaYAMLConfig      `yaml:"grafana,omitempty"`
 	Gitlab             *GitlabYAMLConfig       `yaml:"gitlab,omitempty"`
@@ -1113,7 +1114,8 @@ var knownKeys = map[string]map[string]bool{
 	},
 	"server": {
 		"listen": true, "base_path": true, "api_keys": true, "allow_bot_secret_auth": true,
-		"alertmanager": true, "grafana": true, "gitlab": true, "callbacks": true, "docs": true, "external_url": true,
+		"allow_request_trace": true,
+		"alertmanager":        true, "grafana": true, "gitlab": true, "callbacks": true, "docs": true, "external_url": true,
 		"tls": true,
 	},
 	"server.tls": {

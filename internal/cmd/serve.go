@@ -179,6 +179,7 @@ Options:
 	if cfg.Server.Docs != nil && !*cfg.Server.Docs {
 		srvCfg.EnableDocs = false
 	}
+	srvCfg.AllowRequestTrace = cfg.Server.AllowRequestTrace
 	srvCfg.AppVersion = Version
 
 	// Default chat alias for /send when chat_id is omitted
@@ -971,6 +972,7 @@ func runServeEnqueue(flags config.Flags, listenFlag, apiKeyFlag, tlsCertFlag, tl
 	if cfg.Server.Docs != nil && !*cfg.Server.Docs {
 		srvCfg.EnableDocs = false
 	}
+	srvCfg.AllowRequestTrace = cfg.Server.AllowRequestTrace
 	srvCfg.AppVersion = Version
 
 	// Resolve API keys

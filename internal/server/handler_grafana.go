@@ -72,8 +72,15 @@ func (s *Server) handleGrafana(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	trace := s.newPayloadTrace(r)
+	body, err := readRawBody(r, trace, "grafana")
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "cannot read request body: "+err.Error())
+		return
+	}
+
 	var webhook GrafanaWebhook
-	if err := json.NewDecoder(r.Body).Decode(&webhook); err != nil {
+	if err := json.NewDecoder(bytes.NewReader(body)).Decode(&webhook); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid JSON: "+err.Error())
 		return
 	}
@@ -91,7 +98,7 @@ func (s *Server) handleGrafana(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "template error: "+err.Error())
 		return
 	}
-	vlog.V3("grafana: rendered message:\n%s", message)
+	trace.renderedMessage("grafana", message)
 
 	// Determine status
 	status := s.resolveGrafanaStatus(webhook)
