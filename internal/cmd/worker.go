@@ -121,6 +121,7 @@ Options:
 		w.startCatalogPublisher(ctx, cfg.Catalog.QueueName, cfg.Catalog.PublishInterval)
 	}
 
+	logDeliveryPolicy(w.cfg)
 	vlog.Info("worker: starting (retry=%d, backoff=%s, shutdown_timeout=%s)",
 		w.retryCount, w.retryBackoff, w.shutdownTimeout)
 
@@ -267,7 +268,8 @@ func (w *workerRunner) handleMessage(ctx context.Context, msg *queue.WorkMessage
 	}
 
 	// Build send request from work message
-	sr := buildSendRequestFromWork(msg)
+	maxLen, suffix := w.cfg.BotDeliveryPolicy(botName)
+	sr := buildSendRequestFromWork(msg, maxLen, suffix)
 
 	// Dry-run: skip authentication and sending
 	if w.dryRun {
@@ -397,17 +399,19 @@ func (w *workerRunner) publishResult(ctx context.Context, msg *queue.WorkMessage
 }
 
 // buildSendRequestFromWork converts a WorkMessage into a BotX API SendRequest.
-func buildSendRequestFromWork(msg *queue.WorkMessage) *botapi.SendRequest {
+func buildSendRequestFromWork(msg *queue.WorkMessage, maxLen int, suffix string) *botapi.SendRequest {
 	params := &botapi.SendParams{
-		ChatID:   msg.Routing.ChatID,
-		Message:  msg.Payload.Message,
-		Status:   msg.Payload.Status,
-		Metadata: msg.Payload.Metadata,
-		Mentions: msg.Payload.Mentions,
-		Silent:   msg.Payload.Opts.Silent,
-		Stealth:  msg.Payload.Opts.Stealth,
-		ForceDND: msg.Payload.Opts.ForceDND,
-		NoNotify: msg.Payload.Opts.NoNotify,
+		ChatID:           msg.Routing.ChatID,
+		Message:          msg.Payload.Message,
+		Status:           msg.Payload.Status,
+		Metadata:         msg.Payload.Metadata,
+		Mentions:         msg.Payload.Mentions,
+		Silent:           msg.Payload.Opts.Silent,
+		Stealth:          msg.Payload.Opts.Stealth,
+		ForceDND:         msg.Payload.Opts.ForceDND,
+		NoNotify:         msg.Payload.Opts.NoNotify,
+		MaxMessageLength: maxLen,
+		TruncateSuffix:   suffix,
 	}
 
 	if msg.Payload.File != nil {

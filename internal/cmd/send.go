@@ -284,17 +284,23 @@ Options:
 			results = append(results, sendCmdResult{Chat: chat, Error: eerr.Error()})
 			continue
 		}
+		// be.cfg is the config of the bot actually chosen for this chat;
+		// botName from resolveSendTarget is empty for a raw UUID and in
+		// single-bot mode, which would silently fall back to the defaults.
+		maxLen, truncSuffix := be.cfg.BotDeliveryPolicy(be.cfg.BotName)
 		sr := botapi.BuildSendRequest(&botapi.SendParams{
-			ChatID:   chatID,
-			Message:  be.message,
-			Status:   status,
-			File:     fileAttachment,
-			Metadata: meta,
-			Mentions: be.mentions,
-			Silent:   silent,
-			Stealth:  stealth,
-			ForceDND: forceDND,
-			NoNotify: noNotify,
+			ChatID:           chatID,
+			MaxMessageLength: maxLen,
+			TruncateSuffix:   truncSuffix,
+			Message:          be.message,
+			Status:           status,
+			File:             fileAttachment,
+			Metadata:         meta,
+			Mentions:         be.mentions,
+			Silent:           silent,
+			Stealth:          stealth,
+			ForceDND:         forceDND,
+			NoNotify:         noNotify,
 		})
 		syncID, serr := sendWithRefresh(be.client, be.cfg, be.cache, sr)
 		if serr != nil {
