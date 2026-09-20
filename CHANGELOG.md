@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.39.0
 
 ### Added: приёмник постов Mattermost Bot API (`/api/v1/mattermost/api/v4/posts`)
 
@@ -27,6 +27,8 @@ Mattermost Bot API, поэтому такой источник настраив�
 идентифицирует чат; BotX подтверждает правку асинхронно и не валидирует
 `sync_id`; статус сообщения видимого эффекта не даёт, severity показывается
 эмодзи.
+
+## 0.38.0
 
 ### Added: приёмник вебхуков IncidentRelay — `/api/v1/incidentrelay`
 
