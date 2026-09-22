@@ -124,8 +124,10 @@ paths:
         At least one of `message` or `file` is required. `text` is accepted as
         an alias of `message` and is used only when `message` is empty.
 
-        When `chat_id` is omitted and the API key is scoped to exactly one chat,
-        the message goes to that chat; otherwise the default chat is used.
+        When `chat_id` is omitted, the default chat is used if the API key may
+        address it; otherwise a key scoped to exactly one chat sends to that
+        chat as configured (an alias keeps its bot binding). In async mode the
+        default chat, when set, always wins.
 
         **Multi-chat fan-out.** `chat_id` may list several chats separated by
         commas (`chat_id=a,b,c`). The message is delivered best-effort to every

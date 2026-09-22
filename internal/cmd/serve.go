@@ -506,7 +506,11 @@ func resolveAPIKeys(keys []config.APIKeyConfig, chats map[string]config.ChatConf
 		if k.AllowQueryAuth {
 			vlog.Info("config: key %q may authenticate through the %s query parameter", k.Name, server.QueryKeyParam)
 		}
-		resolved = append(resolved, server.ResolvedKey{Name: k.Name, Key: val, Chats: scope, AllowQueryAuth: k.AllowQueryAuth})
+		defaultChat := ""
+		if len(k.Chats) == 1 {
+			defaultChat = k.Chats[0]
+		}
+		resolved = append(resolved, server.ResolvedKey{Name: k.Name, Key: val, Chats: scope, DefaultChat: defaultChat, AllowQueryAuth: k.AllowQueryAuth})
 	}
 	return resolved, nil
 }

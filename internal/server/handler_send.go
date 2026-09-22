@@ -96,11 +96,8 @@ func (s *Server) handleSend(w http.ResponseWriter, r *http.Request) {
 	payload.Text = ""
 
 	if payload.ChatID == "" {
-		if scope := keyScope(r.Context()); len(scope) == 1 {
-			payload.ChatID = scope[0]
-		} else if s.cfg.DefaultChatAlias != "" {
-			payload.ChatID = s.cfg.DefaultChatAlias
-		} else {
+		payload.ChatID = s.defaultSendChat(r.Context())
+		if payload.ChatID == "" {
 			writeError(w, http.StatusBadRequest, "chat_id is required")
 			return
 		}

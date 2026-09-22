@@ -41,6 +41,7 @@ type ResolvedKey struct {
 	// unrestricted. Aliases are resolved once at startup so request handling
 	// compares UUID against UUID and never re-reads the chat catalog.
 	Chats          []string
+	DefaultChat    string
 	AllowQueryAuth bool
 }
 

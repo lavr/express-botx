@@ -409,7 +409,7 @@ func TestKeyScope_FanoutCannotSmuggleForeignChat(t *testing.T) {
 }
 
 func TestKeyScope_SendDefaultsToSoleChat(t *testing.T) {
-	sole := ResolvedKey{Name: "nxs-anomaly", Key: "narrow", Chats: []string{ownUUID}, AllowQueryAuth: true}
+	sole := ResolvedKey{Name: "nxs-anomaly", Key: "narrow", Chats: []string{ownUUID}, DefaultChat: ownUUID, AllowQueryAuth: true}
 	pair := ResolvedKey{Name: "pair", Key: "pair", Chats: []string{ownUUID, otherUUID}, AllowQueryAuth: true}
 	open := ResolvedKey{Name: "any-app", Key: "open", AllowQueryAuth: true}
 
@@ -454,5 +454,150 @@ func TestKeyScope_SendDefaultsToSoleChat(t *testing.T) {
 				t.Errorf("delivered to %v, want %v", delivered, tc.wantDelivered)
 			}
 		})
+	}
+}
+
+func TestKeyScope_SoleChatKeepsBotBinding(t *testing.T) {
+	byAlias := ResolvedKey{Name: "by-alias", Key: "alias", Chats: []string{ownUUID}, DefaultChat: "own-chat"}
+	byUUID := ResolvedKey{Name: "by-uuid", Key: "uuid", Chats: []string{ownUUID}, DefaultChat: ownUUID}
+
+	tests := []struct {
+		name          string
+		asyncMode     bool
+		defaultChat   string
+		key           string
+		wantCode      int
+		wantDelivered []string
+	}{
+		{"alias-scoped key keeps the alias bot", false, "", "alias", 200, []string{ownUUID + "/bot-a"}},
+		{"global default inside the scope is kept", false, "own-chat", "uuid", 200, []string{ownUUID + "/bot-a"}},
+		{"global default outside the scope yields to the key chat", false, "other-chat", "alias", 200, []string{ownUUID + "/bot-a"}},
+		{"async keeps the global default", true, "own-chat", "uuid", 202, []string{"own-chat/"}},
+		{"async alias-scoped key sends its alias", true, "", "alias", 202, []string{"own-chat/"}},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var delivered []string
+			cfg := Config{
+				Listen: ":0", BasePath: "/api/v1", Keys: []ResolvedKey{byAlias, byUUID},
+				BotNames: []string{"bot-a", "bot-b"}, DefaultChatAlias: tc.defaultChat,
+				AsyncMode: tc.asyncMode, DefaultRoutingMode: "catalog",
+			}
+			sendFn := func(ctx context.Context, p *SendPayload) (string, error) {
+				delivered = append(delivered, p.ChatID+"/"+p.Bot)
+				return "sync-id", nil
+			}
+			routes := map[string]ChatResolveResult{
+				"own-chat":   {ChatID: ownUUID, Bot: "bot-a"},
+				"other-chat": {ChatID: otherUUID, Bot: "bot-b"},
+			}
+			chatResolver := func(chatID string) (ChatResolveResult, error) {
+				if tc.asyncMode {
+					return ChatResolveResult{ChatID: chatID}, nil
+				}
+				if r, ok := routes[chatID]; ok {
+					return r, nil
+				}
+				return ChatResolveResult{ChatID: chatID}, nil
+			}
+			srv := New(cfg, sendFn, chatResolver)
+
+			w := doRequest(srv, "POST", "/api/v1/send", strings.NewReader(`{"text":"hi"}`), map[string]string{
+				"Content-Type": "application/json",
+				"X-API-Key":    tc.key,
+			})
+			if w.Code != tc.wantCode {
+				t.Fatalf("status = %d, want %d (body: %s)", w.Code, tc.wantCode, w.Body.String())
+			}
+			if fmt.Sprint(delivered) != fmt.Sprint(tc.wantDelivered) {
+				t.Errorf("delivered to %v, want %v", delivered, tc.wantDelivered)
+			}
+		})
+	}
+}
+
+func TestKeyScope_AsyncSoleChatRefusedOutsideScope(t *testing.T) {
+	const foreignUUID = "a55cdddb-a5b2-5901-9b8b-f4bfc522b448"
+	catalog := map[string]string{"own-chat": foreignUUID, "other-chat": otherUUID}
+
+	tests := []struct {
+		name        string
+		defaultChat string
+		key         ResolvedKey
+	}{
+		{"global default outside the scope", "other-chat", ResolvedKey{Name: "k", Key: "narrow", Chats: []string{ownUUID}, DefaultChat: ownUUID}},
+		{"own alias resolved by the catalog to a foreign chat", "", ResolvedKey{Name: "k", Key: "narrow", Chats: []string{ownUUID}, DefaultChat: "own-chat"}},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var enqueued []string
+			sendFn := func(ctx context.Context, p *SendPayload) (string, error) {
+				chatID := p.ChatID
+				if id, ok := catalog[chatID]; ok {
+					chatID = id
+				}
+				if !ChatAllowed(ctx, chatID) {
+					return "", ErrChatNotAllowed
+				}
+				enqueued = append(enqueued, chatID)
+				return "req-id", nil
+			}
+			passthrough := func(chatID string) (ChatResolveResult, error) {
+				return ChatResolveResult{ChatID: chatID}, nil
+			}
+			cfg := Config{
+				Listen: ":0", BasePath: "/api/v1", Keys: []ResolvedKey{tc.key},
+				AsyncMode: true, DefaultRoutingMode: "catalog", DefaultChatAlias: tc.defaultChat,
+			}
+			srv := New(cfg, sendFn, passthrough)
+
+			w := doRequest(srv, "POST", "/api/v1/send", strings.NewReader(`{"text":"hi","bot":"bot-a"}`), map[string]string{
+				"Content-Type": "application/json",
+				"X-API-Key":    "narrow",
+			})
+			if w.Code != 403 {
+				t.Errorf("status = %d, want 403 (body: %s)", w.Code, w.Body.String())
+			}
+			if len(enqueued) != 0 {
+				t.Errorf("enqueued to %v despite the scope", enqueued)
+			}
+		})
+	}
+}
+
+func TestKeyScope_SyncDefaultAliasKeepsItsBot(t *testing.T) {
+	key := ResolvedKey{Name: "k", Key: "narrow", Chats: []string{ownUUID}, DefaultChat: "own-chat-b"}
+	var delivered []string
+	cfg := Config{
+		Listen: ":0", BasePath: "/api/v1", Keys: []ResolvedKey{key},
+		BotNames: []string{"bot-a", "bot-b"}, DefaultChatAlias: "own-chat-a",
+	}
+	sendFn := func(ctx context.Context, p *SendPayload) (string, error) {
+		delivered = append(delivered, p.ChatID+"/"+p.Bot)
+		return "sync-id", nil
+	}
+	routes := map[string]ChatResolveResult{
+		"own-chat-a": {ChatID: ownUUID, Bot: "bot-a"},
+		"own-chat-b": {ChatID: ownUUID, Bot: "bot-b"},
+	}
+	chatResolver := func(chatID string) (ChatResolveResult, error) {
+		if r, ok := routes[chatID]; ok {
+			return r, nil
+		}
+		return ChatResolveResult{ChatID: chatID}, nil
+	}
+	srv := New(cfg, sendFn, chatResolver)
+
+	w := doRequest(srv, "POST", "/api/v1/send", strings.NewReader(`{"text":"hi"}`), map[string]string{
+		"Content-Type": "application/json",
+		"X-API-Key":    "narrow",
+	})
+	if w.Code != 200 {
+		t.Fatalf("status = %d, want 200 (body: %s)", w.Code, w.Body.String())
+	}
+	if want := []string{ownUUID + "/bot-a"}; fmt.Sprint(delivered) != fmt.Sprint(want) {
+		t.Errorf("delivered to %v, want %v", delivered, want)
 	}
 }

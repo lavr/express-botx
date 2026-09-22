@@ -37,6 +37,34 @@ func TestResolveAPIKeys_AliasResolvedToUUID(t *testing.T) {
 	}
 }
 
+func TestResolveAPIKeys_DefaultChat(t *testing.T) {
+	chats := map[string]config.ChatConfig{
+		"known": {ID: "bcb715a2-e8d3-57a8-ab3b-6a14c044dd22", Bot: "bot-a"},
+		"other": {ID: "7ee8aaa9-c6cb-5ee6-8445-7d654819b285"},
+	}
+	tests := []struct {
+		name  string
+		chats []string
+		want  string
+	}{
+		{"unscoped key has none", nil, ""},
+		{"sole alias kept as written", []string{"known"}, "known"},
+		{"sole uuid kept as written", []string{"7ee8aaa9-c6cb-5ee6-8445-7d654819b285"}, "7ee8aaa9-c6cb-5ee6-8445-7d654819b285"},
+		{"several chats have none", []string{"known", "other"}, ""},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			keys, err := resolveAPIKeys([]config.APIKeyConfig{{Name: "k", Key: "v", Chats: tt.chats}}, chats)
+			if err != nil {
+				t.Fatalf("resolve: %v", err)
+			}
+			if got := keys[0].DefaultChat; got != tt.want {
+				t.Errorf("DefaultChat = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
 func TestResolveAPIKeys_Duplicates(t *testing.T) {
 	chats := map[string]config.ChatConfig{}
 

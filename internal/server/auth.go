@@ -16,6 +16,7 @@ const (
 	authBotKey            // bot name bound by X-Bot-Signature auth
 	keyScopeKey           // chat scope of the API key that authenticated the request
 	queryKeyCtxKey        // API key lifted out of the query string before logging
+	keyDefaultChatKey
 )
 
 func withQueryKey(ctx context.Context, key string) context.Context {
@@ -179,6 +180,30 @@ func (s *Server) deliveryError(ctx context.Context, stage string, err error) str
 	return stage + ": " + err.Error()
 }
 
+func keyDefaultChat(ctx context.Context) string {
+	if v, ok := ctx.Value(keyDefaultChatKey).(string); ok {
+		return v
+	}
+	return ""
+}
+
+func (s *Server) defaultSendChat(ctx context.Context) string {
+	own := keyDefaultChat(ctx)
+	if own == "" {
+		return s.cfg.DefaultChatAlias
+	}
+	if s.cfg.DefaultChatAlias == "" {
+		return own
+	}
+	if s.cfg.AsyncMode {
+		return s.cfg.DefaultChatAlias
+	}
+	if chat, err := s.chats(s.cfg.DefaultChatAlias); err == nil && ChatAllowed(ctx, chat.ChatID) {
+		return s.cfg.DefaultChatAlias
+	}
+	return own
+}
+
 func (s *Server) authMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// 1. Try API key (Bearer or X-API-Key)
@@ -188,6 +213,9 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 				ctx := context.WithValue(r.Context(), keyNameKey, rk.Name)
 				if len(rk.Chats) > 0 {
 					ctx = context.WithValue(ctx, keyScopeKey, rk.Chats)
+				}
+				if rk.DefaultChat != "" {
+					ctx = context.WithValue(ctx, keyDefaultChatKey, rk.DefaultChat)
 				}
 				next.ServeHTTP(w, r.WithContext(ctx))
 				return
