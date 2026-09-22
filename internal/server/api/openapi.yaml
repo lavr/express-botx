@@ -121,7 +121,11 @@ paths:
       description: |
         Send a text message and/or file to one or more eXpress chats.
         Supports JSON and multipart/form-data content types.
-        At least one of `message` or `file` is required.
+        At least one of `message` or `file` is required. `text` is accepted as
+        an alias of `message` and is used only when `message` is empty.
+
+        When `chat_id` is omitted and the API key is scoped to exactly one chat,
+        the message goes to that chat; otherwise the default chat is used.
 
         **Multi-chat fan-out.** `chat_id` may list several chats separated by
         commas (`chat_id=a,b,c`). The message is delivered best-effort to every
@@ -1142,12 +1146,15 @@ components:
       properties:
         chat_id:
           type: string
-          description: Target chat UUID or alias (optional if default chat configured)
+          description: Target chat UUID or alias (optional if the key is scoped to one chat or a default chat is configured)
           example: "1a2b3c4d-5e6f-7890-abcd-ef1234567890"
         message:
           type: string
           description: Message text
           example: "Deploy completed"
+        text:
+          type: string
+          description: Alias of `message` for senders that post `{"text":"..."}`; used only when `message` is empty
         file:
           $ref: "#/components/schemas/FilePayload"
         status:

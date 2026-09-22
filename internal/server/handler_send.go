@@ -27,6 +27,7 @@ type SendPayload struct {
 	Bot         string          `json:"bot,omitempty"`
 	ChatID      string          `json:"chat_id"`
 	Message     string          `json:"message"`
+	Text        string          `json:"text,omitempty"`
 	File        *FilePayload    `json:"file,omitempty"`
 	Status      string          `json:"status"`
 	Opts        *OptsPayload    `json:"opts,omitempty"`
@@ -89,8 +90,15 @@ func (s *Server) handleSend(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if payload.Message == "" {
+		payload.Message = payload.Text
+	}
+	payload.Text = ""
+
 	if payload.ChatID == "" {
-		if s.cfg.DefaultChatAlias != "" {
+		if scope := keyScope(r.Context()); len(scope) == 1 {
+			payload.ChatID = scope[0]
+		} else if s.cfg.DefaultChatAlias != "" {
 			payload.ChatID = s.cfg.DefaultChatAlias
 		} else {
 			writeError(w, http.StatusBadRequest, "chat_id is required")
@@ -324,6 +332,7 @@ func parseMultipart(r *http.Request, p *SendPayload) error {
 	p.Bot = r.FormValue("bot")
 	p.ChatID = r.FormValue("chat_id")
 	p.Message = r.FormValue("message")
+	p.Text = r.FormValue("text")
 	p.Status = r.FormValue("status")
 	p.RoutingMode = r.FormValue("routing_mode")
 	p.BotID = r.FormValue("bot_id")

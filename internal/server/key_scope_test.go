@@ -407,3 +407,52 @@ func TestKeyScope_FanoutCannotSmuggleForeignChat(t *testing.T) {
 		}
 	})
 }
+
+func TestKeyScope_SendDefaultsToSoleChat(t *testing.T) {
+	sole := ResolvedKey{Name: "nxs-anomaly", Key: "narrow", Chats: []string{ownUUID}, AllowQueryAuth: true}
+	pair := ResolvedKey{Name: "pair", Key: "pair", Chats: []string{ownUUID, otherUUID}, AllowQueryAuth: true}
+	open := ResolvedKey{Name: "any-app", Key: "open", AllowQueryAuth: true}
+
+	tests := []struct {
+		name          string
+		defaultChat   string
+		target        string
+		body          string
+		wantCode      int
+		wantDelivered []string
+	}{
+		{"sole-chat key without chat_id goes to its chat", "", "/api/v1/send?api_key=narrow", `{"text":"hi"}`, 200, []string{ownUUID}},
+		{"sole-chat key ignores chat_id in the query", "", "/api/v1/send?api_key=narrow&chat_id=" + otherUUID, `{"text":"hi"}`, 200, []string{ownUUID}},
+		{"sole-chat key wins over the global default", "other-chat", "/api/v1/send?api_key=narrow", `{"text":"hi"}`, 200, []string{ownUUID}},
+		{"sole-chat key still refused a foreign chat in the body", "", "/api/v1/send?api_key=narrow", `{"chat_id":"` + otherUUID + `","text":"hi"}`, 403, nil},
+		{"multi-chat key without chat_id needs one", "", "/api/v1/send?api_key=pair", `{"text":"hi"}`, 400, nil},
+		{"unscoped key without chat_id needs one", "", "/api/v1/send?api_key=open", `{"text":"hi"}`, 400, nil},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			var delivered []string
+			cfg := Config{Listen: ":0", BasePath: "/api/v1", Keys: []ResolvedKey{sole, pair, open}, DefaultChatAlias: tc.defaultChat}
+			sendFn := func(ctx context.Context, p *SendPayload) (string, error) {
+				delivered = append(delivered, p.ChatID)
+				return "sync-id", nil
+			}
+			aliases := map[string]string{"own-chat": ownUUID, "other-chat": otherUUID}
+			chatResolver := func(chatID string) (ChatResolveResult, error) {
+				if id, ok := aliases[chatID]; ok {
+					return ChatResolveResult{ChatID: id}, nil
+				}
+				return ChatResolveResult{ChatID: chatID}, nil
+			}
+			srv := New(cfg, sendFn, chatResolver)
+
+			w := doRequest(srv, "POST", tc.target, strings.NewReader(tc.body), map[string]string{"Content-Type": "application/json"})
+			if w.Code != tc.wantCode {
+				t.Fatalf("status = %d, want %d (body: %s)", w.Code, tc.wantCode, w.Body.String())
+			}
+			if fmt.Sprint(delivered) != fmt.Sprint(tc.wantDelivered) {
+				t.Errorf("delivered to %v, want %v", delivered, tc.wantDelivered)
+			}
+		})
+	}
+}

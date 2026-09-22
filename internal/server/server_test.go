@@ -283,6 +283,47 @@ func TestSend_JSON_TextOnly(t *testing.T) {
 	}
 }
 
+func TestSend_TextField(t *testing.T) {
+	tests := []struct {
+		name        string
+		contentType string
+		body        string
+		wantCode    int
+		wantMessage string
+	}{
+		{"text used when message is absent", "application/json", `{"chat_id":"chat-1","text":"from text"}`, 200, "from text"},
+		{"text used when message is empty", "application/json", `{"chat_id":"chat-1","message":"","text":"from text"}`, 200, "from text"},
+		{"message wins over text", "application/json", `{"chat_id":"chat-1","message":"from message","text":"from text"}`, 200, "from message"},
+		{"empty text and message refused", "application/json", `{"chat_id":"chat-1","text":""}`, 400, ""},
+		{"multipart text field", "multipart/form-data; boundary=b", "--b\r\nContent-Disposition: form-data; name=\"chat_id\"\r\n\r\nchat-1\r\n--b\r\nContent-Disposition: form-data; name=\"text\"\r\n\r\nfrom text\r\n--b--\r\n", 200, "from text"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var got string
+			cfg := Config{Listen: ":0", BasePath: "/api/v1", Keys: []ResolvedKey{{Name: "t", Key: "k"}}}
+			sendFn := func(ctx context.Context, p *SendPayload) (string, error) {
+				got = p.Message
+				return "test-sync-id", nil
+			}
+			chatResolver := func(chatID string) (ChatResolveResult, error) {
+				return ChatResolveResult{ChatID: chatID}, nil
+			}
+			srv := New(cfg, sendFn, chatResolver)
+			w := doRequest(srv, "POST", "/api/v1/send", strings.NewReader(tt.body), map[string]string{
+				"X-API-Key":    "k",
+				"Content-Type": tt.contentType,
+			})
+			if w.Code != tt.wantCode {
+				t.Fatalf("status = %d, want %d (body: %s)", w.Code, tt.wantCode, w.Body.String())
+			}
+			if got != tt.wantMessage {
+				t.Errorf("delivered message = %q, want %q", got, tt.wantMessage)
+			}
+		})
+	}
+}
+
 func TestSend_JSON_WithFile(t *testing.T) {
 	srv := newTestServer([]ResolvedKey{{Name: "t", Key: "k"}})
 	body := `{"chat_id":"chat-1","message":"see attached","file":{"name":"test.txt","data":"aGVsbG8="}}`
