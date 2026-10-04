@@ -12,6 +12,7 @@ import (
 	"mime/multipart"
 	"net/http"
 	"regexp"
+	"strings"
 	"time"
 
 	vlog "github.com/lavr/express-botx/internal/log"
@@ -94,6 +95,23 @@ func (s *Server) handleSend(w http.ResponseWriter, r *http.Request) {
 		payload.Message = payload.Text
 	}
 	payload.Text = ""
+
+	// chat_id may also come from the query, for callers that cannot put it in
+	// the body (a webhook with a fixed {"text": ...} payload). When both are
+	// set they must name the same chats.
+	if q := r.URL.Query(); q.Has("chat_id") {
+		fromQuery := parseChatIDs(q.Get("chat_id"))
+		if len(fromQuery) == 0 {
+			writeError(w, http.StatusBadRequest, "chat_id is empty: provide at least one chat, or omit chat_id to use the default")
+			return
+		}
+		if payload.ChatID == "" {
+			payload.ChatID = strings.Join(fromQuery, ",")
+		} else if !sameChats(parseChatIDs(payload.ChatID), fromQuery) {
+			writeError(w, http.StatusBadRequest, "chat_id in the query does not match chat_id in the body")
+			return
+		}
+	}
 
 	if payload.ChatID == "" {
 		payload.ChatID = s.defaultSendChat(r.Context())
@@ -327,7 +345,8 @@ func parseMultipart(r *http.Request, p *SendPayload) error {
 	}
 
 	p.Bot = r.FormValue("bot")
-	p.ChatID = r.FormValue("chat_id")
+	// PostFormValue: FormValue would prefer a query chat_id over the body field.
+	p.ChatID = r.PostFormValue("chat_id")
 	p.Message = r.FormValue("message")
 	p.Text = r.FormValue("text")
 	p.Status = r.FormValue("status")
