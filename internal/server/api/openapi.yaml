@@ -129,6 +129,13 @@ paths:
         chat as configured (an alias keeps its bot binding). In async mode the
         default chat, when set, always wins.
 
+        **`chat_id` in the query.** Callers that cannot put `chat_id` in the body
+        may pass `?chat_id=` instead. Precedence: body `chat_id` → query
+        `chat_id` → default chat. When both are set they must name the same chats
+        (compared literally, order ignored), otherwise `400`. An empty
+        `?chat_id=` is `400`. The key scope applies to a query chat exactly as to
+        a body chat (`403` outside the scope).
+
         **Multi-chat fan-out.** `chat_id` may list several chats separated by
         commas (`chat_id=a,b,c`). The message is delivered best-effort to every
         listed chat; duplicates are collapsed, order is preserved. Chat and bot
@@ -165,6 +172,13 @@ paths:
         On parse or lookup errors, the token remains as literal text and the message is still sent.
         Use `?no_parse=true` to disable inline parsing entirely.
       parameters:
+        - name: chat_id
+          in: query
+          description: |
+            Target chat UUID or alias; comma-separated for multi-chat fan-out.
+            Used when the body has no `chat_id`; if both are set they must match.
+          schema:
+            type: string
         - name: no_parse
           in: query
           description: |

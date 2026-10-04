@@ -422,7 +422,8 @@ func TestKeyScope_SendDefaultsToSoleChat(t *testing.T) {
 		wantDelivered []string
 	}{
 		{"sole-chat key without chat_id goes to its chat", "", "/api/v1/send?api_key=narrow", `{"text":"hi"}`, 200, []string{ownUUID}},
-		{"sole-chat key ignores chat_id in the query", "", "/api/v1/send?api_key=narrow&chat_id=" + otherUUID, `{"text":"hi"}`, 200, []string{ownUUID}},
+		{"sole-chat key refused a foreign chat in the query", "", "/api/v1/send?api_key=narrow&chat_id=" + otherUUID, `{"text":"hi"}`, 403, nil},
+		{"sole-chat key accepts its own chat in the query", "", "/api/v1/send?api_key=narrow&chat_id=" + ownUUID, `{"text":"hi"}`, 200, []string{ownUUID}},
 		{"sole-chat key wins over the global default", "other-chat", "/api/v1/send?api_key=narrow", `{"text":"hi"}`, 200, []string{ownUUID}},
 		{"sole-chat key still refused a foreign chat in the body", "", "/api/v1/send?api_key=narrow", `{"chat_id":"` + otherUUID + `","text":"hi"}`, 403, nil},
 		{"multi-chat key without chat_id needs one", "", "/api/v1/send?api_key=pair", `{"text":"hi"}`, 400, nil},

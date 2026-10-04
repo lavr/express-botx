@@ -347,13 +347,43 @@ HTTP payload расширяется полями `routing_mode` и `bot_id` дл
 
 | Поле | Тип | Описание |
 |------|-----|----------|
-| `chat_id` | string | UUID или алиас чата (обязательно) |
+| `chat_id` | string | UUID или алиас чата, через запятую — несколько. Можно передать в query `?chat_id=` (см. ниже); без него — чат по умолчанию |
 | `message` | string | Текст сообщения |
 | `file` | object | Вложение: `{"name": "...", "data": "base64..."}` |
 | `status` | string | `ok` или `error` (по умолчанию: `ok`) |
 | `metadata` | JSON | Произвольный JSON для `notification.metadata` |
 | `mentions` | JSON array | Массив mentions в wire-формате BotX API |
 | `opts` | object | Опции доставки: `silent`, `stealth`, `force_dnd`, `no_notify` |
+
+`text` принимается как синоним `message` и используется, только когда `message` пустое.
+
+### `chat_id` в query
+
+Если отправитель не может положить `chat_id` в тело, его можно передать в URL:
+`POST /api/v1/send?chat_id=<uuid|алиас>`. Порядок выбора чата: `chat_id` из тела →
+`chat_id` из query → чат по умолчанию.
+
+- Если `chat_id` задан и в теле, и в query, оба должны называть одни и те же чаты
+  (сравнение буквальное, порядок не важен; алиас и UUID одного чата считаются
+  разными значениями). Иначе `400`.
+- Пустой `?chat_id=` (или `?chat_id=,,`) — `400`, а не откат на чат по умолчанию,
+  как у вебхуков `/grafana` и `/alertmanager`.
+- Список через запятую (`?chat_id=a,b`) работает так же, как в теле: fan-out.
+  Повторённый параметр (`?chat_id=a&chat_id=b`) не объединяется: берётся первый,
+  как у вебхуков.
+- Скоуп ключа применяется так же, как к чату из тела: чат вне `chats` ключа даёт `403`.
+
+```bash
+curl -X POST 'http://localhost:8080/api/v1/send?chat_id=deploy' \
+    -H "Authorization: Bearer <api-key>" \
+    -H "Content-Type: application/json" \
+    -d '{"text": "Deploy completed"}'
+
+curl -X POST 'http://localhost:8080/api/v1/send?chat_id=deploy' \
+    -H "Authorization: Bearer <api-key>" \
+    -F text="See attached report" \
+    -F file=@report.txt
+```
 
 Пример с mentions через HTTP API:
 

@@ -67,6 +67,24 @@ func parseChatIDs(raw string) []string {
 	return out
 }
 
+// sameChats reports whether two parsed chat lists name the same chats,
+// regardless of order.
+func sameChats(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	set := make(map[string]struct{}, len(a))
+	for _, c := range a {
+		set[c] = struct{}{}
+	}
+	for _, c := range b {
+		if _, ok := set[c]; !ok {
+			return false
+		}
+	}
+	return true
+}
+
 // fanout delivers to each target best-effort, calling deliver per chat and
 // collecting the successful results and per-chat errors independently. Order is
 // preserved: results and errors appear in the target order they were produced.
