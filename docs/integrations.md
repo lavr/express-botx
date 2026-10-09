@@ -102,6 +102,45 @@ server:
 - Подробно о полях и порядке выбора чата —
   [docs/commands.md](commands.md#chat_id-в-query).
 
+## Диагностика: сообщение не дошло
+
+Отправитель пишет «отправлено», а в чате пусто. Без `-v` в логе шлюза
+(`docker logs`, `journalctl`) на каждый запрос есть:
+
+- строка access-лога в JSON: метод, путь, HTTP-статус, `request_id`;
+- по строке на каждый чат: `delivered` с `sync_id`, `queued` (async) или
+  `failed` с причиной;
+- `partial delivery`, если часть чатов не получила сообщение, а ответ всё равно
+  успешный.
+
+```
+{"level":"INFO","msg":"HTTP/1.1","method":"POST","path":"/api/v1/send","status":200,"request_id":"botx-7f3a/Xy9-000042",...}
+send: chat "infra-alerts" delivered [key: zabbix, request_id: botx-7f3a/Xy9-000042, sync_id: 4f0c...]
+send: chat "dba" failed [key: zabbix, request_id: botx-7f3a/Xy9-000042]: send failed: HTTP 403: ...
+send: partial delivery: 1 of 2 chats failed, responding with success [key: zabbix, request_id: botx-7f3a/Xy9-000042]
+```
+
+Строки одного запроса связываются по `request_id`. Порядок разбора:
+
+| Что в логе | Что это значит |
+|---|---|
+| Нет строки access-лога | Запрос до этого процесса не дошёл: другой адрес, порт или `base_path`, прокси, файрвол. Проверьте `curl` с машины отправителя на тот же URL |
+| `status` 401 / 403 | Ключ неверный или чат вне `chats` ключа |
+| `status` 400 / 415 | Не то тело или `Content-Type`; тело покажет `?trace=1` (ниже) |
+| `failed` с причиной | BotX отказал или чат/бот не разрешился, причина указана в строке |
+| `delivered` с `sync_id`, но в чате пусто | BotX принял сообщение. Проверьте, что бот состоит в чате и что `chat_id` тот самый |
+
+`200` с `partial delivery` чаще всего и создаёт ложную уверенность в успехе:
+HTTP-статус успешный, а ошибка лежит в `errors[]` тела ответа. Отправитель
+должен проверять и статус, и `errors` (пример в разделе [Zabbix](#zabbix)).
+
+Больше подробностей дают флаг `-v`/`-vv`/`-vvv` или переменная `EXPRESS_BOTX_VERBOSE=1..3`
+(удобно в Docker: команду запуска менять не нужно):
+
+- `1`: итог запроса с временем, коды ответа BotX и тело ошибки BotX;
+- `2`: URL запросов к BotX;
+- `3`: тела запросов к BotX и входящих вебхуков.
+
 ## Отладка: сырой payload в логе (`?trace=1`)
 
 `/api/v1/alertmanager`, `/api/v1/grafana` и `/api/v1/gitlab` умеют показать, что
@@ -481,6 +520,59 @@ curl -X POST 'http://localhost:8080/api/v1/incidentrelay?api_key=<api-key>' \
     "team": "sre"
   }'
 ```
+
+---
+
+## Zabbix
+
+Отдельного приёмника нет: Zabbix шлёт в `/api/v1/send` из своего типа оповещений
+Webhook. Zabbix считает оповещение отправленным, если скрипт не бросил
+исключение, поэтому скрипт обязан сам проверять HTTP-статус и `errors[]` ответа.
+Иначе `502` или частичная неудача покажутся в Zabbix успехом.
+
+Новый способ оповещения (Alerts → Media types → Create media type), тип `Webhook`.
+Параметры:
+
+| Имя | Значение |
+|---|---|
+| `url` | `http://express-botx:8080/api/v1/send` |
+| `api_key` | API-ключ шлюза |
+| `chat_id` | `{ALERT.SENDTO}`: UUID или алиас чата из поля «Отправлять на» пользователя |
+| `subject` | `{ALERT.SUBJECT}` |
+| `message` | `{ALERT.MESSAGE}` |
+| `event_value` | `{EVENT.VALUE}`: `1` проблема, `0` восстановление |
+
+Скрипт:
+
+```javascript
+var params = JSON.parse(value);
+
+var req = new HttpRequest();
+req.addHeader('Content-Type: application/json');
+req.addHeader('X-API-Key: ' + params.api_key);
+
+var resp = req.post(params.url, JSON.stringify({
+    chat_id: params.chat_id,
+    message: params.subject + '\n' + params.message,
+    status: params.event_value === '0' ? 'ok' : 'error'
+}));
+var code = req.getStatus();
+Zabbix.log(4, '[express-botx] HTTP ' + code + ': ' + resp);
+
+if (code !== 200 && code !== 202) {
+    throw 'express-botx: HTTP ' + code + ': ' + resp;
+}
+var data = JSON.parse(resp);
+if (data.errors && data.errors.length > 0) {
+    throw 'express-botx: not delivered: ' + JSON.stringify(data.errors);
+}
+return 'OK';
+```
+
+`HttpRequest` есть в Zabbix 5.4 и новее; в более старых версиях тот же объект
+называется `CurlHttpRequest`. Брошенная строка видна в журнале действий Zabbix
+(Reports → Action log) как текст ошибки; ту же причину шлюз пишет в свой лог
+строкой `failed` ([Диагностика](#диагностика-сообщение-не-дошло)).
 
 ---
 

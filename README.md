@@ -266,7 +266,7 @@ helm install express-botx oci://ghcr.io/lavr/charts/express-botx -f values.yaml
 | [docs/install.md](docs/install.md) | Варианты установки |
 | [docs/commands.md](docs/commands.md) | Все команды и флаги |
 | [docs/configuration.md](docs/configuration.md) | Полный референс конфигурации |
-| [docs/integrations.md](docs/integrations.md) | Alertmanager, Grafana, GitLab, примеры |
+| [docs/integrations.md](docs/integrations.md) | Alertmanager, Grafana, GitLab, Zabbix, диагностика доставки |
 | [docs/deployment.md](docs/deployment.md) | Docker, Helm, systemd, docker-compose |
 | [docs/async-queues.md](docs/async-queues.md) | RabbitMQ, Kafka, архитектура очередей |
 | [CHANGELOG.md](CHANGELOG.md) | История изменений (в т.ч. ломающие) |
