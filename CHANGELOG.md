@@ -1,5 +1,25 @@
 # Changelog
 
+## 0.42.0
+
+### Changed: итог доставки по каждому чату пишется в лог без `-v`
+
+Раньше без `-v` в логе шлюза были только строки старта и access-лог, и понять,
+куда ушло сообщение и почему не дошло, было нельзя. Теперь `/send`,
+`/alertmanager`, `/grafana`, `/gitlab`, `/incidentrelay` и мост Mattermost
+пишут по строке на каждый чат:
+
+- `delivered` с `sync_id`, `queued` в async-режиме или `failed` с причиной;
+- в строке ключ и `request_id` из access-лога.
+
+При частичной неудаче ответ остаётся `200`/`202`, а в лог добавляется
+`send: partial delivery: N of M chats failed, responding with success`.
+
+### Docs: диагностика и Zabbix
+
+В `docs/integrations.md` добавлены раздел «Диагностика: сообщение не дошло»
+и пример вебхука Zabbix, который проверяет HTTP-статус и `errors[]` ответа.
+
 ## 0.41.0
 
 ### Added: `/send` принимает `chat_id` из query
