@@ -105,7 +105,7 @@ func (s *Server) handleMattermostCreatePost(w http.ResponseWriter, r *http.Reque
 
 	keyName := KeyName(r.Context())
 	if err != nil {
-		vlog.V1("mattermost: post to chat %q failed [key: %s] -> 502 (%dms): %s", req.target, keyName, elapsed.Milliseconds(), boundedCause(err))
+		vlog.Info("mattermost: post to chat %q failed [key: %s] -> 502 (%dms): %s", req.target, keyName, elapsed.Milliseconds(), boundedCause(err))
 		writeError(w, http.StatusBadGateway, s.deliveryError(r.Context(), "sending", err))
 		return
 	}
@@ -114,7 +114,7 @@ func (s *Server) handleMattermostCreatePost(w http.ResponseWriter, r *http.Reque
 		writeError(w, http.StatusBadGateway, "upstream accepted the message without a sync_id, so it could never be updated")
 		return
 	}
-	vlog.V1("mattermost: post %s submitted to chat %q [key: %s] (%dms)", syncID, req.target, keyName, elapsed.Milliseconds())
+	vlog.Info("mattermost: post %s submitted to chat %q [key: %s] (%dms)", syncID, req.target, keyName, elapsed.Milliseconds())
 
 	writeMattermostPost(w, syncID, req.post.ChannelID)
 }
@@ -150,11 +150,11 @@ func (s *Server) handleMattermostUpdatePost(w http.ResponseWriter, r *http.Reque
 
 	keyName := KeyName(r.Context())
 	if err != nil {
-		vlog.V1("mattermost: edit of post %s failed [key: %s] -> 502 (%dms): %s", postID, keyName, elapsed.Milliseconds(), boundedCause(err))
+		vlog.Info("mattermost: edit of post %s failed [key: %s] -> 502 (%dms): %s", postID, keyName, elapsed.Milliseconds(), boundedCause(err))
 		writeError(w, http.StatusBadGateway, s.deliveryError(r.Context(), "editing", err))
 		return
 	}
-	vlog.V1("mattermost: edit of post %s accepted for chat %q [key: %s] (%dms)", postID, req.target, keyName, elapsed.Milliseconds())
+	vlog.Info("mattermost: edit of post %s accepted for chat %q [key: %s] (%dms)", postID, req.target, keyName, elapsed.Milliseconds())
 
 	writeMattermostPost(w, postID, req.post.ChannelID)
 }
