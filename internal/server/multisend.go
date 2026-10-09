@@ -89,17 +89,32 @@ func sameChats(a, b []string) bool {
 // collecting the successful results and per-chat errors independently. Order is
 // preserved: results and errors appear in the target order they were produced.
 func fanout(ctx context.Context, targets []string, deliver func(ctx context.Context, chat string) (SendResult, error)) (results []SendResult, errs []SendError) {
+	// Outcomes are logged without -v: the access log shows 200 for a partial
+	// failure, so these lines are the only default record of what reached which
+	// chat.
+	key, reqID := KeyName(ctx), middleware.GetReqID(ctx)
 	for _, target := range targets {
 		res, err := deliver(ctx, target)
 		if err != nil {
 			// The response may carry a sanitized error instead of this one, so
 			// the cause is recorded here or not at all.
-			vlog.V1("send: chat %q failed [key: %s, request_id: %s]: %s",
-				target, KeyName(ctx), middleware.GetReqID(ctx), boundedCause(err))
+			vlog.Info("send: chat %q failed [key: %s, request_id: %s]: %s",
+				target, key, reqID, boundedCause(err))
 			errs = append(errs, SendError{Chat: target, Error: err.Error()})
 			continue
 		}
+		if res.Queued {
+			vlog.Info("send: chat %q queued [key: %s, request_id: %s, queue_request_id: %s]",
+				target, key, reqID, res.RequestID)
+		} else {
+			vlog.Info("send: chat %q delivered [key: %s, request_id: %s, sync_id: %s]",
+				target, key, reqID, res.SyncID)
+		}
 		results = append(results, res)
+	}
+	if len(results) > 0 && len(errs) > 0 {
+		vlog.Info("send: partial delivery: %d of %d chats failed, responding with success [key: %s, request_id: %s]",
+			len(errs), len(targets), key, reqID)
 	}
 	return results, errs
 }

@@ -78,3 +78,59 @@ func TestFanout_BoundsTheLoggedCause(t *testing.T) {
 		t.Errorf("the useful head of the cause was lost:\n%s", logs[:min(len(logs), 400)])
 	}
 }
+
+// An operator debugging a missing alert has only the default log. Every
+// per-chat outcome must be there without -v: what was delivered, with the
+// sync_id to look up in eXpress, and what failed, with the cause.
+func TestFanout_LogsOutcomeWithoutVerbose(t *testing.T) {
+	cfg := Config{Listen: ":0", BasePath: "/api/v1", Keys: []ResolvedKey{{Name: "zabbix", Key: "k"}}}
+	sendFn := func(ctx context.Context, p *SendPayload) (string, error) {
+		if p.ChatID == "bad" {
+			return "", fmt.Errorf("send failed: HTTP 403: bot is not a chat member")
+		}
+		return "sync-" + p.ChatID, nil
+	}
+	chatFn := func(chatID string) (ChatResolveResult, error) {
+		return ChatResolveResult{ChatID: chatID}, nil
+	}
+
+	logs := captureTrace(t, 0, func() {
+		srv := New(cfg, sendFn, chatFn)
+		doRequest(srv, "POST", "/api/v1/send",
+			strings.NewReader(`{"chat_id":"good,bad","message":"hi"}`),
+			map[string]string{"X-API-Key": "k", "Content-Type": "application/json"})
+	})
+
+	for _, want := range []string{
+		`chat "good" delivered`, "sync_id: sync-good",
+		`chat "bad" failed`, "bot is not a chat member",
+		"partial delivery: 1 of 2 chats failed",
+		"key: zabbix",
+	} {
+		if !strings.Contains(logs, want) {
+			t.Errorf("default log lacks %q:\n%s", want, logs)
+		}
+	}
+}
+
+func TestFanout_NoPartialLineWhenAllSucceed(t *testing.T) {
+	cfg := Config{Listen: ":0", BasePath: "/api/v1", Keys: []ResolvedKey{{Name: "k", Key: "k"}}}
+	sendFn := func(ctx context.Context, p *SendPayload) (string, error) { return "s", nil }
+	chatFn := func(chatID string) (ChatResolveResult, error) {
+		return ChatResolveResult{ChatID: chatID}, nil
+	}
+
+	logs := captureTrace(t, 0, func() {
+		srv := New(cfg, sendFn, chatFn)
+		doRequest(srv, "POST", "/api/v1/send",
+			strings.NewReader(`{"chat_id":"a,b","message":"hi"}`),
+			map[string]string{"X-API-Key": "k", "Content-Type": "application/json"})
+	})
+
+	if strings.Contains(logs, "partial delivery") {
+		t.Errorf("partial delivery logged for a full success:\n%s", logs)
+	}
+	if strings.Count(logs, "delivered") != 2 {
+		t.Errorf("expected one delivered line per chat:\n%s", logs)
+	}
+}

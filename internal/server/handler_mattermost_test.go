@@ -611,3 +611,28 @@ func TestMattermost_RootPathIsNotServed(t *testing.T) {
 		t.Fatalf("status = %d, want 404: nothing may be served at the bare Mattermost path", w.Code)
 	}
 }
+
+// The post outcome is the only default record of what reached eXpress, so it
+// is logged without -v on both the success and the failure path.
+func TestMattermost_LogsOutcomeWithoutVerbose(t *testing.T) {
+	var ok mattermostCall
+	logs := captureTrace(t, 0, func() {
+		srv := mattermostServer(t, testMattermostConfig(), &ok)
+		doRequest(srv, "POST", "/api/v1/mattermost/api/v4/posts", strings.NewReader(mattermostPostPayload), webhookHeaders())
+	})
+	if !strings.Contains(logs, "post sync-42 submitted") {
+		t.Errorf("default log lacks the submitted post:\n%s", logs)
+	}
+
+	var failed mattermostCall
+	logs = captureTrace(t, 0, func() {
+		srv := newMattermostServer(t, Config{
+			Listen: ":0", BasePath: "/api/v1",
+			Keys: []ResolvedKey{{Name: "t", Key: "k"}},
+		}, testMattermostConfig(), &failed, errors.New("botx unavailable"), nil)
+		doRequest(srv, "POST", "/api/v1/mattermost/api/v4/posts", strings.NewReader(mattermostPostPayload), webhookHeaders())
+	})
+	if !strings.Contains(logs, "botx unavailable") {
+		t.Errorf("default log lacks the failure cause:\n%s", logs)
+	}
+}
