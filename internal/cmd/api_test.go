@@ -87,8 +87,8 @@ func TestBuildAPIBody_RawMode(t *testing.T) {
 	if body.method != "POST" {
 		t.Errorf("expected POST, got %s", body.method)
 	}
-	if body.contentType != "" {
-		t.Errorf("expected empty content type in raw mode, got %s", body.contentType)
+	if body.contentType != "application/json" {
+		t.Errorf("expected application/json for JSON raw body, got %s", body.contentType)
 	}
 	if string(body.data) != `{"raw":"data"}` {
 		t.Errorf("unexpected data: %s", string(body.data))
@@ -105,6 +105,52 @@ func TestBuildAPIBody_RawModeStdin(t *testing.T) {
 	}
 	if string(body.data) != "stdin data" {
 		t.Errorf("expected 'stdin data', got %q", string(body.data))
+	}
+	if body.contentType != "" {
+		t.Errorf("expected empty content type for non-JSON raw body, got %s", body.contentType)
+	}
+}
+
+func TestBuildAPIBody_RawModeJSONScalarKeepsNoContentType(t *testing.T) {
+	body, err := buildAPIBody(apiBodyParams{inputFile: "-", stdin: strings.NewReader("123")})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if body.contentType != "" {
+		t.Errorf("expected empty content type for JSON scalar, got %s", body.contentType)
+	}
+}
+
+func TestBuildHTTPRequest_RawJSONContentTypeOverride(t *testing.T) {
+	body, err := buildAPIBody(apiBodyParams{inputFile: "-", stdin: strings.NewReader(`{"a":1}`)})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	req, err := buildHTTPRequest(t.Context(), body, "/test", "https://host", "tok", []string{"Content-Type: text/plain"})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if got := req.Header.Get("Content-Type"); got != "text/plain" {
+		t.Errorf("expected -H to override, got %q", got)
+	}
+}
+
+func TestBuildAPIBody_RawModeStdinJSON(t *testing.T) {
+	body, err := buildAPIBody(apiBodyParams{
+		inputFile: "-",
+		stdin:     strings.NewReader(`{"group_chat_id":"x","user_huids":["y"]}` + "\n"),
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if body.method != "POST" {
+		t.Errorf("expected POST, got %s", body.method)
+	}
+	if body.contentType != "application/json" {
+		t.Errorf("expected application/json, got %s", body.contentType)
+	}
+	if !strings.Contains(string(body.data), `"user_huids":["y"]`) {
+		t.Errorf("unexpected data: %s", string(body.data))
 	}
 }
 

@@ -133,7 +133,7 @@ type ServerConfig struct {
 	Gitlab             *GitlabYAMLConfig        `yaml:"gitlab,omitempty"`
 	Callbacks          *CallbacksConfig         `yaml:"callbacks,omitempty"`
 	Docs               *bool                    `yaml:"docs,omitempty"`         // enable /docs endpoint (default: true)
-	ExternalURL        string                   `yaml:"external_url,omitempty"` // public URL for OpenAPI docs (e.g. http://express-botx.invitro-dev.k8s)
+	ExternalURL        string                   `yaml:"external_url,omitempty"` // public URL for OpenAPI docs (e.g. http://express-botx.example-dev.k8s)
 	TLS                *TLSYAMLConfig           `yaml:"tls,omitempty"`
 }
 

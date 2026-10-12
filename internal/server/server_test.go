@@ -2061,18 +2061,18 @@ func TestResolveOrigin(t *testing.T) {
 		{
 			name:       "external URL takes priority",
 			extScheme:  "https",
-			extHost:    "express-botx.invitro-dev.k8s",
+			extHost:    "express-botx.example-dev.k8s",
 			headers:    map[string]string{"X-Forwarded-Host": "other.host", "X-Forwarded-Proto": "http"},
 			reqHost:    "localhost:8080",
 			wantScheme: "https",
-			wantHost:   "express-botx.invitro-dev.k8s",
+			wantHost:   "express-botx.example-dev.k8s",
 		},
 		{
 			name:       "external URL without scheme defaults to http",
-			extHost:    "express-botx.invitro-dev.k8s",
+			extHost:    "express-botx.example-dev.k8s",
 			reqHost:    "localhost:8080",
 			wantScheme: "http",
-			wantHost:   "express-botx.invitro-dev.k8s",
+			wantHost:   "express-botx.example-dev.k8s",
 		},
 		{
 			name:       "X-Forwarded headers",
@@ -2140,7 +2140,7 @@ func TestResolveOrigin(t *testing.T) {
 func TestDocs_OpenAPISpecReplacesHostAndScheme(t *testing.T) {
 	srv := newTestServer([]ResolvedKey{{Name: "t", Key: "k"}}, func(c *Config) {
 		c.EnableDocs = true
-		c.ExternalURL = "https://express-botx.invitro-dev.k8s"
+		c.ExternalURL = "https://express-botx.example-dev.k8s"
 	})
 
 	w := doRequest(srv, "GET", "/docs/openapi.yaml", nil, nil)
@@ -2148,7 +2148,7 @@ func TestDocs_OpenAPISpecReplacesHostAndScheme(t *testing.T) {
 		t.Fatalf("expected 200, got %d", w.Code)
 	}
 	body := w.Body.String()
-	if !strings.Contains(body, "default: express-botx.invitro-dev.k8s") {
+	if !strings.Contains(body, "default: express-botx.example-dev.k8s") {
 		t.Errorf("expected host from external_url, got:\n%s", body)
 	}
 	if !strings.Contains(body, "default: https\n") {

@@ -239,7 +239,7 @@ Commands:
   enqueue   Enqueue a message for async delivery via broker
   serve     Start HTTP server for sending messages via API
   worker    Consume messages from broker and send via BotX API
-  chats     Chat operations (list, info)
+  chats     Chat operations (list, info, create, add-user, remove-user, add-admin)
   bot       Bot operations (ping, info, token)
   config    Manage configuration (bot, chat, apikey, show)
   user      User operations (search)

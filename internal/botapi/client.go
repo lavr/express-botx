@@ -57,7 +57,8 @@ type ChatInfo struct {
 }
 
 type listChatsResponse struct {
-	Result []ChatInfo `json:"result"`
+	Status *string     `json:"status"`
+	Result *[]ChatInfo `json:"result"`
 }
 
 // ListChats returns all chats the bot is a member of.
@@ -79,6 +80,10 @@ func (c *Client) ListChats(ctx context.Context) ([]ChatInfo, error) {
 	defer resp.Body.Close() //nolint:errcheck // best-effort close
 	elapsed := time.Since(start)
 
+	if resp.StatusCode == http.StatusUnauthorized {
+		vlog.V1("chats: <- 401 Unauthorized (%dms)", elapsed.Milliseconds())
+		return nil, ErrUnauthorized
+	}
 	if resp.StatusCode != http.StatusOK {
 		vlog.V1("chats: <- %d (%dms)", resp.StatusCode, elapsed.Milliseconds())
 		return nil, fmt.Errorf("list chats failed: HTTP %d", resp.StatusCode)
@@ -88,23 +93,15 @@ func (c *Client) ListChats(ctx context.Context) ([]ChatInfo, error) {
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
 		return nil, fmt.Errorf("decoding response: %w", err)
 	}
-
-	vlog.V1("chats: <- %d %s (%dms), %d chats", resp.StatusCode, http.StatusText(resp.StatusCode), elapsed.Milliseconds(), len(result.Result))
-	return result.Result, nil
-}
-
-// GetChatInfo returns info for a specific chat by UUID.
-func (c *Client) GetChatInfo(ctx context.Context, chatID string) (*ChatInfo, error) {
-	chats, err := c.ListChats(ctx)
-	if err != nil {
-		return nil, err
+	if result.Status != nil && *result.Status != "ok" {
+		return nil, fmt.Errorf("list chats failed: status %q", *result.Status)
 	}
-	for i := range chats {
-		if chats[i].GroupChatID == chatID {
-			return &chats[i], nil
-		}
+	if result.Result == nil {
+		return nil, fmt.Errorf("list chats failed: response has no result")
 	}
-	return nil, fmt.Errorf("chat not found: %s", chatID)
+
+	vlog.V1("chats: <- %d %s (%dms), %d chats", resp.StatusCode, http.StatusText(resp.StatusCode), elapsed.Milliseconds(), len(*result.Result))
+	return *result.Result, nil
 }
 
 // UserInfo holds information about a user.
@@ -172,6 +169,9 @@ func (c *Client) getUser(ctx context.Context, path string) (*UserInfo, error) {
 	var result userByHUIDResponse
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
 		return nil, fmt.Errorf("decoding response: %w", err)
+	}
+	if result.Status != "" && result.Status != "ok" {
+		return nil, fmt.Errorf("get user failed: status %q", result.Status)
 	}
 
 	vlog.V1("user: <- %d %s (%dms)", resp.StatusCode, http.StatusText(resp.StatusCode), elapsed.Milliseconds())

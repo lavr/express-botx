@@ -31,7 +31,7 @@ HTTP-метод определяется автоматически: GET есл�
 
 **JSON** (`-f`/`-F` без `--input @file`) — поля собираются в JSON-объект, `Content-Type: application/json` ставится автоматически.
 
-**Raw** (`--input` без префикса `@`) — тело отправляется как есть. `Content-Type` нужно задать вручную через `-H`.
+**Raw** (`--input` без префикса `@`) — тело отправляется как есть. Если тело — валидный JSON-объект или массив, ставится `Content-Type: application/json`; для остального `Content-Type` задаётся через `-H`, и `-H` всегда главнее. Без `Content-Type` BotX отвечает `400 malformed_request`, как будто полей нет.
 
 **Multipart** (`--input @file`, опционально с `-f`) — бинарный файл отправляется как часть с именем `content` (или другим через `--part-name`), текстовые поля из `-f` добавляются как дополнительные части.
 
@@ -47,9 +47,10 @@ express-botx api /api/v3/botx/chats/list
 
 ```bash
 echo '{"name": "test", "chat_type": "group_chat", "members": ["<USER-HUID>"]}' \
-  | express-botx api -X POST /api/v3/botx/chats/create \
-      --input - -H 'Content-Type: application/json'
+  | express-botx api -X POST /api/v3/botx/chats/create --input -
 ```
+
+Для типовых операций с чатами есть готовые команды: `chats create`, `add-user`, `remove-user`, `add-admin` ([commands.md](commands.md#администрирование-чатов)).
 
 ### Отправить уведомление в чат
 
@@ -109,6 +110,11 @@ express-botx api -i /api/v3/botx/chats/list
 | POST | `/api/v3/botx/chats/stealth_disable` | Отключение стелс-режима |
 | POST | `/api/v3/botx/chats/pin_message` | Закрепление сообщения |
 | POST | `/api/v3/botx/chats/unpin_message` | Открепление сообщения |
+
+`chats/info` — `GET ?group_chat_id=<UUID>`, участники в ответе — объекты
+`{"user_huid", "user_kind", "admin", "server_id"}`, плюс `creator` и `inserted_at`
+(в `chats/list` `members` — просто список HUID). Тело `add_user`, `remove_user`
+и `add_admin` одинаковое: `{"group_chat_id": "<UUID>", "user_huids": ["<HUID>", …]}`.
 
 ### Events API
 

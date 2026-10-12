@@ -49,7 +49,7 @@ func (s *stringSlice) Set(val string) error {
 // apiBody holds the constructed request body.
 type apiBody struct {
 	data        []byte // serialized body (JSON, raw) or nil for GET
-	contentType string // Content-Type or "" (raw mode — user sets via -H)
+	contentType string // Content-Type or "" (non-JSON raw mode — user sets via -H)
 	method      string // final HTTP method (after auto-selection)
 }
 
@@ -108,7 +108,11 @@ func buildAPIBody(p apiBodyParams) (*apiBody, error) {
 		if len(data) > maxRequestBodySize {
 			return nil, fmt.Errorf("request body too large (max 50MB)")
 		}
-		return &apiBody{data: data, method: method}, nil
+		body := &apiBody{data: data, method: method}
+		if trimmed := bytes.TrimSpace(data); len(trimmed) > 0 && (trimmed[0] == '{' || trimmed[0] == '[') && json.Valid(trimmed) {
+			body.contentType = "application/json"
+		}
+		return body, nil
 	}
 
 	// Multipart mode: --input @file

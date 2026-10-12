@@ -17,7 +17,11 @@
 | `bot token refresh` | Принудительно обновить токен и записать в кеш |
 | `bot token clear` | Удалить закешированный токен |
 | `chats list` | Показать список чатов бота |
-| `chats info` | Показать детальную информацию о чате |
+| `chats info` | Показать детальную информацию о чате: создатель, участники, админы |
+| `chats create` | Создать групповой чат |
+| `chats add-user` | Добавить участников в чат |
+| `chats remove-user` | Удалить участников из чата |
+| `chats add-admin` | Сделать участников админами чата |
 | `user search` | Найти пользователя по email, HUID или AD-логину |
 | `config bot add\|rm\|list` | Управление ботами в конфиге |
 | `config chat add\|set\|import\|rm\|list` | Управление алиасами чатов |
@@ -200,7 +204,7 @@ express-botx api -i /api/v3/botx/chats/list
 | Режим | Флаги | Content-Type |
 |-------|-------|-------------|
 | JSON | `-f`/`-F` | `application/json` (авто) |
-| Raw | `--input file` | не выставляется — задать через `-H` |
+| Raw | `--input file` / `--input -` | `application/json`, если тело — валидный JSON-объект или массив; иначе не выставляется — задать через `-H` |
 | Multipart | `--input @file` [+ `-f`] | `multipart/form-data` (авто) |
 
 `-f`/`-F` и `--input` (без `@`) взаимоисключающие. `-F` запрещён в multipart-режиме.
@@ -569,7 +573,137 @@ express-botx chats list -A --format json
 ```bash
 express-botx chats info --chat-id UUID
 express-botx chats info --chat-id alerts
+express-botx chats info --chat-id alerts --format json
 ```
+
+Данные берутся из `GET /api/v3/botx/chats/info`, поэтому бот должен состоять в чате.
+Выводит `creator` (HUID создателя), `inserted_at` и участников с `user_huid`,
+`user_kind` (`cts_user`, `botx`, …) и `admin`. В тексте HUID ботов из конфига
+подписаны их именами. JSON — поле `result` ответа BotX, разобранное в фиксированную схему:
+
+```json
+{
+  "group_chat_id": "aaaaaaaa-…",
+  "name": "alerts-demo",
+  "description": "…",
+  "chat_type": "group_chat",
+  "creator": "bbbbbbbb-…",
+  "inserted_at": "2026-10-12T10:39:44.975219Z",
+  "updated_at": "2026-10-12T10:39:44.975219Z",
+  "shared_history": false,
+  "members": [
+    {"user_huid": "dddddddd-…", "user_kind": "cts_user", "admin": false, "server_id": "…"},
+    {"user_huid": "bbbbbbbb-…", "user_kind": "botx", "admin": true, "server_id": "…"}
+  ]
+}
+```
+
+Контракт JSON: `group_chat_id`, `name`, `chat_type`, `shared_history` и
+`members` есть всегда; `members` — всегда массив, `[]` означает подтверждённо
+пустой состав. У каждого участника есть `user_huid`, `user_kind` и `admin`:
+ответ BotX, где у участника нет хотя бы одного из них (или есть `null`),
+отвергается целиком, а не дополняется значениями по умолчанию. Ключ `creator`
+в ответе BotX обязателен (значение может быть `null`). `description` и `creator` могут быть `null`, `inserted_at`,
+`updated_at` и `server_id` у участника отсутствуют, если их не прислал BotX.
+Прочие поля ответа BotX отбрасываются. Если BotX вернул `status` не `ok`,
+ответ без `result` или `members`, или ответ про другой чат, команда завершается
+ошибкой и в stdout ничего не печатает.
+
+Чат создан ботом, если `creator` равен `id` этого бота в конфиге.
+
+До этой версии `chats info --format json` отдавал `members` списком HUID
+(данные из `chats/list`); теперь это объекты.
+
+### Администрирование чатов
+
+Команды для бота с правом создавать чаты и менять их состав. Сверки состояния
+нет: после поиска участников (и, у `create`, существующего чата) команда делает
+одну мутацию в BotX API.
+
+Секрет такого бота лучше держать в отдельном конфиге, который не монтируется в
+`serve`: HTTP-эндпоинтов у этих команд нет, но `serve` загружает всех ботов
+своего конфига.
+
+```bash
+# Создать чат; печатает chat_id
+CHAT_ID=$(express-botx chats create --config admin.yaml --bot father \
+  --name alerts-demo --description "Тестовые уведомления" \
+  --members user@example.com,jdoe --ad-domain example.com \
+  --add-bot alerts-bot)
+
+express-botx chats add-user    --config admin.yaml --bot father --chat-id "$CHAT_ID" user@example.com 'EXAMPLE\jdoe'
+express-botx chats remove-user --config admin.yaml --bot father --chat-id "$CHAT_ID" dddddddd-4444-4444-8444-000000000004
+express-botx chats add-admin   --config admin.yaml --bot father --chat-id "$CHAT_ID" user@example.com
+
+# Или сохранить алиас и дальше обращаться по нему
+express-botx config chat set --config admin.yaml alerts-demo "$CHAT_ID" --bot father
+```
+
+Участник задаётся одним из способов:
+
+| Значение | Как ищется |
+|----------|-----------|
+| UUID | используется как HUID без запроса |
+| содержит `@` | `GET /api/v3/botx/users/by_email` |
+| `DOMAIN\login` | `GET /api/v3/botx/users/by_login` |
+| `login` | `by_login` с доменом из `--ad-domain` |
+
+Участники перечисляются через запятую или отдельными аргументами, дубли HUID
+схлопываются. Если хотя бы один участник не найден, команда завершается ошибкой
+со списком ненайденных и ничего не меняет в BotX.
+
+`chats create`:
+
+- `--name` — обязательно; `--description` — описание;
+- `--members` — участники, повторяемый флаг;
+- `--add-bot <имя>` — добавить участником бота из конфига (его HUID = `id`), повторяемый;
+- `--shared-history` — новые участники видят историю (по умолчанию нет);
+- `--allow-duplicate` — создать новый чат, даже если такой уже есть (см. ниже).
+
+Последовательный повторный запуск не плодит дубли. Перед созданием команда ищет в `chats/list`
+бота групповой чат с точно таким же именем (пробелы по краям `--name`
+отбрасываются) и через `chats/info` проверяет, что его `creator` — этот бот.
+Чужие чаты с тем же именем, куда бота просто добавили, не учитываются.
+
+- Нашёлся один — печатается его `chat_id`, в JSON `"created": false` и
+  `"members": []`, на stderr — пояснение. Ничего не меняется: `--members`,
+  `--description` и `--shared-history` к существующему чату не применяются,
+  состав ведётся через `add-user`/`remove-user`.
+- Нашёлся, но бот в нём больше не админ (например, сам себя удалил) —
+  ошибка: управлять таким чатом бот не может, вернуть его должен админ чата.
+- Нашлось несколько — ошибка со списком их id.
+- Ответ `chats/list` или `chats/info` неполный или с ошибкой — команда
+  завершается ошибкой и чат не создаёт.
+- Не нашлось — создаётся новый чат, `"created": true`.
+
+`--allow-duplicate` пропускает поиск и всегда создаёт новый чат. Имя в eXpress
+не уникально и может быть переименовано вручную, поэтому надёжнее сохранять
+`chat_id` после первого создания, а поиск по имени считать страховкой.
+Блокировки нет: два параллельных запуска с одним именем могут оба не найти чат
+и оба его создать.
+
+Создатель и единственный админ нового чата — бот, от имени которого выполнена
+команда; участники из `--members` админами не становятся, для этого есть
+`chats add-admin`. `--chat-id` у остальных команд обязателен и принимает UUID
+или алиас из конфига.
+
+Повторный `add-user` для уже состоящего в чате участника BotX принимает как
+успех, а повторный `add-admin` для уже админа отвергает с `400 admins_not_changed`.
+Сверяющему коду стоит сравнивать флаг `admin` из `chats info` и вызывать
+`add-admin` только для недостающих админов. Метода снять права админа или
+удалить чат в BotX API не нашлось.
+
+Бот может убрать из чата и другого бота, и сам себя (`remove-user` со своим
+HUID). Убрав себя, бот теряет управление: дальнейшие `add-user` и прочие
+изменения отвергаются с `403 no_permission_for_operation`, вернуть бота может
+только админ чата. Чат при этом остаётся у бота в `chats list` и доступен в
+`chats info` (в `members` бота уже нет), `creator` не меняется. Поэтому перед
+тем как бот уберёт себя, в чате должен остаться человек-админ.
+
+С `--format json` команды печатают `{"chat_id": "…", "members": [{"ref": "user@example.com", "user_huid": "…"}]}`;
+у `chats create` есть ещё поле `"created"`.
+
+Эти команды есть только в CLI, у HTTP-сервера аналогов нет.
 
 ---
 
