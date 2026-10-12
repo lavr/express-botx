@@ -5,7 +5,7 @@
 # Использование:
 #
 #   PATH=./dist:$PATH \
-#   OPTS="--config config-local.yaml --bot=devops-bot" \
+#   OPTS="--config config-local.yaml --bot=my-bot" \
 #   CHAT=express-botx-development \
 #     examples/scripts/api-command.sh
 #

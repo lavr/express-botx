@@ -139,6 +139,22 @@ express-botx worker
 
 Подробнее: [docs/async-queues.md](docs/async-queues.md)
 
+### Администрирование чатов
+
+Бот с правом создавать чаты может вести их состав из CLI. Держите его в
+отдельном конфиге, который не монтируется в `serve`:
+
+```bash
+CHAT_ID=$(express-botx chats create --config admin.yaml --bot father --name alerts-demo \
+  --members user@example.com,jdoe --ad-domain example.com --add-bot alerts-bot)
+express-botx chats add-user    --config admin.yaml --bot father --chat-id "$CHAT_ID" user@example.com
+express-botx chats remove-user --config admin.yaml --bot father --chat-id "$CHAT_ID" user@example.com
+express-botx chats add-admin   --config admin.yaml --bot father --chat-id "$CHAT_ID" user@example.com
+express-botx chats info        --config admin.yaml --bot father --chat-id "$CHAT_ID" --format json
+```
+
+Подробнее: [docs/commands.md](docs/commands.md#администрирование-чатов)
+
 ### Управление конфигурацией
 
 ```bash

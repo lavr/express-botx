@@ -47,7 +47,7 @@ func checkDefaultConflict(chats map[string]config.ChatConfig, exclude string) er
 func runChats(args []string, deps Deps) error {
 	if len(args) == 0 {
 		printChatsUsage(deps.Stderr)
-		return fmt.Errorf("subcommand required: list, info")
+		return fmt.Errorf("subcommand required: list, info, create, add-user, remove-user, add-admin")
 	}
 
 	switch args[0] {
@@ -55,6 +55,14 @@ func runChats(args []string, deps Deps) error {
 		return runChatsList(args[1:], deps)
 	case "info":
 		return runChatsInfo(args[1:], deps)
+	case "create":
+		return runChatsCreate(args[1:], deps)
+	case "add-user":
+		return runChatsMembersAction(chatsAddUserAction, args[1:], deps)
+	case "remove-user":
+		return runChatsMembersAction(chatsRemoveUserAction, args[1:], deps)
+	case "add-admin":
+		return runChatsMembersAction(chatsAddAdminAction, args[1:], deps)
 	case "--help", "-h":
 		printChatsUsage(deps.Stderr)
 		return nil
@@ -241,7 +249,7 @@ func runChatsInfo(args []string, deps Deps) error {
 	globalFlags(fs, &flags)
 	fs.StringVar(&flags.ChatID, "chat-id", "", "chat UUID or alias name")
 	fs.Usage = func() {
-		fmt.Fprintf(deps.Stderr, "Usage: express-botx chats info [options]\n\nShow detailed information about a chat.\n\nOptions:\n")
+		fmt.Fprintf(deps.Stderr, "Usage: express-botx chats info [options]\n\nShow detailed information about a chat, including its creator and members.\n\nOptions:\n")
 		fs.PrintDefaults()
 	}
 
@@ -251,6 +259,8 @@ func runChatsInfo(args []string, deps Deps) error {
 		}
 		return err
 	}
+
+	applyVerboseFlag(flags)
 
 	cfg, err := config.Load(flags)
 	if err != nil {
@@ -263,15 +273,29 @@ func runChatsInfo(args []string, deps Deps) error {
 		return err
 	}
 
-	tok, _, err := authenticate(cfg)
-	if err != nil {
+	var chat *botapi.ChatDetails
+	err = withTokenRefresh(cfg, func(client *botapi.Client) error {
+		var err error
+		chat, err = client.GetChatInfo(context.Background(), cfg.ChatID)
 		return err
-	}
-
-	client := botapi.NewClient(cfg.Host, tok, cfg.HTTPTimeout())
-	chat, err := client.GetChatInfo(context.Background(), cfg.ChatID)
+	})
 	if err != nil {
 		return fmt.Errorf("getting chat info: %w", err)
+	}
+
+	botNames := make(map[string]string, len(cfg.Bots))
+	for _, name := range cfg.BotNames() {
+		id := strings.ToLower(cfg.Bots[name].ID)
+		if _, taken := botNames[id]; !taken {
+			botNames[id] = name
+		}
+	}
+	botName := func(huid string) string { return botNames[strings.ToLower(huid)] }
+	withBotName := func(huid string) string {
+		if name := botName(huid); name != "" {
+			return fmt.Sprintf("%s (bot: %s)", huid, name)
+		}
+		return huid
 	}
 
 	return printOutput(deps.Stdout, cfg.Format, func() {
@@ -279,14 +303,25 @@ func runChatsInfo(args []string, deps Deps) error {
 		if chat.Description != nil && *chat.Description != "" {
 			desc = *chat.Description
 		}
+		creator := "-"
+		if chat.Creator != nil && *chat.Creator != "" {
+			creator = withBotName(*chat.Creator)
+		}
 		fmt.Fprintf(deps.Stdout, "Chat: %s\n", chat.GroupChatID)
 		fmt.Fprintf(deps.Stdout, "  name:           %s\n", chat.Name)
 		fmt.Fprintf(deps.Stdout, "  type:           %s\n", chat.ChatType)
 		fmt.Fprintf(deps.Stdout, "  description:    %s\n", desc)
+		fmt.Fprintf(deps.Stdout, "  creator:        %s\n", creator)
+		fmt.Fprintf(deps.Stdout, "  inserted_at:    %s\n", chat.InsertedAt)
 		fmt.Fprintf(deps.Stdout, "  shared_history: %v\n", chat.SharedHistory)
 		fmt.Fprintf(deps.Stdout, "  members (%d):\n", len(chat.Members))
 		for _, m := range chat.Members {
-			fmt.Fprintf(deps.Stdout, "    %s\n", m)
+			admin := ""
+			if m.Admin {
+				admin = "admin"
+			}
+			line := fmt.Sprintf("    %-36s  %-10s  %-5s  %s", m.UserHUID, m.UserKind, admin, botName(m.UserHUID))
+			fmt.Fprintln(deps.Stdout, strings.TrimRight(line, " "))
 		}
 	}, chat)
 }
@@ -1098,8 +1133,12 @@ func printChatsUsage(w io.Writer) {
 	fmt.Fprintf(w, `Usage: express-botx chats <command> [options]
 
 Commands:
-  list    List chats the bot is a member of
-  info    Show detailed information about a chat
+  list         List chats the bot is a member of
+  info         Show chat details: creator, members, admins
+  create       Create a group chat
+  add-user     Add users to a chat
+  remove-user  Remove users from a chat
+  add-admin    Make chat members admins
 
 Config management: use "express-botx config chat" (add, set, rm, list).
 `)
