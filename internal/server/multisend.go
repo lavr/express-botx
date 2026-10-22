@@ -19,6 +19,22 @@ import (
 	vlog "github.com/lavr/express-botx/internal/log"
 )
 
+// ErrAccessUnavailable is returned by a send pipeline that could not decide
+// whether the requesting key may use the chat, for example because the check
+// depends on a service that is down. It is a refusal, not a delivery failure:
+// when nothing was delivered the request is answered 503 with Retry-After, so
+// a sender that retries will retry, and nothing is sent twice.
+var ErrAccessUnavailable = errors.New("chat access could not be checked, retry later")
+
+// ErrAccessDenied is a refusal decided by a send pipeline at delivery time.
+// It is an ErrChatNotAllowed, so existing refusal handling applies, but when
+// it refuses every chat of a request the answer is 403 rather than 502.
+var ErrAccessDenied = fmt.Errorf("%w: refused at delivery", ErrChatNotAllowed)
+
+// accessRetryAfter is the Retry-After, in seconds, sent with a 503 for
+// ErrAccessUnavailable.
+const accessRetryAfter = "10"
+
 // SendResult is a single successful per-chat delivery. Exactly one of SyncID
 // (synchronous send) or RequestID+Queued (async/enqueue) is populated.
 type SendResult struct {
@@ -33,6 +49,9 @@ type SendResult struct {
 type SendError struct {
 	Chat  string `json:"chat"`
 	Error string `json:"error"`
+	// cause is the error itself, kept for choosing the HTTP status; it is
+	// never serialized, so sanitizing Error does not lose it.
+	cause error
 }
 
 // MultiSendResponse is the uniform response body for every send surface. OK is
@@ -100,7 +119,7 @@ func fanout(ctx context.Context, targets []string, deliver func(ctx context.Cont
 			// the cause is recorded here or not at all.
 			vlog.Info("send: chat %q failed [key: %s, request_id: %s]: %s",
 				target, key, reqID, boundedCause(err))
-			errs = append(errs, SendError{Chat: target, Error: err.Error()})
+			errs = append(errs, SendError{Chat: target, Error: err.Error(), cause: err})
 			continue
 		}
 		if res.Queued {
@@ -168,7 +187,16 @@ func boundedCause(err error) string {
 // writeMultiSend writes a MultiSendResponse. When at least one delivery
 // succeeded it uses successStatus (200 for sync, 202 for async); when every
 // delivery failed it uses 502 and OK is false.
+//
+// A request that delivered nothing because the pipeline refused it keeps the
+// status of that refusal instead (see authorizationFailure).
 func writeMultiSend(w http.ResponseWriter, results []SendResult, errs []SendError, successStatus int) {
+	if len(results) == 0 && len(errs) > 0 {
+		if status, msg, ok := authorizationFailure(errs); ok {
+			writeAccessError(w, status, msg)
+			return
+		}
+	}
 	w.Header().Set("Content-Type", "application/json")
 	if len(results) == 0 {
 		w.WriteHeader(http.StatusBadGateway)
@@ -179,4 +207,41 @@ func writeMultiSend(w http.ResponseWriter, results []SendResult, errs []SendErro
 		w.WriteHeader(successStatus)
 	}
 	json.NewEncoder(w).Encode(MultiSendResponse{OK: true, Results: results, Errors: errs})
+}
+
+// failedStatus is the status writeMultiSend answers when nothing was
+// delivered, for log lines written before the response.
+func failedStatus(errs []SendError) int {
+	if status, _, ok := authorizationFailure(errs); ok {
+		return status
+	}
+	return http.StatusBadGateway
+}
+
+// authorizationFailure reports the status for a request that delivered nothing
+// because the send pipeline refused it: 503 if any chat's access could not be
+// checked (ErrAccessUnavailable), 403 if every chat was refused at delivery
+// (ErrAccessDenied). Any other failure keeps the 502 it always had.
+func authorizationFailure(errs []SendError) (int, string, bool) {
+	refused := 0
+	for _, e := range errs {
+		if errors.Is(e.cause, ErrAccessUnavailable) {
+			return http.StatusServiceUnavailable, ErrAccessUnavailable.Error(), true
+		}
+		if errors.Is(e.cause, ErrAccessDenied) {
+			refused++
+		}
+	}
+	if refused == len(errs) {
+		return http.StatusForbidden, ErrChatNotAllowed.Error(), true
+	}
+	return 0, "", false
+}
+
+// writeAccessError writes a request-level refusal, with Retry-After on 503.
+func writeAccessError(w http.ResponseWriter, status int, msg string) {
+	if status == http.StatusServiceUnavailable {
+		w.Header().Set("Retry-After", accessRetryAfter)
+	}
+	writeError(w, status, msg)
 }

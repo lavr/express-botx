@@ -221,7 +221,7 @@ func (s *Server) handleSend(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if len(results) == 0 {
-			vlog.V1("server: %s %s [key: %s] -> 502 (%dms)", r.Method, r.URL.Path, keyName, elapsed.Milliseconds())
+			vlog.V1("server: %s %s [key: %s] -> %d (%dms)", r.Method, r.URL.Path, keyName, failedStatus(errs), elapsed.Milliseconds())
 		} else {
 			vlog.V1("server: %s %s [key: %s] -> 202 (%dms)", r.Method, r.URL.Path, keyName, elapsed.Milliseconds())
 		}
@@ -286,7 +286,7 @@ func (s *Server) handleSend(w http.ResponseWriter, r *http.Request) {
 
 	keyName := KeyName(r.Context())
 	if len(results) == 0 {
-		vlog.V1("server: %s %s [key: %s] -> 502 (%dms)", r.Method, r.URL.Path, keyName, elapsed.Milliseconds())
+		vlog.V1("server: %s %s [key: %s] -> %d (%dms)", r.Method, r.URL.Path, keyName, failedStatus(errs), elapsed.Milliseconds())
 	} else {
 		vlog.V1("server: %s %s [key: %s] -> 200 (%dms)", r.Method, r.URL.Path, keyName, elapsed.Milliseconds())
 	}
