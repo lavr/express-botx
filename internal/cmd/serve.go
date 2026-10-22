@@ -253,7 +253,7 @@ Options:
 	}
 	srvCfg.Keys = keys
 
-	mx, err := newServeMetrics(cfg)
+	mx, err := newServeMetrics(cfg, "sync")
 	if err != nil {
 		return err
 	}
@@ -1241,7 +1241,7 @@ func runServeEnqueue(flags config.Flags, listenFlag, apiKeyFlag, tlsCertFlag, tl
 	}
 	srvCfg.Keys = keys
 
-	mx, err := newServeMetrics(cfg)
+	mx, err := newServeMetrics(cfg, "enqueue")
 	if err != nil {
 		return err
 	}

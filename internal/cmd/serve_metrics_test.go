@@ -13,7 +13,7 @@ import (
 
 func TestServeMetrics_Disabled(t *testing.T) {
 	t.Setenv("EXPRESS_BOTX_SERVER_METRICS_LISTEN", "")
-	sm, err := newServeMetrics(&config.Config{})
+	sm, err := newServeMetrics(&config.Config{}, "sync")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -30,19 +30,24 @@ func TestServeMetrics_Disabled(t *testing.T) {
 
 func TestServeMetrics_EnvEnables(t *testing.T) {
 	t.Setenv("EXPRESS_BOTX_SERVER_METRICS_LISTEN", "127.0.0.1:0")
-	sm, err := newServeMetrics(&config.Config{})
+	sm, err := newServeMetrics(&config.Config{}, "sync")
 	if err != nil {
 		t.Fatal(err)
 	}
 	if sm.m == nil || sm.path != "/metrics" {
 		t.Fatalf("env did not enable metrics: %+v", sm)
 	}
+	w := httptest.NewRecorder()
+	sm.m.Handler().ServeHTTP(w, httptest.NewRequest("GET", "/metrics", nil))
+	if !strings.Contains(w.Body.String(), `express_botx_build_info{goversion="go`) || !strings.Contains(w.Body.String(), `mode="sync",version="`+Version+`"} 1`) {
+		t.Errorf("build_info missing or wrong:\n%s", w.Body.String())
+	}
 }
 
 // Calls made through the BotX client of a serve run show up in its metrics.
 func TestServeMetrics_BotXClientIsObserved(t *testing.T) {
 	t.Setenv("EXPRESS_BOTX_SERVER_METRICS_LISTEN", "127.0.0.1:0")
-	sm, err := newServeMetrics(&config.Config{})
+	sm, err := newServeMetrics(&config.Config{}, "sync")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -71,7 +76,7 @@ func TestServeMetrics_BindFailureStopsStartup(t *testing.T) {
 	addr := strings.TrimPrefix(ln.URL, "http://")
 
 	t.Setenv("EXPRESS_BOTX_SERVER_METRICS_LISTEN", addr)
-	sm, err := newServeMetrics(&config.Config{})
+	sm, err := newServeMetrics(&config.Config{}, "sync")
 	if err != nil {
 		t.Fatal(err)
 	}

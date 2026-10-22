@@ -141,6 +141,10 @@ func TestMetricsConfigResolve(t *testing.T) {
 		{"env enables and wins", &MetricsConfig{Enabled: false, Listen: ":1"}, ":9100", true, ":9100", "/metrics", false},
 		{"enabled without listen", &MetricsConfig{Enabled: true}, "", false, "", "", true},
 		{"relative path", &MetricsConfig{Enabled: true, Listen: ":9090", Path: "metrics"}, "", false, "", "", true},
+		{"pattern braces", &MetricsConfig{Enabled: true, Listen: ":9090", Path: "/metrics/{"}, "", false, "", "", true},
+		{"pattern wildcard", &MetricsConfig{Enabled: true, Listen: ":9090", Path: "/metrics/{x}"}, "", false, "", "", true},
+		{"method in pattern", &MetricsConfig{Enabled: true, Listen: ":9090", Path: "/ GET"}, "", false, "", "", true},
+		{"nested literal path", &MetricsConfig{Enabled: true, Listen: ":9090", Path: "/internal/metrics"}, "", true, ":9090", "/internal/metrics", false},
 	}
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {

@@ -10,8 +10,10 @@ package metrics
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net"
 	"net/http"
+	"runtime"
 	"strconv"
 	"strings"
 	"time"
@@ -75,6 +77,7 @@ type Metrics struct {
 	lookupsInflight   prometheus.Gauge
 	lookupsRejected   prometheus.Counter
 	queuePublishes    *prometheus.CounterVec
+	buildInfo         *prometheus.GaugeVec
 }
 
 // New returns metrics registered in a fresh registry of their own, with the Go
@@ -134,6 +137,10 @@ func New() *Metrics {
 			Namespace: namespace, Name: "queue_publish_total",
 			Help: "Publishes to the work queue in enqueue mode, by outcome (ok or error).",
 		}, []string{"outcome"}),
+		buildInfo: prometheus.NewGaugeVec(prometheus.GaugeOpts{
+			Namespace: namespace, Name: "build_info",
+			Help: "Always 1; the labels tell the version, the Go version and the serve mode (sync or enqueue).",
+		}, []string{"version", "goversion", "mode"}),
 	}
 	m.registry.MustRegister(
 		collectors.NewGoCollector(),
@@ -142,7 +149,7 @@ func New() *Metrics {
 		m.deliveries, m.partialDeliveries, m.edits,
 		m.botxRequests, m.botxDuration,
 		m.membershipChecks, m.membershipLookups, m.lookupsInflight, m.lookupsRejected,
-		m.queuePublishes,
+		m.queuePublishes, m.buildInfo,
 	)
 	// Series that alerts are written against exist from the start at zero,
 	// so a rate over them is 0 rather than missing.
@@ -155,6 +162,16 @@ func New() *Metrics {
 	m.queuePublishes.WithLabelValues("ok")
 	m.queuePublishes.WithLabelValues("error")
 	return m
+}
+
+// SetBuildInfo publishes the build_info series for this process. mode is
+// "sync" or "enqueue".
+func (m *Metrics) SetBuildInfo(version, mode string) {
+	if m == nil {
+		return
+	}
+	m.buildInfo.Reset()
+	m.buildInfo.WithLabelValues(version, runtime.Version(), mode).Set(1)
 }
 
 // InitSendRoute creates the zero-valued delivery series of a send route.
@@ -294,14 +311,24 @@ func (m *Metrics) Handler() http.Handler {
 // authentication: bind it to an address only the scraper reaches. Only path
 // is served; there are no debug or other handlers on this listener.
 func (m *Metrics) Start(ctx context.Context, listen, path string, logf func(format string, args ...any)) (net.Addr, error) {
+	if !strings.HasPrefix(path, "/") {
+		return nil, fmt.Errorf("metrics path %q must start with /", path)
+	}
 	ln, err := net.Listen("tcp", listen)
 	if err != nil {
 		return nil, err
 	}
-	mux := http.NewServeMux()
-	mux.Handle(path, m.Handler())
+	// The path is compared as is, not registered as a ServeMux pattern: a
+	// configured value must not turn into a wildcard or a pattern that panics.
+	h := m.Handler()
 	srv := &http.Server{
-		Handler:           mux,
+		Handler: http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path != path {
+				http.NotFound(w, r)
+				return
+			}
+			h.ServeHTTP(w, r)
+		}),
 		ReadHeaderTimeout: 10 * time.Second,
 		ReadTimeout:       30 * time.Second,
 		WriteTimeout:      30 * time.Second,

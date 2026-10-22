@@ -150,8 +150,10 @@ func TestStart(t *testing.T) {
 	if code, body := get("/metrics"); code != 200 || !strings.Contains(body, "express_botx_queue_publish_total") {
 		t.Errorf("/metrics: %d", code)
 	}
-	if code, _ := get("/debug/pprof/"); code != 404 {
-		t.Errorf("/debug/pprof/: %d, want 404", code)
+	for _, other := range []string{"/debug/pprof/", "/metrics/extra", "/", "/metricsx"} {
+		if code, _ := get(other); code != 404 {
+			t.Errorf("%s: %d, want 404", other, code)
+		}
 	}
 
 	// A taken address fails at once.
@@ -195,4 +197,37 @@ func TestConcurrentObserveAndScrape(t *testing.T) {
 	}
 	wg.Wait()
 	requireLine(t, scrape(t, m), `express_botx_deliveries_total{handler="/api/v1/send",outcome="delivered"} 1600`)
+}
+
+func TestBuildInfo(t *testing.T) {
+	m := New()
+	m.SetBuildInfo("1.2.3", "enqueue")
+	m.SetBuildInfo("1.2.4", "enqueue") // only the latest call is exported
+	body := scrape(t, m)
+	if !strings.Contains(body, `mode="enqueue",version="1.2.4"} 1`) || strings.Contains(body, `version="1.2.3"`) {
+		t.Errorf("build_info:\n%s", grepPrefix(body, "express_botx_build_info"))
+	}
+}
+
+// Paths are matched exactly, so "/" and a trailing slash serve only themselves.
+func TestStart_ExactPath(t *testing.T) {
+	for _, path := range []string{"/", "/metrics/"} {
+		m := New()
+		ctx, cancel := context.WithCancel(context.Background())
+		addr, err := m.Start(ctx, "127.0.0.1:0", path, t.Logf)
+		if err != nil {
+			t.Fatal(err)
+		}
+		for target, want := range map[string]int{path: 200, path + "child": 404} {
+			resp, err := http.Get("http://" + addr.String() + target)
+			if err != nil {
+				t.Fatal(err)
+			}
+			_ = resp.Body.Close()
+			if resp.StatusCode != want {
+				t.Errorf("path %q, GET %q: %d, want %d", path, target, resp.StatusCode, want)
+			}
+		}
+		cancel()
+	}
 }

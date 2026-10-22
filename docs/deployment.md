@@ -316,7 +316,7 @@ server:
   metrics:
     enabled: true
     listen: "127.0.0.1:9090"   # обязателен; в контейнере обычно ":9090"
-    path: /metrics             # по умолчанию /metrics
+    path: /metrics             # по умолчанию /metrics; только этот путь, без вложенных
 ```
 
 Или переменной окружения `EXPRESS_BOTX_SERVER_METRICS_LISTEN=:9090`: она
@@ -332,20 +332,33 @@ server:
 
 | Метрика | Метки | Что считает |
 |---|---|---|
-| `http_requests_total`, `http_request_duration_seconds` | `method`, `handler`, `code` | Запросы к серверу. `handler` — шаблон маршрута (`/api/v1/send`), неизвестный путь — `other` |
+| `http_requests_total` | `method`, `handler`, `code` | Запросы к серверу. `handler` — шаблон маршрута (`/api/v1/send`), неизвестный путь — `other` |
+| `http_request_duration_seconds` | `method`, `handler` | Время ответа сервера |
 | `deliveries_total` | `handler`, `outcome` | Исход по каждому чату: `delivered`, `queued`, `failed` |
 | `partial_deliveries_total` | `handler` | Ответ успешный, но часть чатов не получила сообщение |
 | `edits_total` | `handler`, `outcome` | Редактирование постов Mattermost |
-| `botx_requests_total`, `botx_request_duration_seconds` | `endpoint`, `code` | HTTP-попытки к BotX, включая получение токена. `code` — статус или `error`; время — до заголовков ответа. `2xx` значит, что BotX ответил, а не что ответ годный |
+| `botx_requests_total` | `endpoint`, `code` | HTTP-попытки к BotX, включая получение токена и повторы. `code` — статус или `error`. `2xx` значит, что BotX ответил, а не что ответ годный |
+| `botx_request_duration_seconds` | `endpoint` | Время до заголовков ответа BotX |
 | `membership_checks_total` | `outcome`, `source` | Проверки членства для ключей с `chats_where_member`: `member`, `not_member`, `error`; `source` — `cache` или `lookup` |
-| `membership_lookups_total`, `membership_lookups_inflight`, `membership_lookups_rejected_total` | `outcome` | Сами запросы членства к BotX, сколько идёт сейчас и сколько отклонено по лимиту одновременных |
+| `membership_lookups_total` | `outcome` | Запросы членства, действительно ушедшие в BotX |
+| `membership_lookups_inflight` | — | Сколько таких запросов идёт сейчас |
+| `membership_lookups_rejected_total` | — | Проверки, отклонённые по лимиту одновременных запросов (ответ `503`) |
 | `queue_publish_total` | `outcome` | Публикации в очередь в режиме `--enqueue`: `ok`, `error` |
+| `build_info` | `version`, `goversion`, `mode` | Всегда `1`; версия, версия Go и режим (`sync` или `enqueue`) |
 
 Плюс стандартные `go_*` и `process_*`.
 
 В метках нет чатов, ключей, ботов, текста сообщений и строк запроса. Основные
 серии видны с нулём сразу после старта, поэтому `rate()` по ним не пропадает.
 Метрик `worker` пока нет.
+
+Инстанс метками не помечается: это делает Prometheus при сборе (`instance`, а
+через Kubernetes service discovery — `pod`, `namespace`). Версию на каждом
+поде показывает `build_info`.
+
+`deliveries_total` считает только чаты, до которых дошла отправка. Запрос,
+отклонённый целиком до неё (`400`, `401`, `403`, `503` проверки членства),
+туда не попадает: его видно в `http_requests_total` и `membership_checks_total`.
 
 Пример алерта на долю неудачных доставок:
 

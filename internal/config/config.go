@@ -151,6 +151,10 @@ type MetricsConfig struct {
 // DefaultMetricsPath is where the metrics are served when path is not set.
 const DefaultMetricsPath = "/metrics"
 
+// metricsPathRe accepts a plain path: no pattern syntax, no query, no spaces.
+// The metrics are served on exactly this path and nothing below it.
+var metricsPathRe = regexp.MustCompile(`^/[A-Za-z0-9._~/-]*$`)
+
 // Resolve applies the environment and defaults: EXPRESS_BOTX_SERVER_METRICS_LISTEN,
 // when set, enables the endpoint on that address whatever the config says. It
 // reports whether metrics are enabled, and an error for an enabled endpoint
@@ -172,8 +176,8 @@ func (m *MetricsConfig) Resolve(envListen string) (enabled bool, listen, path st
 	if c.Path == "" {
 		c.Path = DefaultMetricsPath
 	}
-	if !strings.HasPrefix(c.Path, "/") {
-		return false, "", "", fmt.Errorf("server.metrics.path must start with \"/\", got %q", c.Path)
+	if !metricsPathRe.MatchString(c.Path) {
+		return false, "", "", fmt.Errorf("server.metrics.path must be a literal URL path such as /metrics (letters, digits, - . _ ~ and /), got %q", c.Path)
 	}
 	return true, c.Listen, c.Path, nil
 }

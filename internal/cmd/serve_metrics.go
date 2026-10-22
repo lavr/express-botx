@@ -21,7 +21,7 @@ type serveMetrics struct {
 	path   string
 }
 
-func newServeMetrics(cfg *config.Config) (*serveMetrics, error) {
+func newServeMetrics(cfg *config.Config, mode string) (*serveMetrics, error) {
 	enabled, listen, path, err := cfg.Server.Metrics.Resolve(os.Getenv("EXPRESS_BOTX_SERVER_METRICS_LISTEN"))
 	if err != nil {
 		return nil, err
@@ -29,7 +29,9 @@ func newServeMetrics(cfg *config.Config) (*serveMetrics, error) {
 	if !enabled {
 		return &serveMetrics{}, nil
 	}
-	return &serveMetrics{m: metrics.New(), listen: listen, path: path}, nil
+	m := metrics.New()
+	m.SetBuildInfo(Version, mode)
+	return &serveMetrics{m: m, listen: listen, path: path}, nil
 }
 
 // botxClient returns the HTTP client for BotX calls: observed by the metrics
