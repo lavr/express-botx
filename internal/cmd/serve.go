@@ -8,6 +8,7 @@ import (
 	"flag"
 	"fmt"
 	"maps"
+	"net/http"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -252,6 +253,12 @@ Options:
 	}
 	srvCfg.Keys = keys
 
+	mx, err := newServeMetrics(cfg)
+	if err != nil {
+		return err
+	}
+	botxHTTP := mx.botxClient
+
 	// Build send function and authenticate.
 	// If eXpress is unavailable at startup, the server still starts —
 	// bots that failed auth are retried in the background every 10 seconds.
@@ -272,7 +279,7 @@ Options:
 			botCfg.BotSecret = bot.Secret
 			botCfg.BotToken = bot.Token
 			botCfg.BotName = name
-			sender, err := newBotSender(&botCfg, failFast)
+			sender, err := newBotSender(&botCfg, failFast, botxHTTP(botCfg.HTTPTimeout()))
 			if err != nil {
 				return err
 			}
@@ -299,14 +306,15 @@ Options:
 		for _, name := range botNames {
 			s := senders[name]
 			botMentionsResolvers[name] = &refreshableClientResolver{
-				client: botapi.NewClient(s.cfg.Host, s.client.Token, s.cfg.HTTPTimeout()),
+				client: newServeBotAPIClient(s.cfg.Host, s.client.Token, s.hc),
 				cfg:    s.cfg,
 				cache:  s.cache,
+				hc:     s.hc,
 			}
 		}
 		mentionsResolver = botMentionsResolvers[botNames[0]]
 	} else {
-		sender, err := newBotSender(cfg, failFast)
+		sender, err := newBotSender(cfg, failFast, botxHTTP(cfg.HTTPTimeout()))
 		if err != nil {
 			return err
 		}
@@ -316,9 +324,10 @@ Options:
 		// Use a separate client so the resolver can refresh the token
 		// independently of botSender, avoiding races on the shared token.
 		mentionsResolver = &refreshableClientResolver{
-			client: botapi.NewClient(cfg.Host, sender.client.Token, cfg.HTTPTimeout()),
+			client: newServeBotAPIClient(cfg.Host, sender.client.Token, sender.hc),
 			cfg:    cfg,
 			cache:  sender.cache,
+			hc:     sender.hc,
 		}
 	}
 
@@ -351,8 +360,9 @@ Options:
 	srvOpts = append(srvOpts, server.WithErrTracker(tracker))
 	srvOpts = append(srvOpts, server.WithConfigInfo(runtimeBotEntries(cfg), runtimeChatEntries(cfg)))
 	srvOpts = append(srvOpts, server.WithMentionsResolver(mentionsResolver))
+	srvOpts = append(srvOpts, server.WithMetrics(mx.m))
 	if hasMembershipKeys(keys) {
-		opt, err := membershipOption(cfg)
+		opt, err := membershipOption(cfg, botxHTTP)
 		if err != nil {
 			return err
 		}
@@ -487,6 +497,9 @@ Options:
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
+	if err := mx.start(ctx); err != nil {
+		return err
+	}
 	return srv.Run(ctx)
 }
 
@@ -883,15 +896,16 @@ type botSender struct {
 	cfg    *config.Config
 	client *botapi.Client
 	cache  token.Cache
+	hc     *http.Client // every BotX call of this bot, token requests included
 }
 
-func newBotSender(cfg *config.Config, failFast bool) (*botSender, error) {
+func newBotSender(cfg *config.Config, failFast bool, hc *http.Client) (*botSender, error) {
 	name := cfg.BotName
 	if name == "" {
 		name = cfg.Host
 	}
 
-	tok, cache, err := authenticate(cfg)
+	tok, cache, err := authenticateWith(cfg, hc)
 	if err != nil {
 		if failFast {
 			return nil, fmt.Errorf("authenticating bot %s: %w", name, err)
@@ -899,23 +913,32 @@ func newBotSender(cfg *config.Config, failFast bool) (*botSender, error) {
 		vlog.Info("serve: bot %s auth failed at startup, will authenticate on first request: %v", name, err)
 		return &botSender{
 			cfg:    cfg,
-			client: botapi.NewClient(cfg.Host, "", cfg.HTTPTimeout()),
+			client: newServeBotAPIClient(cfg.Host, "", hc),
 			cache:  cache,
+			hc:     hc,
 		}, nil
 	}
 
 	vlog.Info("serve: bot %s authenticated", name)
 	return &botSender{
 		cfg:    cfg,
-		client: botapi.NewClient(cfg.Host, tok, cfg.HTTPTimeout()),
+		client: newServeBotAPIClient(cfg.Host, tok, hc),
 		cache:  cache,
+		hc:     hc,
 	}, nil
+}
+
+// newServeBotAPIClient is botapi.NewClient over the server's BotX HTTP client.
+func newServeBotAPIClient(host, tok string, hc *http.Client) *botapi.Client {
+	c := botapi.NewClient(host, tok, hc.Timeout)
+	c.HTTPClient = hc
+	return c
 }
 
 func (bs *botSender) Send(ctx context.Context, p *server.SendPayload) (string, error) {
 	// Lazy auth: if token is empty, authenticate now
 	if bs.client.Token == "" {
-		tok, err := refreshToken(bs.cfg, bs.cache)
+		tok, err := refreshTokenWith(bs.cfg, bs.cache, bs.hc)
 		if err != nil {
 			return "", fmt.Errorf("authenticating bot: %w", err)
 		}
@@ -930,7 +953,7 @@ func (bs *botSender) Send(ctx context.Context, p *server.SendPayload) (string, e
 			if bs.cfg.BotToken != "" {
 				return "", fmt.Errorf("bot token rejected (401), re-configure token for bot %q", bs.cfg.BotName)
 			}
-			newTok, refreshErr := refreshToken(bs.cfg, bs.cache)
+			newTok, refreshErr := refreshTokenWith(bs.cfg, bs.cache, bs.hc)
 			if refreshErr != nil {
 				return "", fmt.Errorf("refreshing token: %w", refreshErr)
 			}
@@ -944,7 +967,7 @@ func (bs *botSender) Send(ctx context.Context, p *server.SendPayload) (string, e
 
 func (bs *botSender) Edit(ctx context.Context, p *server.EditPayload) error {
 	if bs.client.Token == "" {
-		tok, err := refreshToken(bs.cfg, bs.cache)
+		tok, err := refreshTokenWith(bs.cfg, bs.cache, bs.hc)
 		if err != nil {
 			return fmt.Errorf("authenticating bot: %w", err)
 		}
@@ -964,7 +987,7 @@ func (bs *botSender) Edit(ctx context.Context, p *server.EditPayload) error {
 		if bs.cfg.BotToken != "" {
 			return fmt.Errorf("bot token rejected (401), re-configure token for bot %q", bs.cfg.BotName)
 		}
-		newTok, refreshErr := refreshToken(bs.cfg, bs.cache)
+		newTok, refreshErr := refreshTokenWith(bs.cfg, bs.cache, bs.hc)
 		if refreshErr != nil {
 			return fmt.Errorf("refreshing token: %w", refreshErr)
 		}
@@ -1218,6 +1241,11 @@ func runServeEnqueue(flags config.Flags, listenFlag, apiKeyFlag, tlsCertFlag, tl
 	}
 	srvCfg.Keys = keys
 
+	mx, err := newServeMetrics(cfg)
+	if err != nil {
+		return err
+	}
+
 	// Create queue publisher
 	pub, err := queue.NewPublisher(cfg.Queue.Driver, cfg.Queue.URL, cfg.Queue.Name)
 	if err != nil {
@@ -1392,7 +1420,9 @@ func runServeEnqueue(flags config.Flags, listenFlag, apiKeyFlag, tlsCertFlag, tl
 			}
 		}
 
-		if err := pub.PublishWork(ctx, msg); err != nil {
+		err := pub.PublishWork(ctx, msg)
+		mx.m.QueuePublish(err)
+		if err != nil {
 			return "", fmt.Errorf("publishing to queue: %w", err)
 		}
 		return requestID, nil
@@ -1417,6 +1447,8 @@ func runServeEnqueue(flags config.Flags, listenFlag, apiKeyFlag, tlsCertFlag, tl
 	srvOpts = append(srvOpts, server.WithErrTracker(tracker))
 	srvOpts = append(srvOpts, server.WithConfigInfo(runtimeBotEntries(cfg), runtimeChatEntries(cfg)))
 
+	srvOpts = append(srvOpts, server.WithMetrics(mx.m))
+
 	srv := server.New(srvCfg, sendFn, chatResolver, srvOpts...)
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
@@ -1437,6 +1469,9 @@ func runServeEnqueue(flags config.Flags, listenFlag, apiKeyFlag, tlsCertFlag, tl
 		}()
 	}
 
+	if err := mx.start(ctx); err != nil {
+		return err
+	}
 	vlog.Info("serve: async mode (enqueue), driver=%s", cfg.Queue.Driver)
 	return srv.Run(ctx)
 }

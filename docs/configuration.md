@@ -63,6 +63,10 @@ server:
   # membership_cache:                       # опционально, для chats_where_member
   #   ttl: 60s                              # положительный ответ (по умолчанию 60s)
   #   negative_ttl: 15s                     # отрицательный (по умолчанию 15s, не больше ttl)
+  # metrics:                                # опционально: метрики Prometheus
+  #   enabled: true
+  #   listen: "127.0.0.1:9090"              # обязателен; отдельный адрес без аутентификации
+  #   path: /metrics                        # по умолчанию /metrics
   allow_request_trace: false                # по умолчанию false; true разрешает
                                             # отправителям включать ?trace=1
   alertmanager:                              # опционально — endpoint включён по умолчанию

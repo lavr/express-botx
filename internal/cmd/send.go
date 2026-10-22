@@ -8,6 +8,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"net/http"
 	"os"
 	"path/filepath"
 	"sync"
@@ -28,6 +29,7 @@ type refreshableClientResolver struct {
 	client *botapi.Client
 	cfg    *config.Config
 	cache  token.Cache
+	hc     *http.Client // for token requests; nil uses the default client
 }
 
 func (r *refreshableClientResolver) GetUserByEmail(ctx context.Context, email string) (string, string, error) {
@@ -36,7 +38,7 @@ func (r *refreshableClientResolver) GetUserByEmail(ctx context.Context, email st
 
 	// Lazy auth: if token is empty, authenticate now.
 	if r.client.Token == "" {
-		tok, err := refreshToken(r.cfg, r.cache)
+		tok, err := refreshTokenWith(r.cfg, r.cache, r.hc)
 		if err != nil {
 			return "", "", fmt.Errorf("authenticating for email lookup: %w", err)
 		}
@@ -47,7 +49,7 @@ func (r *refreshableClientResolver) GetUserByEmail(ctx context.Context, email st
 	if err != nil {
 		// If the token expired, refresh and retry once.
 		if errors.Is(err, botapi.ErrUnauthorized) && r.cfg.BotSecret != "" {
-			tok, refreshErr := refreshToken(r.cfg, r.cache)
+			tok, refreshErr := refreshTokenWith(r.cfg, r.cache, r.hc)
 			if refreshErr == nil {
 				r.client.Token = tok
 				info, retryErr := r.client.GetUserByEmail(ctx, email)

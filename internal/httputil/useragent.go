@@ -7,6 +7,11 @@ import (
 	"time"
 )
 
+// Observer is told about each HTTP attempt made through an observed client,
+// once response headers arrive or the attempt fails (resp is nil when err is
+// not). It does not see the body being read.
+type Observer func(req *http.Request, resp *http.Response, err error, d time.Duration)
+
 // version is set by SetVersion during startup.
 var version = "dev"
 
@@ -34,7 +39,8 @@ func Transport(base http.RoundTripper) http.RoundTripper {
 }
 
 type uaTransport struct {
-	base http.RoundTripper
+	base     http.RoundTripper
+	observer Observer
 }
 
 func (t *uaTransport) RoundTrip(req *http.Request) (*http.Response, error) {
@@ -42,7 +48,13 @@ func (t *uaTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 		req = req.Clone(req.Context())
 		req.Header.Set("User-Agent", UserAgent())
 	}
-	return t.base.RoundTrip(req)
+	if t.observer == nil {
+		return t.base.RoundTrip(req)
+	}
+	start := time.Now()
+	resp, err := t.base.RoundTrip(req)
+	t.observer(req, resp, err, time.Since(start))
+	return resp, err
 }
 
 // NewClient returns an *http.Client with the User-Agent transport and the given timeout.
@@ -50,5 +62,14 @@ func NewClient(timeout time.Duration) *http.Client {
 	return &http.Client{
 		Timeout:   timeout,
 		Transport: Transport(nil),
+	}
+}
+
+// NewObservedClient is NewClient with obs told about every attempt; a nil obs
+// gives a plain NewClient.
+func NewObservedClient(timeout time.Duration, obs Observer) *http.Client {
+	return &http.Client{
+		Timeout:   timeout,
+		Transport: &uaTransport{base: http.DefaultTransport, observer: obs},
 	}
 }

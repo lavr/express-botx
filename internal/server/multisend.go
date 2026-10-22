@@ -17,6 +17,7 @@ import (
 	"github.com/go-chi/chi/v5/middleware"
 
 	vlog "github.com/lavr/express-botx/internal/log"
+	"github.com/lavr/express-botx/internal/metrics"
 )
 
 // ErrAccessUnavailable is returned by a send pipeline that could not decide
@@ -112,9 +113,11 @@ func fanout(ctx context.Context, targets []string, deliver func(ctx context.Cont
 	// failure, so these lines are the only default record of what reached which
 	// chat.
 	key, reqID := KeyName(ctx), middleware.GetReqID(ctx)
+	m, route := metrics.FromContext(ctx), routeLabel(ctx)
 	for _, target := range targets {
 		res, err := deliver(ctx, target)
 		if err != nil {
+			m.Delivery(route, metrics.Failed)
 			// The response may carry a sanitized error instead of this one, so
 			// the cause is recorded here or not at all.
 			vlog.Info("send: chat %q failed [key: %s, request_id: %s]: %s",
@@ -123,15 +126,18 @@ func fanout(ctx context.Context, targets []string, deliver func(ctx context.Cont
 			continue
 		}
 		if res.Queued {
+			m.Delivery(route, metrics.Queued)
 			vlog.Info("send: chat %q queued [key: %s, request_id: %s, queue_request_id: %s]",
 				target, key, reqID, res.RequestID)
 		} else {
+			m.Delivery(route, metrics.Delivered)
 			vlog.Info("send: chat %q delivered [key: %s, request_id: %s, sync_id: %s]",
 				target, key, reqID, res.SyncID)
 		}
 		results = append(results, res)
 	}
 	if len(results) > 0 && len(errs) > 0 {
+		m.PartialDelivery(route)
 		vlog.Info("send: partial delivery: %d of %d chats failed, responding with success [key: %s, request_id: %s]",
 			len(errs), len(targets), key, reqID)
 	}

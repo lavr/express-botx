@@ -5,6 +5,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
+	"net/http"
 	"os"
 	"strings"
 	"time"
@@ -144,6 +145,12 @@ func applyVerboseFlag(flags config.Flags) {
 // authenticate resolves credentials and returns a token.
 // In token mode, returns the static token directly without API call.
 func authenticate(cfg *config.Config) (string, token.Cache, error) {
+	return authenticateWith(cfg, nil)
+}
+
+// authenticateWith is authenticate requesting the token over hc (nil: the
+// default client).
+func authenticateWith(cfg *config.Config, hc *http.Client) (string, token.Cache, error) {
 	if cfg.BotToken != "" {
 		vlog.V1("auth: using static token")
 		resolved, err := secret.Resolve(cfg.BotToken)
@@ -173,7 +180,7 @@ func authenticate(cfg *config.Config) (string, token.Cache, error) {
 	}
 
 	vlog.V1("auth: cache miss, requesting new token")
-	tok, err = auth.GetToken(ctx, cfg.Host, cfg.BotID, signature, cfg.HTTPTimeout())
+	tok, err = auth.GetTokenWithClient(ctx, cfg.Host, cfg.BotID, signature, cfg.HTTPTimeout(), hc)
 	if err != nil {
 		return "", cache, fmt.Errorf("getting token: %w", err)
 	}
@@ -189,6 +196,12 @@ func authenticate(cfg *config.Config) (string, token.Cache, error) {
 
 // refreshToken forces a fresh token from the API.
 func refreshToken(cfg *config.Config, cache token.Cache) (string, error) {
+	return refreshTokenWith(cfg, cache, nil)
+}
+
+// refreshTokenWith is refreshToken requesting the token over hc (nil: the
+// default client).
+func refreshTokenWith(cfg *config.Config, cache token.Cache, hc *http.Client) (string, error) {
 	vlog.V1("auth: refreshing token")
 	secretKey, err := secret.Resolve(cfg.BotSecret)
 	if err != nil {
@@ -198,7 +211,7 @@ func refreshToken(cfg *config.Config, cache token.Cache) (string, error) {
 	signature := auth.BuildSignature(cfg.BotID, secretKey)
 	ctx := context.Background()
 
-	tok, err := auth.GetToken(ctx, cfg.Host, cfg.BotID, signature, cfg.HTTPTimeout())
+	tok, err := auth.GetTokenWithClient(ctx, cfg.Host, cfg.BotID, signature, cfg.HTTPTimeout(), hc)
 	if err != nil {
 		return "", err
 	}

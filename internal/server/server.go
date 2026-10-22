@@ -20,6 +20,7 @@ import (
 	"github.com/lavr/express-botx/internal/errtrack"
 	vlog "github.com/lavr/express-botx/internal/log"
 	"github.com/lavr/express-botx/internal/mentions"
+	"github.com/lavr/express-botx/internal/metrics"
 )
 
 // ErrChatNotAllowed is returned by a send pipeline that resolved the final
@@ -108,6 +109,12 @@ type Server struct {
 	pollerStarted        func()
 	pollerDone           chan struct{}
 	membership           *membershipChecker // nil unless WithChatMembership was given
+	metrics              *metrics.Metrics   // nil unless WithMetrics was given
+}
+
+// WithMetrics records the server's Prometheus metrics into m.
+func WithMetrics(m *metrics.Metrics) Option {
+	return func(s *Server) { s.metrics = m }
 }
 
 // SendFunc sends a message via the BotX API. The server calls this for each request.
@@ -331,6 +338,9 @@ func New(cfg Config, sendFn SendFunc, chatResolver ChatResolver, opts ...Option)
 	for _, o := range opts {
 		o(s)
 	}
+	if s.membership != nil {
+		s.membership.metrics = s.metrics
+	}
 	// Every send surface delivers through s.send with the bot and chat already
 	// resolved, so a membership-scoped key is re-checked here, per target.
 	s.send = func(ctx context.Context, p *SendPayload) (string, error) {
@@ -362,6 +372,7 @@ func New(cfg Config, sendFn SendFunc, chatResolver ChatResolver, opts ...Option)
 	r.Use(middleware.RequestLogger(&slogLogFormatter{
 		logger: slog.New(slog.NewJSONHandler(os.Stderr, nil)),
 	}))
+	r.Use(s.metricsMiddleware)
 
 	base := strings.TrimRight(cfg.BasePath, "/")
 
@@ -369,6 +380,12 @@ func New(cfg Config, sendFn SendFunc, chatResolver ChatResolver, opts ...Option)
 	route := func(method, path string, h http.HandlerFunc) {
 		full := base + path
 		r.Method(method, full, s.apm.WrapHandler(method+" "+path, s.authMiddleware(h)))
+	}
+	// sendRoute is route for an endpoint that delivers messages, whose
+	// delivery series are then exported from the start.
+	sendRoute := func(path string, h http.HandlerFunc) {
+		route("POST", path, h)
+		s.metrics.InitSendRoute(base + path)
 	}
 
 	r.Get("/healthz", s.handleHealthz)
@@ -381,12 +398,12 @@ func New(cfg Config, sendFn SendFunc, chatResolver ChatResolver, opts ...Option)
 		vlog.Info("server: docs endpoint enabled at /docs/")
 	}
 
-	route("POST", "/send", s.handleSend)
+	sendRoute("/send", s.handleSend)
 	route("GET", "/bot/list", s.handleBotList)
 	route("GET", "/chats/alias/list", s.handleChatsAliasList)
 
 	if s.amCfg != nil {
-		route("POST", "/alertmanager", s.handleAlertmanager)
+		sendRoute("/alertmanager", s.handleAlertmanager)
 		chatInfo := "from ?chat_id param"
 		if s.amCfg.DefaultChatID != "" {
 			chatInfo = s.amCfg.DefaultChatID
@@ -399,7 +416,7 @@ func New(cfg Config, sendFn SendFunc, chatResolver ChatResolver, opts ...Option)
 	}
 
 	if s.grCfg != nil {
-		route("POST", "/grafana", s.handleGrafana)
+		sendRoute("/grafana", s.handleGrafana)
 		chatInfo := "from ?chat_id param"
 		if s.grCfg.DefaultChatID != "" {
 			chatInfo = s.grCfg.DefaultChatID
@@ -412,7 +429,7 @@ func New(cfg Config, sendFn SendFunc, chatResolver ChatResolver, opts ...Option)
 	}
 
 	if s.irCfg != nil {
-		route("POST", "/incidentrelay", s.handleIncidentRelay)
+		sendRoute("/incidentrelay", s.handleIncidentRelay)
 		chatInfo := "from ?chat_id param"
 		if s.irCfg.DefaultChatID != "" {
 			chatInfo = s.irCfg.DefaultChatID
@@ -425,7 +442,7 @@ func New(cfg Config, sendFn SendFunc, chatResolver ChatResolver, opts ...Option)
 	}
 
 	if s.mmCfg != nil {
-		route("POST", "/mattermost/api/v4/posts", s.handleMattermostCreatePost)
+		sendRoute("/mattermost/api/v4/posts", s.handleMattermostCreatePost)
 		route("PUT", "/mattermost/api/v4/posts/{post_id}", s.handleMattermostUpdatePost)
 		chatInfo := "from channel_id in the body"
 		if s.mmCfg.DefaultChatID != "" {
@@ -443,6 +460,7 @@ func New(cfg Config, sendFn SendFunc, chatResolver ChatResolver, opts ...Option)
 		// authenticates via the X-Gitlab-Token header inside the handler
 		// rather than through authMiddleware.
 		r.Method("POST", base+"/gitlab", s.apm.WrapHandler("POST /gitlab", http.HandlerFunc(s.handleGitlab)))
+		s.metrics.InitSendRoute(base + "/gitlab")
 		vlog.Info("server: gitlab endpoint enabled (%d senders, token auth)", len(s.gitCfg.Senders))
 	}
 
@@ -663,4 +681,35 @@ func (s *Server) Run(ctx context.Context) error {
 func (s *Server) handleHealthz(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
 	w.Write([]byte(`{"ok":true}` + "\n"))
+}
+
+// metricsMiddleware counts every served request by method, route pattern and
+// status, and hands the metrics to the request for the fan-out. The pattern is
+// read after the request is routed.
+func (s *Server) metricsMiddleware(next http.Handler) http.Handler {
+	if s.metrics == nil {
+		return next
+	}
+	return http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		start := time.Now()
+		ww := middleware.NewWrapResponseWriter(w, req.ProtoMajor)
+		next.ServeHTTP(ww, req.WithContext(metrics.WithContext(req.Context(), s.metrics)))
+		code := ww.Status()
+		if code == 0 {
+			code = http.StatusOK
+		}
+		s.metrics.ObserveHTTP(req.Method, routeLabel(req.Context()), code, time.Since(start))
+	})
+}
+
+// routeLabel is the metrics label for the route serving ctx: its pattern, such
+// as "/api/v1/send", or "other" when nothing matched. The raw path is never
+// used, so a scan of random URLs cannot add series.
+func routeLabel(ctx context.Context) string {
+	if rc := chi.RouteContext(ctx); rc != nil {
+		if p := rc.RoutePattern(); p != "" {
+			return p
+		}
+	}
+	return "other"
 }

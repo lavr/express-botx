@@ -9,6 +9,7 @@ import (
 
 	"github.com/lavr/express-botx/botx"
 	"github.com/lavr/express-botx/internal/config"
+	"github.com/lavr/express-botx/internal/httputil"
 )
 
 const (
@@ -116,13 +117,13 @@ func TestMembershipOption(t *testing.T) {
 			BotTimeout: 5,
 		}
 	}
-	if _, err := membershipOption(single(testBotHUID, nil)); err != nil {
+	if _, err := membershipOption(single(testBotHUID, nil), httputil.NewClient); err != nil {
 		t.Errorf("token-only bot: %v", err)
 	}
-	if _, err := membershipOption(single("", nil)); err == nil {
+	if _, err := membershipOption(single("", nil), httputil.NewClient); err == nil {
 		t.Error("bot without an id accepted: it could never be found among chat members")
 	}
-	if _, err := membershipOption(single(testBotHUID, &config.MembershipCacheConfig{TTL: "10s", NegativeTTL: "1m"})); err == nil {
+	if _, err := membershipOption(single(testBotHUID, &config.MembershipCacheConfig{TTL: "10s", NegativeTTL: "1m"}), httputil.NewClient); err == nil {
 		t.Error("negative_ttl longer than ttl accepted at startup")
 	}
 }

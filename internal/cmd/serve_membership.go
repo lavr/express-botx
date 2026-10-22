@@ -4,7 +4,9 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/http"
 	"strings"
+	"time"
 
 	"github.com/lavr/express-botx/botx"
 	"github.com/lavr/express-botx/internal/config"
@@ -35,7 +37,7 @@ func hasMembershipKeys(keys []server.ResolvedKey) bool {
 
 // membershipOption builds the server option that checks chat membership for
 // keys with chats_where_member, one BotX client per configured bot.
-func membershipOption(cfg *config.Config) (server.Option, error) {
+func membershipOption(cfg *config.Config, botxHTTP func(time.Duration) *http.Client) (server.Option, error) {
 	ttl, negativeTTL, err := cfg.Server.MembershipCache.Durations()
 	if err != nil {
 		return nil, err
@@ -44,14 +46,14 @@ func membershipOption(cfg *config.Config) (server.Option, error) {
 	if cfg.IsMultiBot() {
 		for _, name := range cfg.BotNames() {
 			b := cfg.Bots[name]
-			mb, err := newMembershipBot(b.Host, b.ID, b.Secret, b.Token, cfg)
+			mb, err := newMembershipBot(b.Host, b.ID, b.Secret, b.Token, botxHTTP(cfg.HTTPTimeout()))
 			if err != nil {
 				return nil, fmt.Errorf("bot %q: %w", name, err)
 			}
 			bots[name] = mb
 		}
 	} else {
-		mb, err := newMembershipBot(cfg.Host, cfg.BotID, cfg.BotSecret, cfg.BotToken, cfg)
+		mb, err := newMembershipBot(cfg.Host, cfg.BotID, cfg.BotSecret, cfg.BotToken, botxHTTP(cfg.HTTPTimeout()))
 		if err != nil {
 			return nil, err
 		}
@@ -64,25 +66,25 @@ func membershipOption(cfg *config.Config) (server.Option, error) {
 	}), nil
 }
 
-func newMembershipBot(host, botID, botSecret, botToken string, cfg *config.Config) (membershipBot, error) {
+func newMembershipBot(host, botID, botSecret, botToken string, hc *http.Client) (membershipBot, error) {
 	// The bot ID is what chats/info lists the bot under, so it is needed even
 	// when a token alone would do for sending.
 	if botID == "" {
 		return membershipBot{}, errors.New("chats_where_member needs the bot id to find the bot among chat members")
 	}
-	timeout := botx.WithTimeout(cfg.HTTPTimeout())
+	opts := []botx.Option{botx.WithTimeout(hc.Timeout), botx.WithHTTPClient(hc)}
 	if botSecret == "" && botToken != "" {
 		tok, err := secret.Resolve(botToken)
 		if err != nil {
 			return membershipBot{}, fmt.Errorf("resolving token: %w", err)
 		}
-		return membershipBot{client: botx.NewWithToken(host, tok, timeout), huid: botID}, nil
+		return membershipBot{client: botx.NewWithToken(host, tok, opts...), huid: botID}, nil
 	}
 	sec, err := secret.Resolve(botSecret)
 	if err != nil {
 		return membershipBot{}, fmt.Errorf("resolving secret: %w", err)
 	}
-	c, err := botx.New(host, botID, sec, timeout)
+	c, err := botx.New(host, botID, sec, opts...)
 	if err != nil {
 		return membershipBot{}, err
 	}

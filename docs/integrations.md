@@ -169,11 +169,12 @@ server:
 к одному запросу.
 
 В логе на каждую проверку, предварительную и повторную, есть строка с исходом `member`, `not_member` или
-`error` и источником ответа (`botx` или `cache`):
+`error` и источником ответа: `cache` или `lookup` (запрос к BotX, свой или общий
+с параллельной проверкой того же чата):
 
 ```
 scope: chat "1b6f0c2e-..." membership member [key: chat-controller, request_id: botx-7f3a/Xy9-000042, bot: alerts-bot, source: cache]
-scope: chat "1b6f0c2e-..." membership error [key: chat-controller, request_id: botx-7f3a/Xy9-000043, bot: alerts-bot, source: botx]: Get "https://express.example.com/...": context deadline exceeded
+scope: chat "1b6f0c2e-..." membership error [key: chat-controller, request_id: botx-7f3a/Xy9-000043, bot: alerts-bot, source: lookup]: Get "https://express.example.com/...": context deadline exceeded
 ```
 
 ## Диагностика: сообщение не дошло

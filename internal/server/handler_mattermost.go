@@ -9,6 +9,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	vlog "github.com/lavr/express-botx/internal/log"
+	"github.com/lavr/express-botx/internal/metrics"
 )
 
 var DefaultMattermostErrorSeverities = []string{"critical", "high"}
@@ -104,7 +105,9 @@ func (s *Server) handleMattermostCreatePost(w http.ResponseWriter, r *http.Reque
 	elapsed := time.Since(start)
 
 	keyName := KeyName(r.Context())
+	m, route := metrics.FromContext(r.Context()), routeLabel(r.Context())
 	if err != nil {
+		m.Delivery(route, metrics.Failed)
 		if status, msg, ok := authorizationFailure([]SendError{{cause: err}}); ok {
 			vlog.Info("mattermost: post to chat %q refused [key: %s] -> %d (%dms): %s", req.target, keyName, status, elapsed.Milliseconds(), boundedCause(err))
 			writeAccessError(w, status, msg)
@@ -115,10 +118,12 @@ func (s *Server) handleMattermostCreatePost(w http.ResponseWriter, r *http.Reque
 		return
 	}
 	if syncID == "" {
+		m.Delivery(route, metrics.Failed)
 		vlog.Info("mattermost: upstream accepted the post for chat %q without a sync_id [key: %s] -> 502 (%dms)", req.target, keyName, elapsed.Milliseconds())
 		writeError(w, http.StatusBadGateway, "upstream accepted the message without a sync_id, so it could never be updated")
 		return
 	}
+	m.Delivery(route, metrics.Delivered)
 	vlog.Info("mattermost: post %s submitted to chat %q [key: %s] (%dms)", syncID, req.target, keyName, elapsed.Milliseconds())
 
 	writeMattermostPost(w, syncID, req.post.ChannelID)
@@ -154,11 +159,14 @@ func (s *Server) handleMattermostUpdatePost(w http.ResponseWriter, r *http.Reque
 	elapsed := time.Since(start)
 
 	keyName := KeyName(r.Context())
+	m, route := metrics.FromContext(r.Context()), routeLabel(r.Context())
 	if err != nil {
+		m.Edit(route, metrics.Failed)
 		vlog.Info("mattermost: edit of post %s failed [key: %s] -> 502 (%dms): %s", postID, keyName, elapsed.Milliseconds(), boundedCause(err))
 		writeError(w, http.StatusBadGateway, s.deliveryError(r.Context(), "editing", err))
 		return
 	}
+	m.Edit(route, metrics.Delivered)
 	vlog.Info("mattermost: edit of post %s accepted for chat %q [key: %s] (%dms)", postID, req.target, keyName, elapsed.Milliseconds())
 
 	writeMattermostPost(w, postID, req.post.ChannelID)

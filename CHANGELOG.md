@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+### Added: метрики Prometheus
+
+`serve` и `serve --enqueue` отдают метрики Prometheus на отдельном адресе,
+если включить их в `server.metrics` (`enabled: true`, `listen`) или переменной
+`EXPRESS_BOTX_SERVER_METRICS_LISTEN`. По умолчанию выключены. Считаются
+запросы к серверу, исходы доставки по чатам, частичные доставки, HTTP-попытки
+к BotX, проверки членства и публикации в очередь. Эндпоинт без аутентификации:
+открывайте его только сборщику метрик. Список метрик — `docs/deployment.md`.
+
 ### Added: ключ для чатов, где состоит бот (`chats_where_member`)
 
 API-ключ с `chats_where_member: true` шлёт в любой чат, участником которого

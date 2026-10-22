@@ -136,6 +136,46 @@ type ServerConfig struct {
 	ExternalURL        string                   `yaml:"external_url,omitempty"` // public URL for OpenAPI docs (e.g. http://express-botx.example-dev.k8s)
 	TLS                *TLSYAMLConfig           `yaml:"tls,omitempty"`
 	MembershipCache    *MembershipCacheConfig   `yaml:"membership_cache,omitempty"`
+	Metrics            *MetricsConfig           `yaml:"metrics,omitempty"`
+}
+
+// MetricsConfig enables the Prometheus metrics endpoint. It is served on its
+// own listener, without authentication, so Listen has no default: binding all
+// interfaces must be a decision, not an accident.
+type MetricsConfig struct {
+	Enabled bool   `yaml:"enabled,omitempty"`
+	Listen  string `yaml:"listen,omitempty"` // e.g. "127.0.0.1:9090", or ":9090" in a container
+	Path    string `yaml:"path,omitempty"`   // default /metrics
+}
+
+// DefaultMetricsPath is where the metrics are served when path is not set.
+const DefaultMetricsPath = "/metrics"
+
+// Resolve applies the environment and defaults: EXPRESS_BOTX_SERVER_METRICS_LISTEN,
+// when set, enables the endpoint on that address whatever the config says. It
+// reports whether metrics are enabled, and an error for an enabled endpoint
+// without an address or with a path not starting with "/".
+func (m *MetricsConfig) Resolve(envListen string) (enabled bool, listen, path string, err error) {
+	var c MetricsConfig
+	if m != nil {
+		c = *m
+	}
+	if envListen != "" {
+		c.Enabled, c.Listen = true, envListen
+	}
+	if !c.Enabled {
+		return false, "", "", nil
+	}
+	if c.Listen == "" {
+		return false, "", "", fmt.Errorf("server.metrics.listen is required when metrics are enabled, e.g. \"127.0.0.1:9090\"")
+	}
+	if c.Path == "" {
+		c.Path = DefaultMetricsPath
+	}
+	if !strings.HasPrefix(c.Path, "/") {
+		return false, "", "", fmt.Errorf("server.metrics.path must start with \"/\", got %q", c.Path)
+	}
+	return true, c.Listen, c.Path, nil
 }
 
 type TLSYAMLConfig struct {
@@ -1208,7 +1248,10 @@ var knownKeys = map[string]map[string]bool{
 		"listen": true, "base_path": true, "api_keys": true, "allow_bot_secret_auth": true,
 		"allow_request_trace": true,
 		"alertmanager":        true, "grafana": true, "incidentrelay": true, "mattermost": true, "gitlab": true, "callbacks": true, "docs": true, "external_url": true,
-		"tls": true, "membership_cache": true,
+		"tls": true, "membership_cache": true, "metrics": true,
+	},
+	"server.metrics": {
+		"enabled": true, "listen": true, "path": true,
 	},
 	"server.membership_cache": {
 		"ttl": true, "negative_ttl": true,
@@ -1506,6 +1549,16 @@ func (c *Config) validateRequiredFields() []ValidationResult {
 			}
 			seen[name] = true
 		}
+	}
+
+	// The environment is not known here, so an enabled endpoint without a
+	// listen address is checked as written.
+	if _, _, _, err := c.Server.Metrics.Resolve(""); err != nil {
+		results = append(results, ValidationResult{
+			Level:   ValidationError,
+			Path:    "server.metrics",
+			Message: err.Error(),
+		})
 	}
 
 	if _, _, err := c.Server.MembershipCache.Durations(); err != nil {
