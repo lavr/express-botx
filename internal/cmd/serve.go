@@ -351,6 +351,13 @@ Options:
 	srvOpts = append(srvOpts, server.WithErrTracker(tracker))
 	srvOpts = append(srvOpts, server.WithConfigInfo(runtimeBotEntries(cfg), runtimeChatEntries(cfg)))
 	srvOpts = append(srvOpts, server.WithMentionsResolver(mentionsResolver))
+	if hasMembershipKeys(keys) {
+		opt, err := membershipOption(cfg)
+		if err != nil {
+			return err
+		}
+		srvOpts = append(srvOpts, opt)
+	}
 	logDeliveryPolicy(cfg)
 	if len(botMentionsResolvers) > 0 {
 		srvOpts = append(srvOpts, server.WithBotMentionsResolvers(botMentionsResolvers))
@@ -499,9 +506,15 @@ func resolveAPIKeys(keys []config.APIKeyConfig, chats map[string]config.ChatConf
 		if err != nil {
 			return nil, fmt.Errorf("key %q: %w", k.Name, err)
 		}
+		if k.ChatsWhereMember && k.Chats != nil {
+			return nil, fmt.Errorf("key %q: chats_where_member cannot be combined with chats", k.Name)
+		}
 		scope, err := resolveKeyScope(k, chats)
 		if err != nil {
 			return nil, err
+		}
+		if k.ChatsWhereMember {
+			vlog.Info("config: key %q may send to the chats its bot is a member of", k.Name)
 		}
 		if k.AllowQueryAuth {
 			vlog.Info("config: key %q may authenticate through the %s query parameter", k.Name, server.QueryKeyParam)
@@ -510,7 +523,7 @@ func resolveAPIKeys(keys []config.APIKeyConfig, chats map[string]config.ChatConf
 		if len(k.Chats) == 1 {
 			defaultChat = k.Chats[0]
 		}
-		resolved = append(resolved, server.ResolvedKey{Name: k.Name, Key: val, Chats: scope, DefaultChat: defaultChat, AllowQueryAuth: k.AllowQueryAuth})
+		resolved = append(resolved, server.ResolvedKey{Name: k.Name, Key: val, Chats: scope, ChatsWhereMember: k.ChatsWhereMember, DefaultChat: defaultChat, AllowQueryAuth: k.AllowQueryAuth})
 	}
 	return resolved, nil
 }
@@ -1167,6 +1180,12 @@ func runServeEnqueue(flags config.Flags, listenFlag, apiKeyFlag, tlsCertFlag, tl
 	keys, err := resolveAPIKeys(cfg.Server.APIKeys, cfg.Chats)
 	if err != nil {
 		return fmt.Errorf("resolving api keys: %w", err)
+	}
+	// In enqueue mode the sending bot is chosen from the catalog inside the
+	// pipeline, and the server may hold no bot credentials to ask BotX with,
+	// so membership cannot be checked before a message is queued.
+	if hasMembershipKeys(keys) {
+		return fmt.Errorf("api keys with chats_where_member are not supported with --enqueue: membership is checked against BotX before sending, which the enqueue path cannot do")
 	}
 
 	if apiKeyFlag != "" {

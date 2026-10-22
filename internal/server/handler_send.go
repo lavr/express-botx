@@ -156,7 +156,7 @@ func (s *Server) handleSend(w http.ResponseWriter, r *http.Request) {
 			writeError(w, http.StatusBadRequest, "chat_id is required")
 			return
 		}
-		if !s.authorizeTargets(w, r, targets, false) {
+		if !s.authorizeTargets(w, r, targets, false, payload.Bot) {
 			return
 		}
 
@@ -242,7 +242,7 @@ func (s *Server) handleSend(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "chat_id is required")
 		return
 	}
-	if !s.authorizeTargets(w, r, targets, true) {
+	if !s.authorizeTargets(w, r, targets, true, payload.Bot) {
 		return
 	}
 

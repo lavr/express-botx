@@ -315,7 +315,23 @@ paths:
               schema:
                 $ref: "#/components/schemas/ErrorResponse"
         "403":
-          description: Invalid credentials, or the target chat is outside this API key's chat scope
+          description: |
+            Invalid credentials, or the target chat is outside this API key's
+            chat scope. For a key with `chats_where_member`, the sending bot is
+            not a member of the chat, or BotX reports no such chat.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "503":
+          description: |
+            For a key with `chats_where_member`: the bot's membership in the
+            chat could not be checked (BotX unreachable, timed out or failed).
+            Nothing was sent; retry after the `Retry-After` seconds.
+          headers:
+            Retry-After:
+              schema:
+                type: integer
           content:
             application/json:
               schema:
@@ -421,7 +437,23 @@ paths:
               schema:
                 $ref: "#/components/schemas/ErrorResponse"
         "403":
-          description: Invalid credentials, or the target chat is outside this API key's chat scope
+          description: |
+            Invalid credentials, or the target chat is outside this API key's
+            chat scope. For a key with `chats_where_member`, the sending bot is
+            not a member of the chat, or BotX reports no such chat.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "503":
+          description: |
+            For a key with `chats_where_member`: the bot's membership in the
+            chat could not be checked (BotX unreachable, timed out or failed).
+            Nothing was sent; retry after the `Retry-After` seconds.
+          headers:
+            Retry-After:
+              schema:
+                type: integer
           content:
             application/json:
               schema:
@@ -625,7 +657,23 @@ paths:
               schema:
                 $ref: "#/components/schemas/ErrorResponse"
         "403":
-          description: Invalid credentials, or the target chat is outside this API key's chat scope
+          description: |
+            Invalid credentials, or the target chat is outside this API key's
+            chat scope. For a key with `chats_where_member`, the sending bot is
+            not a member of the chat, or BotX reports no such chat.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "503":
+          description: |
+            For a key with `chats_where_member`: the bot's membership in the
+            chat could not be checked (BotX unreachable, timed out or failed).
+            Nothing was sent; retry after the `Retry-After` seconds.
+          headers:
+            Retry-After:
+              schema:
+                type: integer
           content:
             application/json:
               schema:
@@ -741,7 +789,23 @@ paths:
               schema:
                 $ref: "#/components/schemas/ErrorResponse"
         "403":
-          description: Invalid credentials, or the target chat is outside this API key's chat scope
+          description: |
+            Invalid credentials, or the target chat is outside this API key's
+            chat scope. For a key with `chats_where_member`, the sending bot is
+            not a member of the chat, or BotX reports no such chat.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "503":
+          description: |
+            For a key with `chats_where_member`: the bot's membership in the
+            chat could not be checked (BotX unreachable, timed out or failed).
+            Nothing was sent; retry after the `Retry-After` seconds.
+          headers:
+            Retry-After:
+              schema:
+                type: integer
           content:
             application/json:
               schema:
@@ -845,7 +909,23 @@ paths:
               schema:
                 $ref: "#/components/schemas/ErrorResponse"
         "403":
-          description: Invalid credentials, or the target chat is outside this API key's chat scope
+          description: |
+            Invalid credentials, or the target chat is outside this API key's
+            chat scope. For a key with `chats_where_member`, the sending bot is
+            not a member of the chat, or BotX reports no such chat.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "503":
+          description: |
+            For a key with `chats_where_member`: the bot's membership in the
+            chat could not be checked (BotX unreachable, timed out or failed).
+            Nothing was sent; retry after the `Retry-After` seconds.
+          headers:
+            Retry-After:
+              schema:
+                type: integer
           content:
             application/json:
               schema:
