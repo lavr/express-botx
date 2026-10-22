@@ -3,6 +3,7 @@ package auth
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -127,5 +128,51 @@ func TestGetToken_BadJSON(t *testing.T) {
 	_, err := GetToken(ctx, srv.URL, "bot-id", "sig", 10*time.Second)
 	if err == nil {
 		t.Fatal("expected error for bad JSON")
+	}
+}
+
+func TestGetToken_TransportErrorMasksSignature(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+	srv.Close()
+
+	sig := BuildSignature("bot-id", "secret")
+	_, err := GetToken(context.Background(), srv.URL, "bot-id", sig, 10*time.Second)
+	if err == nil {
+		t.Fatal("expected error for closed server")
+	}
+	if strings.Contains(err.Error(), sig) {
+		t.Errorf("error leaks signature: %v", err)
+	}
+	if !strings.Contains(err.Error(), "signature=") {
+		t.Errorf("error should keep the masked URL: %v", err)
+	}
+}
+
+func TestGetToken_TimeoutKeepsDeadlineError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		<-r.Context().Done()
+	}))
+	defer srv.Close()
+
+	sig := BuildSignature("bot-id", "secret")
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	_, err := GetToken(ctx, srv.URL, "bot-id", sig, 10*time.Second)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("expected deadline exceeded, got %v", err)
+	}
+	if strings.Contains(err.Error(), sig) {
+		t.Errorf("error leaks signature: %v", err)
+	}
+}
+
+func TestGetToken_InvalidURLMasksSignature(t *testing.T) {
+	sig := BuildSignature("bot-id", "secret")
+	_, err := doGetToken(context.Background(), "http://bad host/token?signature="+sig, http.DefaultClient)
+	if err == nil {
+		t.Fatal("expected error for invalid URL")
+	}
+	if strings.Contains(err.Error(), sig) {
+		t.Errorf("error leaks signature: %v", err)
 	}
 }

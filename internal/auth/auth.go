@@ -6,8 +6,10 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
+	neturl "net/url"
 	"strings"
 	"time"
 
@@ -45,12 +47,12 @@ func doGetToken(ctx context.Context, url string, client *http.Client) (string, e
 	start := time.Now()
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
 	if err != nil {
-		return "", fmt.Errorf("creating request: %w", err)
+		return "", fmt.Errorf("creating request: %w", maskSignatureInError(err))
 	}
 
 	resp, err := client.Do(req)
 	if err != nil {
-		return "", fmt.Errorf("requesting token: %w", err)
+		return "", fmt.Errorf("requesting token: %w", maskSignatureInError(err))
 	}
 	defer resp.Body.Close()
 	elapsed := time.Since(start)
@@ -79,4 +81,12 @@ func maskSignatureInURL(url string) string {
 		return url[:i+len("signature=")] + vlog.Mask(sig)
 	}
 	return url
+}
+
+func maskSignatureInError(err error) error {
+	var urlErr *neturl.Error
+	if errors.As(err, &urlErr) {
+		urlErr.URL = maskSignatureInURL(urlErr.URL)
+	}
+	return err
 }
