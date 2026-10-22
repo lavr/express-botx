@@ -21,10 +21,16 @@
 - `--dry-run` prints the plan and exits before any tag, commit or push, and does
   not require `--yes`. Use it to check a release from a phone before cutting it.
 - Relative specs resolve against the current tags, so they are not retry
-  identifiers. `release.sh` refuses to start while the latest local tag is
-  missing on `origin`: an interrupted release is finished with the
-  `git push --atomic` it prints (or its local tag is deleted), never by
-  releasing the next version. An unreachable `origin` stops the script too.
+  identifiers. Before picking a version `release.sh` compares tags with
+  `origin` and stops when:
+  - the latest app or chart tag is only local (an interrupted release): finish
+    it with the `git push --atomic origin main <tags>` it prints, never by
+    releasing the next version. The script does not undo a release; abandoning
+    one means removing its local tags and any chart bump commit by hand;
+  - such a tag points at another commit on `origin`: published tags are never
+    moved, settle which one is right first;
+  - `origin` has newer versions than the clone: `git fetch origin --tags`;
+  - `origin` is unreachable.
 - `scripts/tests/release_test.sh` covers the parser, version rules, consent,
   dry-run invariance, publishing to a local bare remote, rejected pushes and
   recovery; run it after touching `release.sh` or the `Makefile` version.

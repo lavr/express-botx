@@ -30,8 +30,8 @@ Options:
 Non-interactive use needs every spec supplied plus --yes; consent is never
 inferred from the absence of a terminal. App tags are vX.Y.Z; the version
 in Chart.yaml, binaries and images stays X.Y.Z. The release stops while the
-latest tag exists only locally: finish that interrupted release with the
-printed git push, or delete its tag, before releasing the next version.
+latest app or chart tag exists only locally: finish that interrupted release
+with the printed git push before releasing the next version.
 USAGE
 }
 
@@ -97,11 +97,21 @@ require_clean_tree() {
     git diff --quiet || die "worktree has uncommitted changes; commit or stash them first"
 }
 
-# current_app_version prints the highest app version, from either a vX.Y.Z
-# or a legacy X.Y.Z tag, without the prefix.
-current_app_version() {
-    git tag -l | grep -E '^v?(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$' \
+# max_app_version reads tag names on stdin and prints the highest app version,
+# from either a vX.Y.Z or a legacy X.Y.Z tag, without the prefix.
+max_app_version() {
+    grep -E '^v?(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$' \
         | sed 's/^v//' | sort -t. -k1,1n -k2,2n -k3,3n | tail -n 1 || true
+}
+
+# max_chart_version reads tag names on stdin and prints the highest chart version.
+max_chart_version() {
+    grep -E '^chart-(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$' \
+        | sed 's/^chart-//' | sort -t. -k1,1n -k2,2n -k3,3n | tail -n 1 || true
+}
+
+current_app_version() {
+    git tag -l | max_app_version
 }
 
 app_tag() {
@@ -237,23 +247,71 @@ remote_has_tag() {
 require_absent_tag() {
     local tag="$1"
     if git rev-parse -q --verify "refs/tags/$tag" >/dev/null; then
-        if remote_has_tag "$tag"; then
-            die "tag $tag already exists here and on $REMOTE: this version is released"
-        fi
-        die "tag $tag exists here but not on $REMOTE, likely from an interrupted release. Check it with 'git show $tag', then either push it with 'git push --atomic $REMOTE main $tag' or delete it with 'git tag -d $tag'"
+        remote_has_tag "$tag" && die "tag $tag already exists here and on $REMOTE: this version is released"
+        die "tag $tag exists here but not on $REMOTE; find out where it came from before releasing this version"
     fi
     remote_has_tag "$tag" && die "tag $tag already exists on $REMOTE; fetch tags with 'git fetch $REMOTE --tags' and check './release.sh status'"
     return 0
 }
 
-# require_published stops before a new release while the latest tag of the
-# same kind exists only here: that release was interrupted and must be finished
-# (or its tag deleted) first, not superseded by the next version.
-require_published() {
-    local tag="$1"
-    [[ -n "$tag" ]] || return 0
-    remote_has_tag "$tag" && return 0
-    die "latest tag $tag is not on $REMOTE, likely from an interrupted release. Check it with 'git show $tag', then either push it with 'git push --atomic $REMOTE main $tag' or delete it with 'git tag -d $tag'"
+# remote_commit prints the commit a tag points to in an ls-remote listing,
+# peeled for annotated tags, or nothing when the listing lacks the tag.
+remote_commit() {
+    local listing="$1" tag="$2" peeled plain
+    peeled=$(awk -v r="refs/tags/$tag^{}" '$2 == r {print $1}' <<< "$listing")
+    plain=$(awk -v r="refs/tags/$tag" '$2 == r {print $1}' <<< "$listing")
+    printf '%s' "${peeled:-$plain}"
+}
+
+# preflight compares the local tags with the remote before a version is picked.
+# It stops when the latest app or chart tag is only local, which is what an
+# interrupted release leaves, so that release is finished before the next one;
+# when such a tag points elsewhere on the remote; and when the remote has newer
+# versions than this clone, which would otherwise be skipped over.
+preflight() {
+    local listing rc=0
+    listing=$(git ls-remote --tags "$REMOTE" 2>/dev/null) || rc=$?
+    (( rc == 0 )) || die "cannot list tags on $REMOTE (git ls-remote exit $rc); check the connection and retry"
+
+    local app chart tag here there missing=()
+    app=$(current_app_version)
+    chart=$(current_chart_tag)
+    for tag in ${app:+"$(app_tag_ref "$app")"} ${chart:+"chart-$chart"}; do
+        there=$(remote_commit "$listing" "$tag")
+        if [[ -z "$there" ]]; then
+            missing+=("$tag")
+            continue
+        fi
+        here=$(git rev-parse "refs/tags/$tag^{commit}")
+        [[ "$here" == "$there" ]] || die "tag $tag is at ${here:0:7} here but at ${there:0:7} on $REMOTE; published tags are never moved, so settle which one is right before releasing"
+    done
+
+    if (( ${#missing[@]} )); then
+        {
+            echo "Error: latest tag(s) ${missing[*]} are not on $REMOTE, likely left by an interrupted release."
+            echo "Check them and the local main against $REMOTE:"
+            echo "  git show --no-patch ${missing[*]}"
+            echo "  git ls-remote $REMOTE main"
+            echo "  git log --oneline main --not --remotes=$REMOTE"
+            echo "If they are the release you meant, finish it with:"
+            echo "  git push --atomic $REMOTE main ${missing[*]}"
+            echo "release.sh does not undo a release: abandoning it means removing its local"
+            echo "tags and any chart bump commit by hand."
+        } >&2
+        exit 1
+    fi
+
+    local names remote_app remote_chart
+    names=$(awk '{print $2}' <<< "$listing" | sed -n 's#^refs/tags/##p' | grep -v '\^{}$' || true)
+    remote_app=$(max_app_version <<< "$names")
+    remote_chart=$(max_chart_version <<< "$names")
+    if [[ -n "$remote_app" ]] && { [[ -z "$app" ]] || version_gt "$remote_app" "$app"; }; then
+        die "$REMOTE has app $remote_app, newer than the local $app; fetch tags with 'git fetch $REMOTE --tags' first"
+    fi
+    if [[ -n "$remote_chart" ]] && { [[ -z "$chart" ]] || version_gt "$remote_chart" "$chart"; }; then
+        die "$REMOTE has chart $remote_chart, newer than the local $chart; fetch tags with 'git fetch $REMOTE --tags' first"
+    fi
+    return 0
 }
 
 # require_absent_app_version rejects a version taken by either tag form.
@@ -266,8 +324,11 @@ require_absent_app_version() {
 # need a /vN suffix on the module path, so such a release needs that change first.
 require_module_major() {
     local major="${1%%.*}" module
-    (( major < 2 )) && return 0
     module=$(awk '$1 == "module" {print $2; exit}' go.mod)
+    if (( major < 2 )); then
+        [[ ! "$module" =~ /v[0-9]+$ ]] || die "app $1 does not match module path $module in go.mod: 0.x and 1.x need a path without /vN"
+        return 0
+    fi
     [[ "$module" == */v"$major" ]] || die "app $1 needs module path .../v$major in go.mod (now $module); change the module path first or pick a 0.x/1.x version"
 }
 
@@ -280,7 +341,7 @@ push_refs() {
     echo "  git ls-remote $REMOTE main ${*:2}" >&2
     echo "If nothing did, retry the same push:" >&2
     echo "  git push --atomic $REMOTE $*" >&2
-    echo "Do not rerun release.sh with a new version for this release." >&2
+    echo "Until it is pushed, release.sh refuses new releases and prints this push again." >&2
     exit 1
 }
 
@@ -316,7 +377,7 @@ edit_chart() {
 
 release_app() {
     local base; base=$(current_app_version)
-    [[ -n "$base" ]] && require_published "$(app_tag_ref "$base")"
+    preflight
     pick_version "$base" "App version" "${SPECS[0]:-}"
     local version="$PICKED_VERSION"
     local tag; tag=$(app_tag "$version")
@@ -343,7 +404,7 @@ release_app() {
 
 release_chart() {
     local base; base=$(current_chart_tag)
-    [[ -n "$base" ]] && require_published "chart-$base"
+    preflight
     pick_version "$base" "Chart version" "${SPECS[0]:-}"
     local version="$PICKED_VERSION"
     local tag="chart-${version}"
@@ -371,8 +432,7 @@ release_both() {
     local app_base chart_base
     app_base=$(current_app_version)
     chart_base=$(current_chart_tag)
-    [[ -n "$app_base" ]] && require_published "$(app_tag_ref "$app_base")"
-    [[ -n "$chart_base" ]] && require_published "chart-$chart_base"
+    preflight
 
     pick_version "$app_base" "App version" "${SPECS[0]:-}"
     local app_version="$PICKED_VERSION"

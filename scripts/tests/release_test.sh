@@ -140,6 +140,12 @@ V3="${lmaj}.$((lmin + 3)).0"
 
 expect_ok "dry run plans a v tag"       "tag app v$V1"          app minor --dry-run
 expect_message "v2 needs a /v2 module"  "module path"           app 2.0.0 --dry-run
+set_module() { sed -i '' "s#^module .*#module $1#" "$ROOT/go.mod"; }
+set_module github.com/lavr/express-botx/v2
+expect_ok "v2 with a /v2 module"        "tag app v2.0.0"        app 2.0.0 --dry-run
+expect_message "v3 with a /v2 module"   "module path"           app 3.0.0 --dry-run
+expect_message "0.x with a /v2 module"  "without /vN"           app minor --dry-run
+git -C "$ROOT" checkout --quiet go.mod
 
 add_commit "app release"
 head=$(git -C "$ROOT" rev-parse HEAD)
@@ -169,32 +175,83 @@ tags_before=$(git -C "$BARE" tag -l | grep -v '^chart-' | sort)
 C2="${cmaj}.${cmin}.$((cpatch + 2))"
 expect_ok "chart release"               "Pushed tag: chart-$C2" chart "$C2" --yes
 check "chart: no new app tags"          test "$(git -C "$BARE" tag -l | grep -v '^chart-' | sort)" = "$tags_before"
+check "make version skips chart tags"   test "$(make -s -C "$ROOT" version | cut -d- -f1)" = "$V2"
 
-echo "--- interrupted push ---"
-add_commit "interrupted release"
-cat > "$BARE/hooks/pre-receive" <<'HOOK'
+# run_printed runs the 'git push' line a failed release.sh printed, so the
+# recovery advice itself is what gets tested.
+run_printed() {
+    local cmd
+    cmd=$(grep -E '^  git push --atomic ' <<< "$1" | tail -n 1)
+    [[ -n "$cmd" ]] || return 1
+    (cd "$ROOT" && eval "$cmd" >/dev/null 2>&1)
+}
+
+reject_chart_tags() {
+    cat > "$BARE/hooks/pre-receive" <<'HOOK'
 #!/bin/sh
 while read -r old new ref; do
     case "$ref" in refs/tags/chart-*) echo "rejected by test hook" >&2; exit 1 ;; esac
 done
 HOOK
-chmod +x "$BARE/hooks/pre-receive"
-remote_before=$(git -C "$BARE" show-ref | sort)
+    chmod +x "$BARE/hooks/pre-receive"
+}
+
+published() {
+    local tag
+    test "$(git -C "$BARE" rev-parse main)" = "$(git -C "$ROOT" rev-parse main)" || return 1
+    for tag in "$@"; do
+        test "$(commit_of "$BARE" "$tag")" = "$(commit_of "$ROOT" "$tag")" || return 1
+    done
+}
+
+echo "--- interrupted chart ---"
+reject_chart_tags
 C3="${cmaj}.${cmin}.$((cpatch + 3))"
-expect_message "rejected push"          "retry the same push"   both "$V3" "$C3" --yes
+expect_message "chart push rejected"    "retry the same push"   chart "$C3" --yes
+rm "$BARE/hooks/pre-receive"
+out=$(cd "$ROOT" && setsid_free chart patch --yes)
+check "rerun names main and the tag"    grep -q "git push --atomic origin main chart-$C3\$" <<< "$out"
+check "rerun offers no tag -d"          test "$(grep -c 'tag -d' <<< "$out")" = 0
+check "printed push finishes chart"     run_printed "$out"
+check "chart release published"         published "chart-$C3"
+
+echo "--- interrupted both ---"
+add_commit "interrupted release"
+reject_chart_tags
+remote_before=$(git -C "$BARE" show-ref | sort)
+C4="${cmaj}.${cmin}.$((cpatch + 4))"
+expect_message "rejected push"          "retry the same push"   both "$V3" "$C4" --yes
 check "atomic: remote unchanged"        test "$(git -C "$BARE" show-ref | sort)" = "$remote_before"
 check "local tags kept"                 test -n "$(commit_of "$ROOT" "v$V3")"
-expect_message "retry with next version" "not on origin"        app patch --yes
-expect_message "retry with same version" "not on origin"        both "$V3" "$C3" --yes
+out=$(cd "$ROOT" && setsid_free app patch --yes)
+check "next app names both tags"        grep -q "git push --atomic origin main v$V3 chart-$C4\$" <<< "$out"
+out=$(cd "$ROOT" && setsid_free both "$V3" "$C4" --yes)
+check "same both names both tags"       grep -q "git push --atomic origin main v$V3 chart-$C4\$" <<< "$out"
 rm "$BARE/hooks/pre-receive"
-git -C "$ROOT" push --quiet --atomic origin main "v$V3" "chart-$C3" 2>/dev/null
-check "suggested push finishes it"      test "$(commit_of "$BARE" "v$V3")" = "$(commit_of "$ROOT" "v$V3")"
+# Half of the advice taken by hand: only the app tag reaches the remote.
+git -C "$ROOT" push --quiet --atomic origin main "v$V3" 2>/dev/null
+out=$(cd "$ROOT" && setsid_free app patch --dry-run)
+check "half-pushed: chart still named"  grep -q "git push --atomic origin main chart-$C4\$" <<< "$out"
+check "printed push finishes both"      run_printed "$out"
+check "both release published"          published "v$V3" "chart-$C4"
 expect_ok "next release after recovery" "Plan:"                 app patch --dry-run
 
-echo "--- remote-only tag ---"
+echo "--- tag moved on the remote ---"
+git -C "$ROOT" tag -f "v$V3" "v$V3^" >/dev/null
+expect_message "local and remote differ" "never moved"          app patch --dry-run
+git -C "$ROOT" fetch --quiet --force origin "refs/tags/v$V3:refs/tags/v$V3"
+check "fetch restores the tag"          published "v$V3"
+
+echo "--- newer tags on the remote ---"
 V4="${lmaj}.$((lmin + 4)).0"
+V5="${lmaj}.$((lmin + 5)).0"
 git -C "$ROOT" push --quiet origin "HEAD:refs/tags/v$V4" 2>/dev/null
-expect_message "tag already on remote"  "already exists on origin" app "$V4" --yes
+expect_message "newer v tag on remote"  "git fetch origin --tags" app "$V5" --dry-run
+git -C "$BARE" tag -d "v$V4" >/dev/null
+git -C "$ROOT" push --quiet origin "HEAD:refs/tags/$V4" 2>/dev/null
+expect_message "newer bare tag on remote" "git fetch origin --tags" app "$V5" --dry-run
+git -C "$ROOT" fetch --quiet origin --tags
+expect_ok "a newer bare tag is the base" "tag app v${lmaj}.$((lmin + 4)).1" app patch --dry-run
 
 echo "--- unreachable remote ---"
 git -C "$ROOT" remote set-url origin "$ROOT/no-such-remote"
