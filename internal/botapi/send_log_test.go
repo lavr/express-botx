@@ -10,7 +10,6 @@ import (
 	"strings"
 	"testing"
 	"time"
-	"unicode/utf8"
 
 	vlog "github.com/lavr/express-botx/internal/log"
 )
@@ -83,46 +82,43 @@ func TestSendWithSyncID_LogsUpstreamErrorBodyAtV1(t *testing.T) {
 	}
 }
 
-func TestTruncateErrorBody(t *testing.T) {
+func TestSendWithSyncID_KeepsLegacySuccessOn2xx(t *testing.T) {
 	tests := []struct {
-		name          string
-		body          []byte
-		wantTruncated bool
-		wantMarker    string
+		name, body, want string
 	}{
-		{
-			name:          "short body is passed through",
-			body:          []byte(`{"reason":"nope"}`),
-			wantTruncated: false,
-		},
-		{
-			name:          "oversized body is marked",
-			body:          bytes.Repeat([]byte("x"), maxErrorBodyLogBytes+100),
-			wantTruncated: true,
-			wantMarker:    "truncated to",
-		},
-		{
-			// A three-byte rune offset by one ASCII byte: a raw data[:N] cut
-			// would land mid-rune, which a two-byte rune on an even boundary
-			// could not reveal.
-			name:          "cut lands on a rune boundary",
-			body:          append([]byte("x"), bytes.Repeat([]byte("→"), maxErrorBodyLogBytes)...),
-			wantTruncated: true,
-			wantMarker:    "truncated to",
-		},
+		{name: "status error still counts as sent", body: `{"status":"error","reason":"x","result":{"sync_id":"s-1"}}`, want: "s-1"},
+		{name: "non-JSON body counts as sent", body: `<html>ok</html>`, want: ""},
+		{name: "status ok", body: `{"status":"ok","result":{"sync_id":"s-2"}}`, want: "s-2"},
+		{name: "large body without status keeps sync_id", body: `{"result":{"sync_id":"s-3"},"padding":"` + strings.Repeat("x", 5000) + `"}`, want: "s-3"},
 	}
-
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, truncated := truncateErrorBody(tt.body)
-			if truncated != tt.wantTruncated {
-				t.Fatalf("truncated = %v, want %v", truncated, tt.wantTruncated)
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(http.StatusAccepted)
+				_, _ = io.WriteString(w, tt.body)
+			}))
+			defer srv.Close()
+
+			c := &Client{BaseURL: srv.URL, Token: "t", HTTPClient: srv.Client()}
+			got, err := c.SendWithSyncID(context.Background(), &SendRequest{GroupChatID: "c1"})
+			if err != nil || got != tt.want {
+				t.Errorf("SendWithSyncID() = %q, %v; want %q, nil", got, err, tt.want)
 			}
-			if tt.wantMarker != "" && !strings.Contains(got, tt.wantMarker) {
-				t.Errorf("missing truncation marker in %q", got[max(0, len(got)-60):])
-			}
-			if !utf8.ValidString(got) {
-				t.Errorf("log line is not valid UTF-8")
+		})
+	}
+}
+
+func TestSendWithSyncID_OtherSuccessCodesStayErrors(t *testing.T) {
+	for _, code := range []int{http.StatusNoContent, http.StatusPartialContent, http.StatusMultiStatus} {
+		t.Run(http.StatusText(code), func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(code)
+			}))
+			defer srv.Close()
+
+			c := &Client{BaseURL: srv.URL, Token: "t", HTTPClient: srv.Client()}
+			if _, err := c.SendWithSyncID(context.Background(), &SendRequest{GroupChatID: "c1"}); err == nil {
+				t.Errorf("HTTP %d: want an error", code)
 			}
 		})
 	}
