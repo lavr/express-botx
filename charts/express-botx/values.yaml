@@ -122,6 +122,26 @@ ingress:
     #       pathType: Prefix
   tls: []
 
+# Prometheus metrics (serve and serve-enqueue modes; not available in worker).
+# The container serves them on their own port without authentication, set
+# through EXPRESS_BOTX_SERVER_METRICS_LISTEN. A separate ClusterIP Service
+# carries that port, so it is never published by the main Service or an Ingress.
+metrics:
+  enabled: false
+  port: 9090
+  # Must match server.metrics.path in the config if you change it there.
+  path: /metrics
+  service:
+    port: 9090
+    annotations: {}
+  # prometheus-operator ServiceMonitor; needs the monitoring.coreos.com CRDs.
+  serviceMonitor:
+    enabled: false
+    interval: 30s
+    scrapeTimeout: ""
+    # Labels your Prometheus selects ServiceMonitors by, e.g. release: kube-prometheus-stack
+    labels: {}
+
 resources:
   requests:
     cpu: 50m

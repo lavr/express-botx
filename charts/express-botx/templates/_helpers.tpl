@@ -66,6 +66,18 @@ Config secret name.
 {{- default (include "express-botx.fullname" .) .Values.existingSecret }}
 {{- end }}
 
+{{/*
+Metrics are served by serve and serve-enqueue only.
+*/}}
+{{- define "express-botx.metrics.validate" -}}
+{{- if and .Values.metrics.enabled (eq .Values.mode "worker") }}
+{{- fail "metrics.enabled is not supported in worker mode: the worker has no metrics endpoint" }}
+{{- end }}
+{{- if and .Values.metrics.enabled (not (hasPrefix "/" (toString .Values.metrics.path))) }}
+{{- fail "metrics.path must start with /" }}
+{{- end }}
+{{- end }}
+
 {{- define "express-botx.portName" -}}
 {{- if .Values.tls.enabled }}https{{ else }}http{{ end }}
 {{- end }}

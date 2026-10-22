@@ -1,4 +1,5 @@
 {{- include "express-botx.tls.validate" . -}}
+{{- include "express-botx.metrics.validate" . -}}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -53,6 +54,11 @@ spec:
             {{- if ne .Values.mode "worker" }}
             - name: {{ include "express-botx.portName" . }}
               containerPort: {{ .Values.containerPort }}
+              protocol: TCP
+            {{- end }}
+            {{- if .Values.metrics.enabled }}
+            - name: metrics
+              containerPort: {{ .Values.metrics.port }}
               protocol: TCP
             {{- end }}
             {{- if and (eq .Values.mode "worker") .Values.config.worker }}
@@ -123,6 +129,10 @@ spec:
               value: {{ printf "%s/tls.key" (trimSuffix "/" .Values.tls.mountPath) | quote }}
             - name: EXPRESS_BOTX_SERVER_TLS_RELOAD_INTERVAL
               value: {{ .Values.tls.reloadInterval | quote }}
+            {{- end }}
+            {{- if .Values.metrics.enabled }}
+            - name: EXPRESS_BOTX_SERVER_METRICS_LISTEN
+              value: {{ printf ":%v" .Values.metrics.port | quote }}
             {{- end }}
             {{- with .Values.extraEnv }}
             {{- tpl (toYaml .) $ | nindent 12 }}

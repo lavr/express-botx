@@ -352,6 +352,9 @@ server:
 серии видны с нулём сразу после старта, поэтому `rate()` по ним не пропадает.
 Метрик `worker` пока нет.
 
+В Helm-чарте метрики включаются `metrics.enabled: true`, ServiceMonitor —
+`metrics.serviceMonitor.enabled: true` (см. README чарта).
+
 Инстанс метками не помечается: это делает Prometheus при сборе (`instance`, а
 через Kubernetes service discovery — `pod`, `namespace`). Версию на каждом
 поде показывает `build_info`.

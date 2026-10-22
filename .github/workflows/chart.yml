@@ -31,6 +31,9 @@ jobs:
       - name: Test TLS chart rendering
         run: bash charts/express-botx/tests/tls-smoke.sh
 
+      - name: Test metrics chart rendering
+        run: bash charts/express-botx/tests/metrics-smoke.sh
+
   publish:
     if: startsWith(github.ref, 'refs/tags/chart-')
     needs: lint
