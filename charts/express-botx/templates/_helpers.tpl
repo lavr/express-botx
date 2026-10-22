@@ -88,10 +88,17 @@ Metrics are served by serve and serve-enqueue only.
 
 {{/*
 Metrics Service name: the fullname cut to leave room for "-metrics", so the
-name stays within 63 characters and never collides with the main Service.
+name stays within 63 characters. A fullname that itself ends in "-metrics"
+can come out unchanged from that; it then gets a different suffix, so the
+two Services never share a name.
 */}}
 {{- define "express-botx.metricsName" -}}
-{{- printf "%s-metrics" (include "express-botx.fullname" . | trunc 55 | trimSuffix "-") }}
+{{- $full := include "express-botx.fullname" . }}
+{{- $name := printf "%s-metrics" ($full | trunc 55 | trimSuffix "-") }}
+{{- if eq $name $full }}
+{{- $name = printf "%s-mtr" ($full | trunc 59 | trimSuffix "-") }}
+{{- end }}
+{{- $name }}
 {{- end }}
 
 {{- define "express-botx.portName" -}}

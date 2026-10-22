@@ -58,12 +58,21 @@ expect_fail_with "path mismatch" "does not match the path the app serves" \
 expect_fail_with "config path mismatch" "does not match the path the app serves" \
   --set metrics.enabled=true --set config.server.metrics.path=/prom
 
-# A long release name keeps the metrics Service name valid and distinct.
-long="$(printf 'a%.0s' {1..63})"
-out="$(render --set metrics.enabled=true --set fullnameOverride="$long")"
-name="$(awk '/component: metrics/{c=1} /^kind:/{c=0} {print}' <<<"$out" | grep -E '^  name: .*-metrics$' | head -1 | awk '{print $2}')"
-[[ -n "$name" && ${#name} -le 63 ]] || { echo "metrics Service name invalid: '$name' (${#name})" >&2; exit 1; }
-[[ "$name" != "$long" ]] || { echo "metrics Service name collides with the main one" >&2; exit 1; }
+# A long release name keeps the metrics Service name valid and distinct from
+# the main Service: 63 characters, and a fullname that already ends in -metrics.
+service_names() {
+  helm template test "$chart_dir" --set metrics.enabled=true --set fullnameOverride="$1" \
+    --show-only templates/service.yaml --show-only templates/metrics-service.yaml |
+    awk '/^metadata:/{m=1; next} m && /^  name:/{print $2; m=0}'
+}
+for full in "$(printf 'a%.0s' {1..63})" "$(printf 'a%.0s' {1..55})-metrics"; do
+  names="$(service_names "$full")"
+  main="$(sed -n 1p <<<"$names")"
+  metrics="$(sed -n 2p <<<"$names")"
+  [[ "$main" == "$full" ]] || { echo "main Service name: '$main', want '$full'" >&2; exit 1; }
+  [[ -n "$metrics" && ${#metrics} -le 63 ]] || { echo "metrics Service name invalid: '$metrics' (${#metrics})" >&2; exit 1; }
+  [[ "$metrics" != "$main" ]] || { echo "metrics Service name collides with the main one: $metrics" >&2; exit 1; }
+done
 
 # serve-enqueue gets metrics too; worker refuses them.
 out="$(render --set mode=serve-enqueue --set metrics.enabled=true)"
