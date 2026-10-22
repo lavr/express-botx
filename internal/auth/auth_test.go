@@ -85,9 +85,9 @@ func TestGetToken(t *testing.T) {
 		}
 
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(tokenResponse{
-			Status: "ok",
-			Result: expectedToken,
+		json.NewEncoder(w).Encode(map[string]string{
+			"status": "ok",
+			"result": expectedToken,
 		})
 	}))
 	defer srv.Close()
@@ -168,7 +168,7 @@ func TestGetToken_TimeoutKeepsDeadlineError(t *testing.T) {
 
 func TestGetToken_InvalidURLMasksSignature(t *testing.T) {
 	sig := BuildSignature("bot-id", "secret")
-	_, err := doGetToken(context.Background(), "http://bad host/token?signature="+sig, http.DefaultClient)
+	_, err := GetToken(context.Background(), "http://bad host", "bot-id", sig, 10*time.Second)
 	if err == nil {
 		t.Fatal("expected error for invalid URL")
 	}

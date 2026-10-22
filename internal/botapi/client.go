@@ -1,25 +1,25 @@
 package botapi
 
 import (
-	"bytes"
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
-	"io"
 	"mime"
 	"net/http"
-	"net/url"
 	"path/filepath"
 	"strings"
 	"time"
 	"unicode/utf8"
 
+	"github.com/lavr/express-botx/botx"
 	"github.com/lavr/express-botx/internal/httputil"
 	vlog "github.com/lavr/express-botx/internal/log"
 )
 
-// Client is a BotX API client.
+// Client is a BotX API client with a token the caller manages.
+// Requests go through botx; Token can be replaced between calls.
 type Client struct {
 	BaseURL    string
 	Token      string
@@ -40,182 +40,42 @@ func NewClient(host, token string, timeout time.Duration) *Client {
 // If host starts with http:// or https://, it is used as-is (with trailing slash removed).
 // Otherwise, https:// is prepended.
 func ResolveBaseURL(host string) string {
-	if strings.HasPrefix(host, "http://") || strings.HasPrefix(host, "https://") {
-		return strings.TrimRight(host, "/")
-	}
-	return "https://" + host
+	return httputil.ResolveBaseURL(host)
 }
 
-// ChatInfo holds information about a single chat.
-type ChatInfo struct {
-	GroupChatID   string   `json:"group_chat_id"`
-	Name          string   `json:"name"`
-	Description   *string  `json:"description"`
-	ChatType      string   `json:"chat_type"`
-	Members       []string `json:"members"`
-	SharedHistory bool     `json:"shared_history"`
+func (c *Client) api() *botx.Client {
+	return botx.NewWithToken(c.BaseURL, c.Token, botx.WithHTTPClient(c.HTTPClient))
 }
 
-type listChatsResponse struct {
-	Status *string     `json:"status"`
-	Result *[]ChatInfo `json:"result"`
-}
+type (
+	ChatInfo            = botx.Chat
+	UserInfo            = botx.User
+	SendRequest         = botx.SendRequest
+	SendNotification    = botx.SendNotification
+	NotificationMsgOpts = botx.NotificationMsgOpts
+	SendFile            = botx.SendFile
+	SendOpts            = botx.SendOpts
+	DeliveryOpts        = botx.DeliveryOpts
+)
 
 // ListChats returns all chats the bot is a member of.
 func (c *Client) ListChats(ctx context.Context) ([]ChatInfo, error) {
-	url := c.BaseURL + "/api/v3/botx/chats/list"
-	vlog.V2("chats: GET %s", url)
-
-	start := time.Now()
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
-	if err != nil {
-		return nil, fmt.Errorf("creating request: %w", err)
-	}
-	req.Header.Set("Authorization", "Bearer "+c.Token)
-
-	resp, err := c.HTTPClient.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("listing chats: %w", err)
-	}
-	defer resp.Body.Close() //nolint:errcheck // best-effort close
-	elapsed := time.Since(start)
-
-	if resp.StatusCode == http.StatusUnauthorized {
-		vlog.V1("chats: <- 401 Unauthorized (%dms)", elapsed.Milliseconds())
-		return nil, ErrUnauthorized
-	}
-	if resp.StatusCode != http.StatusOK {
-		vlog.V1("chats: <- %d (%dms)", resp.StatusCode, elapsed.Milliseconds())
-		return nil, fmt.Errorf("list chats failed: HTTP %d", resp.StatusCode)
-	}
-
-	var result listChatsResponse
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return nil, fmt.Errorf("decoding response: %w", err)
-	}
-	if result.Status != nil && *result.Status != "ok" {
-		return nil, fmt.Errorf("list chats failed: status %q", *result.Status)
-	}
-	if result.Result == nil {
-		return nil, fmt.Errorf("list chats failed: response has no result")
-	}
-
-	vlog.V1("chats: <- %d %s (%dms), %d chats", resp.StatusCode, http.StatusText(resp.StatusCode), elapsed.Milliseconds(), len(*result.Result))
-	return *result.Result, nil
-}
-
-// UserInfo holds information about a user.
-type UserInfo struct {
-	HUID       string   `json:"user_huid"`
-	Name       string   `json:"name"`
-	Emails     []string `json:"emails"`
-	ADLogin    string   `json:"ad_login,omitempty"`
-	ADDomain   string   `json:"ad_domain,omitempty"`
-	Company    string   `json:"company,omitempty"`
-	Title      string   `json:"company_position,omitempty"`
-	Department string   `json:"department,omitempty"`
-	Active     bool     `json:"active"`
-	UserKind   string   `json:"user_kind,omitempty"`
-}
-
-type userByHUIDResponse struct {
-	Status string   `json:"status"`
-	Result UserInfo `json:"result"`
+	return c.api().ListChats(ctx)
 }
 
 // GetUserByHUID fetches user info by HUID.
 func (c *Client) GetUserByHUID(ctx context.Context, huid string) (*UserInfo, error) {
-	return c.getUser(ctx, "/api/v3/botx/users/by_huid?user_huid="+url.QueryEscape(huid))
+	return c.api().GetUserByHUID(ctx, huid)
 }
 
 // GetUserByEmail fetches user info by email.
 func (c *Client) GetUserByEmail(ctx context.Context, email string) (*UserInfo, error) {
-	return c.getUser(ctx, "/api/v3/botx/users/by_email?email="+url.QueryEscape(email))
+	return c.api().GetUserByEmail(ctx, email)
 }
 
 // GetUserByADLogin fetches user info by AD login and domain.
 func (c *Client) GetUserByADLogin(ctx context.Context, login, domain string) (*UserInfo, error) {
-	return c.getUser(ctx, "/api/v3/botx/users/by_login?ad_login="+url.QueryEscape(login)+"&ad_domain="+url.QueryEscape(domain))
-}
-
-func (c *Client) getUser(ctx context.Context, path string) (*UserInfo, error) {
-	url := c.BaseURL + path
-	vlog.V2("user: GET %s", url)
-
-	start := time.Now()
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
-	if err != nil {
-		return nil, fmt.Errorf("creating request: %w", err)
-	}
-	req.Header.Set("Authorization", "Bearer "+c.Token)
-
-	resp, err := c.HTTPClient.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("getting user: %w", err)
-	}
-	defer resp.Body.Close() //nolint:errcheck // best-effort close
-	elapsed := time.Since(start)
-
-	if resp.StatusCode == http.StatusUnauthorized {
-		vlog.V1("user: <- 401 Unauthorized (%dms)", elapsed.Milliseconds())
-		return nil, ErrUnauthorized
-	}
-	if resp.StatusCode != http.StatusOK {
-		respBody, _ := io.ReadAll(resp.Body)
-		vlog.V1("user: <- %d (%dms)", resp.StatusCode, elapsed.Milliseconds())
-		return nil, fmt.Errorf("get user failed: HTTP %d: %s", resp.StatusCode, string(respBody))
-	}
-
-	var result userByHUIDResponse
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return nil, fmt.Errorf("decoding response: %w", err)
-	}
-	if result.Status != "" && result.Status != "ok" {
-		return nil, fmt.Errorf("get user failed: status %q", result.Status)
-	}
-
-	vlog.V1("user: <- %d %s (%dms)", resp.StatusCode, http.StatusText(resp.StatusCode), elapsed.Milliseconds())
-	return &result.Result, nil
-}
-
-// SendRequest is the unified request for POST /api/v4/botx/notifications/direct.
-type SendRequest struct {
-	GroupChatID  string            `json:"group_chat_id"`
-	Notification *SendNotification `json:"notification,omitempty"`
-	File         *SendFile         `json:"file,omitempty"`
-	Opts         *SendOpts         `json:"opts,omitempty"`
-}
-
-// SendNotification is the notification part of a send request.
-type SendNotification struct {
-	Status   string               `json:"status"`
-	Body     string               `json:"body"`
-	Metadata json.RawMessage      `json:"metadata,omitempty"`
-	Mentions json.RawMessage      `json:"mentions,omitempty"`
-	Opts     *NotificationMsgOpts `json:"opts,omitempty"`
-}
-
-// NotificationMsgOpts controls per-message notification behavior.
-type NotificationMsgOpts struct {
-	SilentResponse bool `json:"silent_response,omitempty"`
-}
-
-// SendFile is a file attachment sent inline as a base64 data URI.
-type SendFile struct {
-	FileName string `json:"file_name"`
-	Data     string `json:"data"` // data:mime;base64,...
-}
-
-// SendOpts controls delivery-level options.
-type SendOpts struct {
-	StealthMode      bool          `json:"stealth_mode,omitempty"`
-	NotificationOpts *DeliveryOpts `json:"notification_opts,omitempty"`
-}
-
-// DeliveryOpts controls push notification delivery.
-type DeliveryOpts struct {
-	Send     *bool `json:"send,omitempty"`
-	ForceDND bool  `json:"force_dnd,omitempty"`
+	return c.api().GetUserByADLogin(ctx, login, domain)
 }
 
 // SendParams is a high-level description of a message to send.
@@ -320,79 +180,26 @@ func BuildSendRequest(p *SendParams) *SendRequest {
 }
 
 // ErrUnauthorized indicates the token is invalid or expired.
-var ErrUnauthorized = fmt.Errorf("unauthorized (HTTP 401)")
-
-type sendAPIResponse struct {
-	Status string `json:"status"`
-	Result struct {
-		SyncID string `json:"sync_id"`
-	} `json:"result"`
-}
+var ErrUnauthorized = botx.ErrUnauthorized
 
 // SendWithSyncID posts a notification and returns the sync_id from the response.
+// Unlike botx.Send it treats every 200/201/202 as sent, whatever the body says,
+// as the server and worker always have.
 func (c *Client) SendWithSyncID(ctx context.Context, sr *SendRequest) (string, error) {
-	body, err := json.Marshal(sr)
-	if err != nil {
-		return "", fmt.Errorf("marshaling request: %w", err)
+	syncID, err := c.api().Send(ctx, sr)
+	var apiErr *botx.APIError
+	if !errors.As(err, &apiErr) || !errors.Is(err, botx.ErrInvalidResponse) {
+		return syncID, err
 	}
-
-	url := c.BaseURL + "/api/v4/botx/notifications/direct"
-	vlog.V2("send: POST %s", url)
-	vlog.V2("send: -> Authorization: Bearer %s", vlog.MaskBearer(c.Token))
-	vlog.V3("send: -> %s", string(body))
-
-	start := time.Now()
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(body))
-	if err != nil {
-		return "", fmt.Errorf("creating request: %w", err)
+	var resp struct {
+		Result struct {
+			SyncID string `json:"sync_id"`
+		} `json:"result"`
 	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("Authorization", "Bearer "+c.Token)
-
-	resp, err := c.HTTPClient.Do(req)
-	if err != nil {
-		vlog.V1("send: <- transport error (%dms): %v", time.Since(start).Milliseconds(), err)
-		return "", fmt.Errorf("sending: %w", err)
+	if json.Unmarshal([]byte(apiErr.Body), &resp) != nil {
+		return "", nil
 	}
-	defer resp.Body.Close() //nolint:errcheck // best-effort close
-	elapsed := time.Since(start)
-
-	if resp.StatusCode == http.StatusUnauthorized {
-		vlog.V1("send: <- 401 Unauthorized (%dms)", elapsed.Milliseconds())
-		return "", ErrUnauthorized
-	}
-
-	switch resp.StatusCode {
-	case http.StatusOK, http.StatusCreated, http.StatusAccepted:
-		vlog.V1("send: <- %d %s (%dms)", resp.StatusCode, http.StatusText(resp.StatusCode), elapsed.Milliseconds())
-		var apiResp sendAPIResponse
-		if err := json.NewDecoder(resp.Body).Decode(&apiResp); err != nil {
-			return "", nil // sent ok, but couldn't parse sync_id
-		}
-		vlog.V3("send: <- sync_id=%s", apiResp.Result.SyncID)
-		return apiResp.Result.SyncID, nil
-	default:
-		respBody, _ := io.ReadAll(resp.Body)
-		logBody, truncated := truncateErrorBody(respBody)
-		vlog.V1("send: <- %d (%dms): %s", resp.StatusCode, elapsed.Milliseconds(), logBody)
-		if truncated {
-			vlog.V3("send: <- %s", string(respBody))
-		}
-		return "", fmt.Errorf("send failed: HTTP %d: %s", resp.StatusCode, string(respBody))
-	}
-}
-
-const maxErrorBodyLogBytes = 2 << 10
-
-func truncateErrorBody(data []byte) (string, bool) {
-	if len(data) <= maxErrorBodyLogBytes {
-		return string(data), false
-	}
-	cut := maxErrorBodyLogBytes
-	for cut > 0 && !utf8.RuneStart(data[cut]) {
-		cut--
-	}
-	return fmt.Sprintf("%s (truncated to %d of %d bytes)", data[:cut], cut, len(data)), true
+	return resp.Result.SyncID, nil
 }
 
 // BuildFileAttachment reads file data and returns a SendFile with base64 data URI.

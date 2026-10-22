@@ -19,6 +19,7 @@ CLI и HTTP-сервер для отправки сообщений в корп�
 - **Асинхронная очередь** — RabbitMQ или Kafka для надёжной доставки
 - **Секреты** — поддержка переменных окружения и HashiCorp Vault
 - **Kubernetes-ready** — Docker, Helm chart, бинарник
+- **Go-библиотека** — клиент BotX API для своих сервисов ([раздел ниже](#go-библиотека))
 
 
 ## Quick Start
@@ -236,6 +237,46 @@ receivers:
 ```
 
 Подробнее: [docs/integrations.md](docs/integrations.md)
+
+## Go-библиотека
+
+Клиент BotX API доступен как пакет [`github.com/lavr/express-botx/botx`](botx/): чаты, состав
+и админы чатов, поиск пользователей, отправка и редактирование сообщений. Его используют
+CLI и сервер, так что это тот же код, что работает в `express-botx`.
+
+```go
+c, err := botx.New("express.example.com", botID, secret)
+if err != nil {
+	return err
+}
+chatID, err := c.CreateChat(ctx, &botx.CreateChatRequest{
+	Name:     "alerts-demo",
+	ChatType: botx.ChatTypeGroup,
+	Members:  []string{userHUID},
+})
+if errors.Is(err, botx.ErrNoPermission) {
+	// бот не админ чата
+}
+```
+
+- токен клиент получает сам и при `401` обновляет один раз, повторяя запрос; параллельные
+  вызовы делят одно получение токена, и каждый ждёт его не дольше своего `context`;
+- все методы принимают `context.Context`, `Client` безопасен для параллельного использования;
+- ошибки ответа — `*botx.APIError` с HTTP-статусом и `reason` BotX, сравниваются через
+  `errors.Is` с `ErrUnauthorized`, `ErrNotFound`, `ErrNoPermission`, `ErrAdminsNotChanged`,
+  `ErrInvalidResponse`. Ответ 2xx с `status` не `ok`, не-JSON телом или без обязательных
+  полей — тоже ошибка (`ErrInvalidResponse`), в том числе у `Send`;
+- в ошибках получения токена подпись и секрет маскируются;
+- своих логов библиотека не пишет.
+
+Нужен Go 1.25.5 или новее (директива `go` в `go.mod`). Подключение — по хешу коммита:
+`go get github.com/lavr/express-botx@<hash>`. Теги релизов (`0.43.0`) записаны без префикса `v`,
+поэтому Go не считает их версиями модуля и превращает в псевдоверсию. Пример целиком —
+[`botx/example_test.go`](botx/example_test.go), справка — `go doc github.com/lavr/express-botx/botx`.
+
+**Совместимость.** Модуль пока в мажорной версии 0: API пакета `botx` может меняться
+в минорных релизах, каждое такое изменение описывается в [CHANGELOG.md](CHANGELOG.md)
+как ломающее. Пакеты под `internal/` публичным API не являются.
 
 ## Разработка
 
