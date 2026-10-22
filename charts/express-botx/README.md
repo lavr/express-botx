@@ -253,7 +253,9 @@ metrics:
 Чарт задаёт `EXPRESS_BOTX_SERVER_METRICS_LISTEN=:<metrics.port>`, открывает порт
 `metrics` у контейнера и создаёт отдельный Service `<release>-express-botx-metrics`
 типа ClusterIP. Основной Service и Ingress этот порт не публикуют: эндпоинт без
-аутентификации. ServiceMonitor требует CRD prometheus-operator. Без него можно
+аутентификации. Путь сбора `metrics.path` должен совпадать с
+`config.server.metrics.path` (по умолчанию оба `/metrics`); при структурном
+`config` чарт проверяет это сам, при `configRaw` и `existingSecret` — на вас. ServiceMonitor требует CRD prometheus-operator. Без него можно
 собирать метрики через аннотации в `metrics.service.annotations` или через свой
 scrape-конфиг.
 
