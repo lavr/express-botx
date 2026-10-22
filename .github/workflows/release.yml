@@ -3,7 +3,7 @@ name: Release
 on:
   push:
     tags:
-      - "[0-9]*"
+      - "v[0-9]*"
 
 permissions:
   contents: write
@@ -39,6 +39,9 @@ jobs:
         with:
           go-version-file: go.mod
 
+      - name: Version from tag
+        run: echo "VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_ENV"
+
       - name: Build
         env:
           CGO_ENABLED: "0"
@@ -47,7 +50,7 @@ jobs:
         run: |
           EXT=""
           if [ "$GOOS" = "windows" ]; then EXT=".exe"; fi
-          go build -tags "sentry newrelic kafka rabbitmq" -ldflags="-s -w -X main.version=${GITHUB_REF_NAME}" -o "express-botx${EXT}" .
+          go build -tags "sentry newrelic kafka rabbitmq" -ldflags="-s -w -X main.version=${VERSION}" -o "express-botx${EXT}" .
 
       - name: Archive
         env:
@@ -70,6 +73,9 @@ jobs:
     needs: build
     runs-on: ubuntu-latest
     steps:
+      - name: Version from tag
+        run: echo "VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_ENV"
+
       - name: Download all artifacts
         uses: actions/download-artifact@v7
         with:
@@ -79,6 +85,7 @@ jobs:
       - name: Create release
         uses: softprops/action-gh-release@v2
         with:
+          name: ${{ env.VERSION }}
           generate_release_notes: true
           files: dist/express-botx-*
 
@@ -104,7 +111,7 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
         run: |
-          VERSION="${GITHUB_REF_NAME}"
+          VERSION="${GITHUB_REF_NAME#v}"
           TAG="${GITHUB_REF_NAME}"
 
           cat > express-botx.rb << 'FORMULA'
@@ -171,6 +178,9 @@ jobs:
     steps:
       - uses: actions/checkout@v5
 
+      - name: Version from tag
+        run: echo "VERSION=${GITHUB_REF_NAME#v}" >> "$GITHUB_ENV"
+
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v4
 
@@ -191,10 +201,10 @@ jobs:
           platforms: linux/amd64,linux/arm64
           push: true
           build-args: |
-            VERSION=${{ github.ref_name }}
+            VERSION=${{ env.VERSION }}
             APM_TAG=newrelic
           tags: |
-            lavr/express-botx:${{ github.ref_name }}
+            lavr/express-botx:${{ env.VERSION }}
             lavr/express-botx:latest
 
       - name: Build and push (rootless)
@@ -205,10 +215,10 @@ jobs:
           platforms: linux/amd64,linux/arm64
           push: true
           build-args: |
-            VERSION=${{ github.ref_name }}
+            VERSION=${{ env.VERSION }}
             APM_TAG=newrelic
           tags: |
-            lavr/express-botx:${{ github.ref_name }}-rootless
+            lavr/express-botx:${{ env.VERSION }}-rootless
             lavr/express-botx:latest-rootless
 
       - name: Update Docker Hub description
