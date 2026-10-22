@@ -145,7 +145,7 @@ func (s *Server) sanitizeErrors(ctx context.Context, errs []SendError) []SendErr
 	}
 	out := make([]SendError, len(errs))
 	for i, e := range errs {
-		out[i] = SendError{Chat: e.Chat, Error: ErrChatNotAllowed.Error()}
+		out[i] = SendError{Chat: e.Chat, Error: ErrChatNotAllowed.Error(), cause: e.cause}
 	}
 	return out
 }

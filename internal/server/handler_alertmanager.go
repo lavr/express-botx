@@ -115,7 +115,7 @@ func (s *Server) handleAlertmanager(w http.ResponseWriter, r *http.Request) {
 
 	keyName := KeyName(r.Context())
 	if len(results) == 0 {
-		vlog.V1("alertmanager: fan-out to %d chats all failed [key: %s] -> 502 (%dms)", len(targets), keyName, elapsed.Milliseconds())
+		vlog.V1("alertmanager: fan-out to %d chats all failed [key: %s] -> %d (%dms)", len(targets), keyName, failedStatus(errs), elapsed.Milliseconds())
 	} else {
 		vlog.V1("alertmanager: sent %s to %d/%d chats [key: %s] (%dms)", webhook.Status, len(results), len(targets), keyName, elapsed.Milliseconds())
 	}

@@ -54,6 +54,9 @@ func TestFanout(t *testing.T) {
 		t.Fatalf("results = %#v, want %#v", results, wantResults)
 	}
 	wantErrs := []SendError{{Chat: "b", Error: "resolving chat: boom"}}
+	for i := range errs {
+		errs[i].cause = nil // the wrapped error is compared by its text above
+	}
 	if !reflect.DeepEqual(errs, wantErrs) {
 		t.Fatalf("errs = %#v, want %#v", errs, wantErrs)
 	}

@@ -105,6 +105,11 @@ func (s *Server) handleMattermostCreatePost(w http.ResponseWriter, r *http.Reque
 
 	keyName := KeyName(r.Context())
 	if err != nil {
+		if status, msg, ok := authorizationFailure([]SendError{{cause: err}}); ok {
+			vlog.Info("mattermost: post to chat %q refused [key: %s] -> %d (%dms): %s", req.target, keyName, status, elapsed.Milliseconds(), boundedCause(err))
+			writeAccessError(w, status, msg)
+			return
+		}
 		vlog.Info("mattermost: post to chat %q failed [key: %s] -> 502 (%dms): %s", req.target, keyName, elapsed.Milliseconds(), boundedCause(err))
 		writeError(w, http.StatusBadGateway, s.deliveryError(r.Context(), "sending", err))
 		return
