@@ -18,7 +18,7 @@ git remote add gitverse git@gitverse.ru:lavr/express-botx.git
 git push gitverse main --tags
 ```
 
-Push тега вида `X.Y.Z` запускает на GitVerse релизный workflow (см. ниже) —
+Push тега вида `vX.Y.Z` запускает на GitVerse релизный workflow (см. ниже) —
 релиз с бинарниками публикуется в разделе
 [Релизы](https://gitverse.ru/lavr/express-botx/releases) независимо от GitHub.
 

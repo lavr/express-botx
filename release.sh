@@ -3,6 +3,9 @@ set -euo pipefail
 
 CHART_FILE="charts/express-botx/Chart.yaml"
 REMOTE="origin"
+# App releases are tagged vX.Y.Z so Go can resolve them as module versions.
+# Tags before the switch are bare X.Y.Z and still count as history.
+APP_TAG_PREFIX="v"
 
 usage() {
     cat <<USAGE
@@ -10,7 +13,7 @@ Usage: $0 <command> [<spec>...] [options]
 
 Commands:
   status                       Show current versions and latest tags
-  app    [<spec>]              Tag app release
+  app    [<spec>]              Tag app release vX.Y.Z
   chart  [<spec>]              Update Chart.yaml and tag chart release
   both   [<app>] [<chart>]     Tag app + update chart + tag chart
 
@@ -25,9 +28,10 @@ Options:
   -h, --help                   Show this help
 
 Non-interactive use needs every spec supplied plus --yes; consent is never
-inferred from the absence of a terminal. Relative specs are resolved against
-the current tags, so they are not safe retry identifiers: prefer X.Y.Z when
-retrying a release whose outcome is unknown.
+inferred from the absence of a terminal. App tags are vX.Y.Z; the version
+in Chart.yaml, binaries and images stays X.Y.Z. The release stops while the
+latest tag exists only locally: finish that interrupted release with the
+printed git push, or delete its tag, before releasing the next version.
 USAGE
 }
 
@@ -93,10 +97,24 @@ require_clean_tree() {
     git diff --quiet || die "worktree has uncommitted changes; commit or stash them first"
 }
 
-current_app_tag() {
-    local out
-    out=$(git tag --sort=-v:refname | grep -vE '^chart-' | grep -E '^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$' || true)
-    printf '%s' "${out%%$'\n'*}"
+# current_app_version prints the highest app version, from either a vX.Y.Z
+# or a legacy X.Y.Z tag, without the prefix.
+current_app_version() {
+    git tag -l | grep -E '^v?(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$' \
+        | sed 's/^v//' | sort -t. -k1,1n -k2,2n -k3,3n | tail -n 1 || true
+}
+
+app_tag() {
+    printf '%s%s' "$APP_TAG_PREFIX" "$1"
+}
+
+# app_tag_ref prints the existing tag of an app version: vX.Y.Z or legacy X.Y.Z.
+app_tag_ref() {
+    if git rev-parse -q --verify "refs/tags/$(app_tag "$1")" >/dev/null; then
+        app_tag "$1"
+    else
+        printf '%s' "$1"
+    fi
 }
 
 current_chart_tag() {
@@ -204,14 +222,73 @@ confirm() {
     [[ "$ans" =~ ^[Yy]$ ]] || exit 0
 }
 
+# remote_has_tag succeeds when the tag is on the remote and fails when it is
+# not; an unreachable remote stops the release instead of reading as absent.
+remote_has_tag() {
+    local rc=0
+    git ls-remote --exit-code --tags "$REMOTE" "refs/tags/$1" >/dev/null 2>&1 || rc=$?
+    case "$rc" in
+        0) return 0 ;;
+        2) return 1 ;;
+        *) die "cannot list tags on $REMOTE (git ls-remote exit $rc); check the connection and retry" ;;
+    esac
+}
+
 require_absent_tag() {
-    git tag -l "$1" | grep -q . && die "tag $1 already exists"
+    local tag="$1"
+    if git rev-parse -q --verify "refs/tags/$tag" >/dev/null; then
+        if remote_has_tag "$tag"; then
+            die "tag $tag already exists here and on $REMOTE: this version is released"
+        fi
+        die "tag $tag exists here but not on $REMOTE, likely from an interrupted release. Check it with 'git show $tag', then either push it with 'git push --atomic $REMOTE main $tag' or delete it with 'git tag -d $tag'"
+    fi
+    remote_has_tag "$tag" && die "tag $tag already exists on $REMOTE; fetch tags with 'git fetch $REMOTE --tags' and check './release.sh status'"
     return 0
 }
 
+# require_published stops before a new release while the latest tag of the
+# same kind exists only here: that release was interrupted and must be finished
+# (or its tag deleted) first, not superseded by the next version.
+require_published() {
+    local tag="$1"
+    [[ -n "$tag" ]] || return 0
+    remote_has_tag "$tag" && return 0
+    die "latest tag $tag is not on $REMOTE, likely from an interrupted release. Check it with 'git show $tag', then either push it with 'git push --atomic $REMOTE main $tag' or delete it with 'git tag -d $tag'"
+}
+
+# require_absent_app_version rejects a version taken by either tag form.
+require_absent_app_version() {
+    require_absent_tag "$1"
+    require_absent_tag "$(app_tag "$1")"
+}
+
+# require_module_major keeps app tags valid Go module versions: v2 and later
+# need a /vN suffix on the module path, so such a release needs that change first.
+require_module_major() {
+    local major="${1%%.*}" module
+    (( major < 2 )) && return 0
+    module=$(awk '$1 == "module" {print $2; exit}' go.mod)
+    [[ "$module" == */v"$major" ]] || die "app $1 needs module path .../v$major in go.mod (now $module); change the module path first or pick a 0.x/1.x version"
+}
+
+# push_refs pushes atomically and, on failure, explains what is left locally.
+push_refs() {
+    git push --atomic "$REMOTE" "$@" && return 0
+    echo "" >&2
+    echo "Error: push to $REMOTE failed; the outcome may be unknown." >&2
+    echo "Local refs are kept. Check what reached $REMOTE:" >&2
+    echo "  git ls-remote $REMOTE main ${*:2}" >&2
+    echo "If nothing did, retry the same push:" >&2
+    echo "  git push --atomic $REMOTE $*" >&2
+    echo "Do not rerun release.sh with a new version for this release." >&2
+    exit 1
+}
+
 status() {
+    local app; app=$(current_app_version)
     echo "App:"
-    echo "  latest tag:            $(current_app_tag)"
+    echo "  latest version:        ${app}"
+    echo "  latest tag:            $( [[ -n "$app" ]] && app_tag_ref "$app" )"
     echo "Chart:"
     echo "  latest tag:            chart-$(current_chart_tag)"
     echo "  Chart.yaml version:    $(chart_version)"
@@ -238,29 +315,35 @@ edit_chart() {
 }
 
 release_app() {
-    local base; base=$(current_app_tag)
+    local base; base=$(current_app_version)
+    [[ -n "$base" ]] && require_published "$(app_tag_ref "$base")"
     pick_version "$base" "App version" "${SPECS[0]:-}"
     local version="$PICKED_VERSION"
-    require_absent_tag "$version"
+    local tag; tag=$(app_tag "$version")
+    require_module_major "$version"
+    require_absent_app_version "$version"
 
     echo ""
     echo "Plan:"
-    echo "  tag app $version at $(git rev-parse --short HEAD) (current: $base)"
-    echo "  push $REMOTE main $version"
+    echo "  tag app $tag at $(git rev-parse --short HEAD) (current: $base)"
+    echo "  push $REMOTE main $tag"
     echo ""
-    echo "Commits since $base:"
-    git log --oneline "$base..HEAD"
-    echo ""
+    if [[ -n "$base" ]]; then
+        echo "Commits since $(app_tag_ref "$base"):"
+        git log --oneline "$(app_tag_ref "$base")..HEAD"
+        echo ""
+    fi
     $DRY_RUN && { echo "dry run: nothing changed"; return 0; }
-    confirm "Create tag $version?"
+    confirm "Create tag $tag?"
 
-    git tag "$version"
-    git push --atomic "$REMOTE" main "$version"
-    echo "Pushed tag: $version"
+    git tag "$tag"
+    push_refs main "$tag"
+    echo "Pushed tag: $tag"
 }
 
 release_chart() {
     local base; base=$(current_chart_tag)
+    [[ -n "$base" ]] && require_published "chart-$base"
     pick_version "$base" "Chart version" "${SPECS[0]:-}"
     local version="$PICKED_VERSION"
     local tag="chart-${version}"
@@ -280,22 +363,26 @@ release_chart() {
     git add "$CHART_FILE"
     git commit -m "chart version bump"
     git tag "$tag"
-    git push --atomic "$REMOTE" main "$tag"
+    push_refs main "$tag"
     echo "Pushed tag: $tag"
 }
 
 release_both() {
     local app_base chart_base
-    app_base=$(current_app_tag)
+    app_base=$(current_app_version)
     chart_base=$(current_chart_tag)
+    [[ -n "$app_base" ]] && require_published "$(app_tag_ref "$app_base")"
+    [[ -n "$chart_base" ]] && require_published "chart-$chart_base"
 
     pick_version "$app_base" "App version" "${SPECS[0]:-}"
     local app_version="$PICKED_VERSION"
+    local app_tag_name; app_tag_name=$(app_tag "$app_version")
     pick_version "$chart_base" "Chart version" "${SPECS[1]:-}"
     local chart_ver="$PICKED_VERSION"
     local chart_tag="chart-${chart_ver}"
 
-    require_absent_tag "$app_version"
+    require_module_major "$app_version"
+    require_absent_app_version "$app_version"
     require_absent_tag "$chart_tag"
     require_chart_fields yes
 
@@ -303,14 +390,16 @@ release_both() {
 
     echo ""
     echo "Plan:"
-    echo "  1. tag app $app_version at ${app_commit:0:7}"
+    echo "  1. tag app $app_tag_name at ${app_commit:0:7}"
     echo "  2. Chart.yaml version $(chart_version) -> $chart_ver, appVersion -> $app_version"
     echo "  3. tag chart $chart_tag at the chart bump commit"
-    echo "  4. push $REMOTE main $app_version $chart_tag"
+    echo "  4. push $REMOTE main $app_tag_name $chart_tag"
     echo ""
-    echo "Commits since $app_base:"
-    git log --oneline "$app_base..HEAD"
-    echo ""
+    if [[ -n "$app_base" ]]; then
+        echo "Commits since $(app_tag_ref "$app_base"):"
+        git log --oneline "$(app_tag_ref "$app_base")..HEAD"
+        echo ""
+    fi
     $DRY_RUN && { echo "dry run: nothing changed"; return 0; }
     confirm "Proceed?"
 
@@ -318,11 +407,11 @@ release_both() {
     git add "$CHART_FILE"
     git commit -m "chart version bump"
 
-    git tag "$app_version" "$app_commit"
+    git tag "$app_tag_name" "$app_commit"
     git tag "$chart_tag"
 
-    git push --atomic "$REMOTE" main "$app_version" "$chart_tag"
-    echo "Pushed tags: $app_version, $chart_tag"
+    push_refs main "$app_tag_name" "$chart_tag"
+    echo "Pushed tags: $app_tag_name, $chart_tag"
 }
 
 parse_args "$@"

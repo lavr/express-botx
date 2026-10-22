@@ -3,7 +3,7 @@ name: Release
 on:
   push:
     tags:
-      - "[0-9]*"
+      - "v[0-9]*"
 
 # NOTE: test jobs are inlined (copy of test.yml) — a job with
 # `uses: ./.gitverse/workflows/test.yml` never gets scheduled on GitVerse
@@ -71,7 +71,7 @@ jobs:
 
           release_id=$(curl -sf -X POST -H "$AUTH" -H "$ACCEPT" \
             -H "Content-Type: application/json" \
-            -d "{\"tag_name\":\"${GITHUB_REF_NAME}\",\"name\":\"${GITHUB_REF_NAME}\",\"body\":\"express-botx ${GITHUB_REF_NAME}\"}" \
+            -d "{\"tag_name\":\"${GITHUB_REF_NAME}\",\"name\":\"${GITHUB_REF_NAME#v}\",\"body\":\"express-botx ${GITHUB_REF_NAME#v}\"}" \
             "$API/repos/$REPO/releases" | jq -r .id)
 
           if [ -z "$release_id" ] || [ "$release_id" = "null" ]; then
@@ -113,7 +113,7 @@ jobs:
         run: |
           EXT=""
           if [ "$GOOS" = "windows" ]; then EXT=".exe"; fi
-          go build -tags "sentry newrelic kafka rabbitmq" -ldflags="-s -w -X main.version=${GITHUB_REF_NAME}" -o "express-botx${EXT}" .
+          go build -tags "sentry newrelic kafka rabbitmq" -ldflags="-s -w -X main.version=${GITHUB_REF_NAME#v}" -o "express-botx${EXT}" .
 
       - name: Archive
         env:

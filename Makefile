@@ -1,4 +1,5 @@
-VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
+# App tags are vX.Y.Z (older ones X.Y.Z); the version itself carries no v.
+VERSION ?= $(patsubst v%,%,$(shell git describe --tags --match 'v[0-9]*' --match '[0-9]*' --always --dirty 2>/dev/null || echo dev))
 IMAGE_NAME ?= express-botx
 BUILD_TAGS = sentry newrelic kafka rabbitmq
 TEST_TAGS  = sentry newrelic
