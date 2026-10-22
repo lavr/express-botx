@@ -151,12 +151,17 @@ func doRequestToken(ctx context.Context, hc *http.Client, baseURL, botID, signat
 	defer resp.Body.Close() //nolint:errcheck // best-effort close
 	elapsed := time.Since(start)
 
-	respBody, apiErr := readResponse("token request", resp)
+	// Diagnostics get the body with the signature masked before it is cut,
+	// so a signature crossing the cut cannot survive in part.
+	respBody, readErr := io.ReadAll(resp.Body)
+	diag := maskSignature(respBody, signature)
 	if resp.StatusCode != http.StatusOK {
 		vlog.V1("auth: <- %d (%dms)", resp.StatusCode, elapsed.Milliseconds())
-		return "", newAPIError("token request", resp.StatusCode, respBody, "token request failed: HTTP %d", resp.StatusCode)
+		return "", newAPIError("token request", resp.StatusCode, diag, "token request failed: HTTP %d", resp.StatusCode)
 	}
-	if apiErr != nil {
+	if readErr != nil {
+		apiErr := newAPIError("token request", resp.StatusCode, diag, "token request: HTTP %d, reading response: %v", resp.StatusCode, readErr)
+		apiErr.cause = readErr
 		return "", apiErr
 	}
 
@@ -165,17 +170,26 @@ func doRequestToken(ctx context.Context, hc *http.Client, baseURL, botID, signat
 		Result string `json:"result"`
 	}
 	if err := json.Unmarshal(respBody, &result); err != nil {
-		return "", newAPIError("token request", resp.StatusCode, respBody, "decoding token response: %v", err)
+		return "", newAPIError("token request", resp.StatusCode, diag, "decoding token response: %v", err)
 	}
 	if result.Status != "ok" {
-		return "", newAPIError("token request", resp.StatusCode, respBody, "unexpected status: %s", result.Status)
+		return "", newAPIError("token request", resp.StatusCode, diag, "unexpected status: %s", result.Status)
 	}
 	if result.Result == "" {
-		return "", newAPIError("token request", resp.StatusCode, respBody, "token request: response has no token")
+		return "", newAPIError("token request", resp.StatusCode, diag, "token request: response has no token")
 	}
 
 	vlog.V1("auth: <- %d %s (%dms)", resp.StatusCode, http.StatusText(resp.StatusCode), elapsed.Milliseconds())
 	return result.Result, nil
+}
+
+func maskSignature(body []byte, signature string) []byte {
+	if signature == "" {
+		return body
+	}
+	mask := []byte(vlog.Mask(signature))
+	body = bytes.ReplaceAll(body, []byte(signature), mask)
+	return bytes.ReplaceAll(body, []byte(neturl.QueryEscape(signature)), mask)
 }
 
 func maskSignatureInURL(url string) string {
@@ -212,17 +226,20 @@ func redactError(err error, signature string) error {
 		redacted.Status = replacer.Replace(apiErr.Status)
 		redacted.Reason = replacer.Replace(apiErr.Reason)
 		redacted.Body = replacer.Replace(apiErr.Body)
-		redacted.cause = nil
+		redacted.cause = contextCause(err)
 		return &redacted
 	}
-	r := &redactedError{msg: replacer.Replace(err.Error())}
+	return &redactedError{msg: replacer.Replace(err.Error()), cause: contextCause(err)}
+}
+
+func contextCause(err error) error {
 	switch {
 	case errors.Is(err, context.DeadlineExceeded):
-		r.cause = context.DeadlineExceeded
+		return context.DeadlineExceeded
 	case errors.Is(err, context.Canceled):
-		r.cause = context.Canceled
+		return context.Canceled
 	}
-	return r
+	return nil
 }
 
 // currentToken returns the token to use and its generation.

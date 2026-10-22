@@ -407,3 +407,89 @@ func TestClient_TokenErrorThroughCallDoesNotLeakSignature(t *testing.T) {
 		t.Errorf("error leaks signature: %v", err)
 	}
 }
+
+func TestRequestToken_SignatureAcrossTheBodyCutIsMasked(t *testing.T) {
+	sig := BuildSignature(testBotID, testSecret)
+	pad := strings.Repeat("x", maxErrorBodyBytes-len(sig)+1)
+	tests := []struct {
+		name string
+		code int
+		body string
+	}{
+		{"plain 403", http.StatusForbidden, pad + sig},
+		{"JSON 403", http.StatusForbidden, `{"status":"error","reason":"` + pad + sig + `"}`},
+		{"JSON 200 with status error", http.StatusOK, `{"status":"error","reason":"` + pad + sig + `"}`},
+		{"plain 200", http.StatusOK, pad + sig},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.WriteHeader(tt.code)
+				_, _ = io.WriteString(w, tt.body)
+			}))
+			defer srv.Close()
+
+			_, err := RequestToken(context.Background(), srv.URL, testBotID, sig)
+			var apiErr *APIError
+			if !errors.As(err, &apiErr) {
+				t.Fatalf("error = %v, want *APIError", err)
+			}
+			for _, s := range []string{err.Error(), apiErr.Status, apiErr.Reason, apiErr.Body} {
+				if strings.Contains(s, sig[:16]) {
+					t.Errorf("signature prefix survives: ...%s", s[max(0, len(s)-120):])
+				}
+			}
+		})
+	}
+}
+
+func TestRequestToken_ContextEndingWhileReadingBodyStaysDetectable(t *testing.T) {
+	sig := BuildSignature(testBotID, testSecret)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.WriteString(w, `{"status":"ok","result":"`)
+		w.(http.Flusher).Flush()
+		<-r.Context().Done()
+	}))
+	defer srv.Close()
+
+	for _, tt := range []struct {
+		name string
+		want error
+		ctx  func() (context.Context, context.CancelFunc)
+	}{
+		{"deadline", context.DeadlineExceeded, func() (context.Context, context.CancelFunc) {
+			return context.WithTimeout(context.Background(), 100*time.Millisecond)
+		}},
+		{"cancel", context.Canceled, func() (context.Context, context.CancelFunc) {
+			ctx, cancel := context.WithCancel(context.Background())
+			time.AfterFunc(100*time.Millisecond, cancel)
+			return ctx, cancel
+		}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx, cancel := tt.ctx()
+			defer cancel()
+			_, err := RequestToken(ctx, srv.URL, testBotID, sig)
+			if !errors.Is(err, tt.want) {
+				t.Errorf("error = %v, want %v in the chain", err, tt.want)
+			}
+			var apiErr *APIError
+			if !errors.As(err, &apiErr) || apiErr.StatusCode != http.StatusOK {
+				t.Errorf("error = %#v, want *APIError with HTTP 200", err)
+			}
+		})
+	}
+}
+
+func TestSend_ReturnsSyncIDWithInvalidResponse(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusAccepted)
+		_, _ = io.WriteString(w, `{"result":{"sync_id":"sync-1"},"padding":"`+strings.Repeat("x", 3*maxErrorBodyBytes)+`"}`)
+	}))
+	defer srv.Close()
+
+	syncID, err := NewWithToken(srv.URL, "tok").Send(context.Background(), &SendRequest{GroupChatID: testChatID})
+	if !errors.Is(err, ErrInvalidResponse) || syncID != "sync-1" {
+		t.Errorf("Send() = %q, %v; want sync-1 with ErrInvalidResponse", syncID, err)
+	}
+}

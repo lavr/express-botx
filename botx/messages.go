@@ -1,6 +1,7 @@
 package botx
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -66,8 +67,9 @@ type EditPayload struct {
 
 // Send posts a message and returns its sync_id, which EditMessage takes.
 // A 2xx response is a success only when its body is JSON with status "ok";
-// otherwise Send fails with ErrInvalidResponse, and the message may or may not
-// have been delivered, so do not resend it blindly.
+// otherwise Send fails with ErrInvalidResponse and still returns the sync_id
+// found in the body, if any. Such a message may or may not have been
+// delivered, so do not resend it blindly.
 func (c *Client) Send(ctx context.Context, sr *SendRequest) (string, error) {
 	body, err := json.Marshal(sr)
 	if err != nil {
@@ -98,16 +100,20 @@ func (c *Client) Send(ctx context.Context, sr *SendRequest) (string, error) {
 			return "", readErr
 		}
 		var apiResp struct {
-			Status string `json:"status"`
+			Status *string `json:"status"`
 			Result struct {
 				SyncID string `json:"sync_id"`
 			} `json:"result"`
 		}
-		if err := json.Unmarshal(respBody, &apiResp); err != nil {
+		if err := json.NewDecoder(bytes.NewReader(respBody)).Decode(&apiResp); err != nil {
 			return "", newAPIError("send", resp.StatusCode, respBody, "send failed: HTTP %d with a non-JSON body: %s", resp.StatusCode, truncateBody(respBody))
 		}
-		if apiResp.Status != "ok" {
-			return "", newAPIError("send", resp.StatusCode, respBody, "send failed: HTTP %d with status %q: %s", resp.StatusCode, apiResp.Status, truncateBody(respBody))
+		if apiResp.Status == nil || *apiResp.Status != "ok" {
+			status := ""
+			if apiResp.Status != nil {
+				status = *apiResp.Status
+			}
+			return apiResp.Result.SyncID, newAPIError("send", resp.StatusCode, respBody, "send failed: HTTP %d with status %q: %s", resp.StatusCode, status, truncateBody(respBody))
 		}
 		vlog.V3("send: <- sync_id=%s", apiResp.Result.SyncID)
 		return apiResp.Result.SyncID, nil

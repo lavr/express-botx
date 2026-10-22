@@ -33,7 +33,7 @@
 // A failed Send or EditMessage with ErrInvalidResponse may still have been
 // applied by BotX; do not repeat it automatically.
 //
-// The package writes no logs of its own; diagnostics come only through returned errors.
+// By default the package prints no diagnostic logs, and it offers no logging settings yet.
 //
 // # BotX behavior worth knowing
 //

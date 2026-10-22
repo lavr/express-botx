@@ -183,23 +183,18 @@ func BuildSendRequest(p *SendParams) *SendRequest {
 var ErrUnauthorized = botx.ErrUnauthorized
 
 // SendWithSyncID posts a notification and returns the sync_id from the response.
-// Unlike botx.Send it treats every 200/201/202 as sent, whatever the body says,
-// as the server and worker always have.
+// Unlike botx.Send it treats HTTP 200, 201 and 202 as sent whatever the body
+// says, as the server and worker always have.
 func (c *Client) SendWithSyncID(ctx context.Context, sr *SendRequest) (string, error) {
 	syncID, err := c.api().Send(ctx, sr)
 	var apiErr *botx.APIError
-	if !errors.As(err, &apiErr) || !errors.Is(err, botx.ErrInvalidResponse) {
-		return syncID, err
+	if errors.As(err, &apiErr) && apiErr.Op == "send" {
+		switch apiErr.StatusCode {
+		case http.StatusOK, http.StatusCreated, http.StatusAccepted:
+			return syncID, nil
+		}
 	}
-	var resp struct {
-		Result struct {
-			SyncID string `json:"sync_id"`
-		} `json:"result"`
-	}
-	if json.Unmarshal([]byte(apiErr.Body), &resp) != nil {
-		return "", nil
-	}
-	return resp.Result.SyncID, nil
+	return syncID, err
 }
 
 // BuildFileAttachment reads file data and returns a SendFile with base64 data URI.
