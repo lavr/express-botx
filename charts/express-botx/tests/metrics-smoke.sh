@@ -39,9 +39,10 @@ assert "$metrics_svc" "type: ClusterIP"
 main_svc="$(awk '/^kind: Service$/{s=1} s&&/name: test-express-botx$/{p=1} p' <<<"$out" | sed -n '1,20p')"
 refute "$main_svc" "name: metrics"
 
-# Custom port and path reach the env and the ServiceMonitor.
+# Custom port and path reach the env, the app config and the ServiceMonitor.
 out="$(render --set metrics.enabled=true --set metrics.port=9300 \
-  --set metrics.path=/internal/metrics --set metrics.serviceMonitor.enabled=true \
+  --set metrics.path=/internal/metrics --set config.server.metrics.path=/internal/metrics \
+  --set metrics.serviceMonitor.enabled=true \
   --set metrics.serviceMonitor.labels.release=prom --set metrics.serviceMonitor.scrapeTimeout=10s)"
 assert "$out" 'value: ":9300"'
 assert "$out" "kind: ServiceMonitor"
@@ -49,6 +50,20 @@ assert "$out" 'path: "/internal/metrics"'
 assert "$out" "release: prom"
 assert "$out" "interval: 30s"
 assert "$out" "scrapeTimeout: 10s"
+assert "$out" "path: /internal/metrics"
+
+# A scrape path the app does not serve is refused.
+expect_fail_with "path mismatch" "does not match the path the app serves" \
+  --set metrics.enabled=true --set metrics.path=/internal/metrics
+expect_fail_with "config path mismatch" "does not match the path the app serves" \
+  --set metrics.enabled=true --set config.server.metrics.path=/prom
+
+# A long release name keeps the metrics Service name valid and distinct.
+long="$(printf 'a%.0s' {1..63})"
+out="$(render --set metrics.enabled=true --set fullnameOverride="$long")"
+name="$(awk '/component: metrics/{c=1} /^kind:/{c=0} {print}' <<<"$out" | grep -E '^  name: .*-metrics$' | head -1 | awk '{print $2}')"
+[[ -n "$name" && ${#name} -le 63 ]] || { echo "metrics Service name invalid: '$name' (${#name})" >&2; exit 1; }
+[[ "$name" != "$long" ]] || { echo "metrics Service name collides with the main one" >&2; exit 1; }
 
 # serve-enqueue gets metrics too; worker refuses them.
 out="$(render --set mode=serve-enqueue --set metrics.enabled=true)"

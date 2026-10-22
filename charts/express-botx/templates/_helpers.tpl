@@ -76,6 +76,22 @@ Metrics are served by serve and serve-enqueue only.
 {{- if and .Values.metrics.enabled (not (hasPrefix "/" (toString .Values.metrics.path))) }}
 {{- fail "metrics.path must start with /" }}
 {{- end }}
+{{- /* With the structured config the chart can see the path the app serves. */ -}}
+{{- if and .Values.metrics.enabled (not .Values.configRaw) (not .Values.existingSecret) }}
+{{- $served := "/metrics" }}
+{{- with .Values.config.server }}{{ with .metrics }}{{ with .path }}{{ $served = . }}{{ end }}{{ end }}{{ end }}
+{{- if ne (toString .Values.metrics.path) $served }}
+{{- fail (printf "metrics.path %q does not match the path the app serves (%q, from config.server.metrics.path or the default); set both to the same value" .Values.metrics.path $served) }}
+{{- end }}
+{{- end }}
+{{- end }}
+
+{{/*
+Metrics Service name: the fullname cut to leave room for "-metrics", so the
+name stays within 63 characters and never collides with the main Service.
+*/}}
+{{- define "express-botx.metricsName" -}}
+{{- printf "%s-metrics" (include "express-botx.fullname" . | trunc 55 | trimSuffix "-") }}
 {{- end }}
 
 {{- define "express-botx.portName" -}}
