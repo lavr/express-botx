@@ -199,7 +199,7 @@ func (s *Server) prepareMattermostPost(w http.ResponseWriter, r *http.Request) (
 	}
 	trace.renderedMessage("mattermost", message)
 
-	if !s.authorizeTargets(w, r, []string{target}, true) {
+	if !s.authorizeTargets(w, r, []string{target}, true, "") {
 		return nil, false
 	}
 

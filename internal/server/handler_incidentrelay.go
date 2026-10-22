@@ -118,7 +118,7 @@ func (s *Server) handleIncidentRelay(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if !s.authorizeTargets(w, r, targets, true) {
+	if !s.authorizeTargets(w, r, targets, true, r.URL.Query().Get("bot")) {
 		return
 	}
 

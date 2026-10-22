@@ -135,6 +135,7 @@ type ServerConfig struct {
 	Docs               *bool                    `yaml:"docs,omitempty"`         // enable /docs endpoint (default: true)
 	ExternalURL        string                   `yaml:"external_url,omitempty"` // public URL for OpenAPI docs (e.g. http://express-botx.example-dev.k8s)
 	TLS                *TLSYAMLConfig           `yaml:"tls,omitempty"`
+	MembershipCache    *MembershipCacheConfig   `yaml:"membership_cache,omitempty"`
 }
 
 type TLSYAMLConfig struct {
@@ -242,8 +243,58 @@ type APIKeyConfig struct {
 	// Chats optionally restricts this key to a fixed set of chats (aliases or
 	// UUIDs). A key without Chats may address any chat, preserving the
 	// behaviour of configs written before scoping existed.
-	Chats          []string `yaml:"chats,omitempty" json:"chats,omitempty"`
-	AllowQueryAuth bool     `yaml:"allow_query_auth,omitempty" json:"allow_query_auth,omitempty"`
+	Chats []string `yaml:"chats,omitempty" json:"chats,omitempty"`
+	// ChatsWhereMember restricts this key to the chats the sending bot is a
+	// member of at request time, as reported by chats/info. It cannot be
+	// combined with Chats.
+	ChatsWhereMember bool `yaml:"chats_where_member,omitempty" json:"chats_where_member,omitempty"`
+	AllowQueryAuth   bool `yaml:"allow_query_auth,omitempty" json:"allow_query_auth,omitempty"`
+}
+
+// MembershipCacheConfig tunes the cache of chat membership answers used by keys
+// with chats_where_member. Durations are Go duration strings ("60s", "1m").
+type MembershipCacheConfig struct {
+	TTL         string `yaml:"ttl,omitempty"`          // positive answers (default 60s)
+	NegativeTTL string `yaml:"negative_ttl,omitempty"` // negative answers (default 15s)
+}
+
+// Default membership cache lifetimes, applied to an empty value.
+const (
+	DefaultMembershipTTL         = 60 * time.Second
+	DefaultMembershipNegativeTTL = 15 * time.Second
+)
+
+// Durations parses the cache lifetimes, filling in the defaults. A negative
+// answer may not outlive a positive one: a bot added to a chat would otherwise
+// wait longer to be let in than a removed bot waits to be shut out.
+func (m *MembershipCacheConfig) Durations() (ttl, negativeTTL time.Duration, err error) {
+	ttl, negativeTTL = DefaultMembershipTTL, DefaultMembershipNegativeTTL
+	if m == nil {
+		return ttl, negativeTTL, nil
+	}
+	parse := func(name, v string, def time.Duration) (time.Duration, error) {
+		if v == "" {
+			return def, nil
+		}
+		d, err := time.ParseDuration(v)
+		if err != nil {
+			return 0, fmt.Errorf("server.membership_cache.%s: %w", name, err)
+		}
+		if d <= 0 {
+			return 0, fmt.Errorf("server.membership_cache.%s must be positive, got %s", name, v)
+		}
+		return d, nil
+	}
+	if ttl, err = parse("ttl", m.TTL, ttl); err != nil {
+		return 0, 0, err
+	}
+	if negativeTTL, err = parse("negative_ttl", m.NegativeTTL, negativeTTL); err != nil {
+		return 0, 0, err
+	}
+	if negativeTTL > ttl {
+		return 0, 0, fmt.Errorf("server.membership_cache.negative_ttl (%s) must not exceed ttl (%s)", negativeTTL, ttl)
+	}
+	return ttl, negativeTTL, nil
 }
 
 type BotConfig struct {
@@ -1157,7 +1208,10 @@ var knownKeys = map[string]map[string]bool{
 		"listen": true, "base_path": true, "api_keys": true, "allow_bot_secret_auth": true,
 		"allow_request_trace": true,
 		"alertmanager":        true, "grafana": true, "incidentrelay": true, "mattermost": true, "gitlab": true, "callbacks": true, "docs": true, "external_url": true,
-		"tls": true,
+		"tls": true, "membership_cache": true,
+	},
+	"server.membership_cache": {
+		"ttl": true, "negative_ttl": true,
 	},
 	"server.tls": {
 		"cert_file": true, "key_file": true, "reload_interval": true,
@@ -1207,7 +1261,7 @@ var knownKeys = map[string]map[string]bool{
 		"type": true, "command": true, "url": true, "timeout": true,
 	},
 	"server.api_keys.*": {
-		"name": true, "key": true, "chats": true, "allow_query_auth": true,
+		"name": true, "key": true, "chats": true, "chats_where_member": true, "allow_query_auth": true,
 	},
 	"queue": {
 		"driver": true, "url": true, "name": true, "reply_queue": true, "group": true, "max_file_size": true,
@@ -1414,6 +1468,14 @@ func (c *Config) validateRequiredFields() []ValidationResult {
 	// it is far more likely to be an editing accident than a deliberate
 	// "deny all", and a silent deny-all looks like a broken network.
 	for i, k := range c.Server.APIKeys {
+		if k.ChatsWhereMember && k.Chats != nil {
+			results = append(results, ValidationResult{
+				Level:   ValidationError,
+				Path:    fmt.Sprintf("server.api_keys[%d].chats_where_member", i),
+				Message: "chats_where_member cannot be combined with chats: the key is scoped either by a fixed list or by the bot's membership",
+			})
+			continue
+		}
 		if k.Chats == nil {
 			continue
 		}
@@ -1444,6 +1506,14 @@ func (c *Config) validateRequiredFields() []ValidationResult {
 			}
 			seen[name] = true
 		}
+	}
+
+	if _, _, err := c.Server.MembershipCache.Durations(); err != nil {
+		results = append(results, ValidationResult{
+			Level:   ValidationError,
+			Path:    "server.membership_cache",
+			Message: err.Error(),
+		})
 	}
 
 	if g := c.Server.Gitlab; g != nil {

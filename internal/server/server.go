@@ -40,9 +40,12 @@ type ResolvedKey struct {
 	// Chats is the key's chat scope as resolved UUIDs (lowercase). Empty means
 	// unrestricted. Aliases are resolved once at startup so request handling
 	// compares UUID against UUID and never re-reads the chat catalog.
-	Chats          []string
-	DefaultChat    string
-	AllowQueryAuth bool
+	Chats []string
+	// ChatsWhereMember scopes the key to the chats the sending bot is a member
+	// of at request time, checked against chats/info. It excludes Chats.
+	ChatsWhereMember bool
+	DefaultChat      string
+	AllowQueryAuth   bool
 }
 
 // Config holds the server runtime configuration.
@@ -104,6 +107,7 @@ type Server struct {
 	addr                 net.Addr
 	pollerStarted        func()
 	pollerDone           chan struct{}
+	membership           *membershipChecker // nil unless WithChatMembership was given
 }
 
 // SendFunc sends a message via the BotX API. The server calls this for each request.
@@ -303,7 +307,6 @@ func New(cfg Config, sendFn SendFunc, chatResolver ChatResolver, opts ...Option)
 	cbCtx, cbCancel := context.WithCancel(context.Background())
 	s := &Server{
 		cfg:            cfg,
-		send:           sendFn,
 		chats:          chatResolver,
 		keyMap:         make(map[string]ResolvedKey, len(cfg.Keys)),
 		botNameSet:     make(map[string]bool, len(cfg.BotNames)),
@@ -327,6 +330,16 @@ func New(cfg Config, sendFn SendFunc, chatResolver ChatResolver, opts ...Option)
 	}
 	for _, o := range opts {
 		o(s)
+	}
+	// Every send surface delivers through s.send with the bot and chat already
+	// resolved, so a membership-scoped key is re-checked here, per target.
+	s.send = func(ctx context.Context, p *SendPayload) (string, error) {
+		if memberScoped(ctx) {
+			if err := s.membershipGate(ctx, p.Bot, p.ChatID); err != nil {
+				return "", err
+			}
+		}
+		return sendFn(ctx, p)
 	}
 	if s.apm == nil {
 		s.apm = apm.New()

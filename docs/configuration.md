@@ -58,6 +58,11 @@ server:
   api_keys:
     - name: monitoring
       key: env:MONITORING_API_KEY
+      # chats: [alerts]                     # опционально: ключ ограничен этими чатами
+      # chats_where_member: true            # или: чатами, где состоит бот-отправитель
+  # membership_cache:                       # опционально, для chats_where_member
+  #   ttl: 60s                              # положительный ответ (по умолчанию 60s)
+  #   negative_ttl: 15s                     # отрицательный (по умолчанию 15s, не больше ttl)
   allow_request_trace: false                # по умолчанию false; true разрешает
                                             # отправителям включать ?trace=1
   alertmanager:                              # опционально — endpoint включён по умолчанию

@@ -3,8 +3,11 @@ package server
 import (
 	"context"
 	"crypto/subtle"
+	"errors"
 	"net/http"
 	"strings"
+
+	"github.com/go-chi/chi/v5/middleware"
 
 	vlog "github.com/lavr/express-botx/internal/log"
 )
@@ -17,6 +20,7 @@ const (
 	keyScopeKey           // chat scope of the API key that authenticated the request
 	queryKeyCtxKey        // API key lifted out of the query string before logging
 	keyDefaultChatKey
+	keyMemberScopeKey // set when the key is scoped to the chats its bot is a member of
 )
 
 func withQueryKey(ctx context.Context, key string) context.Context {
@@ -63,7 +67,14 @@ func (s *Server) scopedKey(ctx context.Context) bool {
 // of chats. Exported for send pipelines that resolve the final address
 // themselves and must apply the scope at that point.
 func Scoped(ctx context.Context) bool {
-	return len(keyScope(ctx)) > 0
+	return len(keyScope(ctx)) > 0 || memberScoped(ctx)
+}
+
+// memberScoped reports whether the API key behind this request is scoped to
+// the chats its bot is a member of.
+func memberScoped(ctx context.Context) bool {
+	v, _ := ctx.Value(keyMemberScopeKey).(bool)
+	return v
 }
 
 // ChatAllowed reports whether the API key behind this request may address the
@@ -74,7 +85,13 @@ func Scoped(ctx context.Context) bool {
 // A check made against the local list would therefore authorize one chat while
 // the message went to another, so the send pipeline must call this with the
 // UUID it is actually about to deliver to, immediately before delivering.
+//
+// A key scoped by bot membership is never allowed here: membership needs a
+// BotX lookup for a known bot, which only authorizeTargets performs.
 func ChatAllowed(ctx context.Context, resolvedUUID string) bool {
+	if memberScoped(ctx) {
+		return false
+	}
 	scope := keyScope(ctx)
 	if len(scope) == 0 {
 		return true
@@ -110,9 +127,15 @@ func keyScope(ctx context.Context) []string {
 // pass-through and the real address comes from the bot catalog later, so a
 // non-UUID target is left to the send pipeline (see ChatAllowed). Returns false
 // when it has already written the response.
-func (s *Server) authorizeTargets(w http.ResponseWriter, r *http.Request, targets []string, resolve bool) bool {
+//
+// requestBot is the bot the request asked for (?bot= or the payload's bot); a
+// key scoped by membership checks the bot that will actually send to each chat.
+func (s *Server) authorizeTargets(w http.ResponseWriter, r *http.Request, targets []string, resolve bool, requestBot string) bool {
 	if !s.scopedKey(r.Context()) {
 		return true
+	}
+	if memberScoped(r.Context()) {
+		return s.authorizeMembership(w, r, targets, resolve, requestBot)
 	}
 	for _, target := range targets {
 		if !resolve {
@@ -133,6 +156,62 @@ func (s *Server) authorizeTargets(w http.ResponseWriter, r *http.Request, target
 		}
 	}
 	return true
+}
+
+// authorizeMembership applies a membership scope: every target must resolve to
+// a chat UUID whose member list includes the bot that would send there. The
+// request is refused whole, with 403 when a chat is not the bot's and with 503
+// when membership could not be checked.
+func (s *Server) authorizeMembership(w http.ResponseWriter, r *http.Request, targets []string, resolve bool, requestBot string) bool {
+	ctx := r.Context()
+	// Async delivery picks the bot from the catalog later, so there is no bot
+	// to check here. Startup refuses such keys in async mode; this is a backstop.
+	if !resolve {
+		writeError(w, http.StatusForbidden, ErrChatNotAllowed.Error())
+		return false
+	}
+	if s.membership == nil {
+		vlog.Info("scope: key %q is scoped by chat membership, but membership checks are not configured", KeyName(ctx))
+		writeAccessError(w, http.StatusServiceUnavailable, ErrAccessUnavailable.Error())
+		return false
+	}
+	for _, target := range targets {
+		chat, err := s.chats(target)
+		if err != nil {
+			s.denyChat(w, r, err, "")
+			return false
+		}
+		if !isUUID(chat.ChatID) {
+			writeError(w, http.StatusForbidden, ErrChatNotAllowed.Error())
+			return false
+		}
+		bot, errMsg := s.resolveRequestBot(ctx, requestBot, chat.Bot)
+		if errMsg != "" {
+			// The message names the configured bots, which a scoped key is not
+			// shown; the cause is logged instead.
+			vlog.Info("scope: chat %q: no bot to check membership for [key: %s, request_id: %s]: %s",
+				target, KeyName(ctx), middleware.GetReqID(ctx), errMsg)
+			writeError(w, http.StatusBadRequest, "bot could not be resolved for this chat")
+			return false
+		}
+		switch err := s.checkMembership(ctx, target, bot, chat.ChatID); {
+		case errors.Is(err, ErrMembershipUnavailable):
+			writeAccessError(w, http.StatusServiceUnavailable, ErrAccessUnavailable.Error())
+			return false
+		case err != nil:
+			writeError(w, http.StatusForbidden, ErrChatNotAllowed.Error())
+			return false
+		}
+	}
+	return true
+}
+
+// botLabel names the bot in a log line; single-bot mode has no bot name.
+func botLabel(bot string) string {
+	if bot == "" {
+		return "default"
+	}
+	return bot
 }
 
 // sanitizeErrors rewrites per-chat failures for a scoped caller. Fan-out is
@@ -213,6 +292,9 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 				ctx := context.WithValue(r.Context(), keyNameKey, rk.Name)
 				if len(rk.Chats) > 0 {
 					ctx = context.WithValue(ctx, keyScopeKey, rk.Chats)
+				}
+				if rk.ChatsWhereMember {
+					ctx = context.WithValue(ctx, keyMemberScopeKey, true)
 				}
 				if rk.DefaultChat != "" {
 					ctx = context.WithValue(ctx, keyDefaultChatKey, rk.DefaultChat)
