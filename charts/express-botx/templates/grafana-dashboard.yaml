@@ -1,4 +1,8 @@
 {{- if and .Values.metrics.enabled .Values.metrics.grafanaDashboard.enabled }}
+{{- $json := .Values.metrics.grafanaDashboard.json | default (.Files.Get "dashboards/express-botx.json") | toString }}
+{{- if hasKey (fromJson $json) "Error" }}
+{{- fail "metrics.grafanaDashboard.json must be a JSON object (a Grafana dashboard model)" }}
+{{- end }}
 apiVersion: v1
 kind: ConfigMap
 metadata:
@@ -15,5 +19,5 @@ metadata:
   {{- end }}
 data:
   express-botx.json: |-
-{{ .Files.Get "dashboards/express-botx.json" | trimSuffix "\n" | indent 4 }}
+{{ $json | trimSuffix "\n" | indent 4 }}
 {{- end }}

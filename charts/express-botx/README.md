@@ -111,6 +111,7 @@ config:
 | `metrics.grafanaDashboard.namespace` | Namespace ConfigMap; пусто — namespace релиза | `""` |
 | `metrics.grafanaDashboard.labels` | Метки, по которым sidecar находит дашборды | `grafana_dashboard: "1"` |
 | `metrics.grafanaDashboard.annotations` | Аннотации ConfigMap, например папка в Grafana | `{}` |
+| `metrics.grafanaDashboard.json` | Свой JSON дашборда вместо встроенного; пусто — встроенный | `""` |
 | `extraEnv` | Дополнительные переменные окружения | `[]` |
 
 ### HTTPS/TLS
@@ -293,6 +294,10 @@ namespace. Метку меняют в `metrics.grafanaDashboard.labels`, есл�
   (`sidecar.dashboards.folderAnnotation`, вместе с
   `sidecar.dashboards.provider.foldersFromFilesStructure`), через
   `metrics.grafanaDashboard.annotations`.
+- Свой дашборд вместо встроенного — `--set-file metrics.grafanaDashboard.json=my-dashboard.json`.
+  Метка, namespace и аннотации те же; чарт проверяет только, что это JSON-объект.
+  Удобно взять встроенный файл за основу и поправить: дашборд из sidecar Grafana
+  не даёт сохранить из интерфейса, только копией.
 - Включайте ConfigMap в одном релизе на Grafana. Несколько ConfigMap с этим JSON
   конфликтуют по имени файла (`express-botx.json`) или по uid `express-botx`. Один
   дашборд и так показывает все релизы: они различаются фильтрами `namespace` и

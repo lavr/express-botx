@@ -9,7 +9,8 @@ Prometheus: HTTP, доставки по чатам, запросы к BotX, пр
 очередь. Источник данных и фильтры по `job`, `namespace` и `instance`
 выбираются переменными. Его импортируют вручную или ставит Helm-чарт:
 `metrics.grafanaDashboard.enabled: true` создаёт ConfigMap для sidecar Grafana
-(в kube-prometheus-stack он подхватывается без настройки). Описание —
+(в kube-prometheus-stack он подхватывается без настройки), свой JSON вместо
+встроенного задаётся `metrics.grafanaDashboard.json`. Описание —
 `docs/deployment.md`, раздел «Дашборд Grafana».
 
 ## 0.45.0

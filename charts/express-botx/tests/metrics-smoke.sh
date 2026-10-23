@@ -94,6 +94,21 @@ assert "$out" 'namespace: "monitoring"'
 assert "$out" 'grafana_dashboard: "1"'
 assert "$out" "team: ops"
 assert "$out" "grafana_folder: Bots"
+# metrics.grafanaDashboard.json replaces the bundled dashboard; it must be a JSON object.
+custom_dir="$(mktemp -d)"
+printf '{"title":"custom","uid":"custom-1","panels":[]}\n' >"$custom_dir/ok.json"
+printf '[1, 2]\n' >"$custom_dir/array.json"
+printf '{not json\n' >"$custom_dir/bad.json"
+out="$(dash --set-file metrics.grafanaDashboard.json="$custom_dir/ok.json")"
+assert "$out" '{"title":"custom","uid":"custom-1","panels":[]}'
+refute "$out" '"uid": "express-botx"'
+for f in array bad; do
+  expect_fail_with "custom dashboard $f" "metrics.grafanaDashboard.json must be a JSON object" \
+    --set metrics.enabled=true --set metrics.grafanaDashboard.enabled=true \
+    --set-file metrics.grafanaDashboard.json="$custom_dir/$f.json"
+done
+rm -rf "${custom_dir:?}"
+
 # A namespace that YAML would read as a number stays a string.
 assert "$(dash --set-string metrics.grafanaDashboard.namespace=123)" 'namespace: "123"'
 # The packaged chart carries the JSON too: render from the .tgz, not the source.

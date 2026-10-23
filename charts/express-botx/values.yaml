@@ -156,6 +156,9 @@ metrics:
       grafana_dashboard: "1"
     # For example the folder annotation your sidecar reads (sidecar.dashboards.folderAnnotation).
     annotations: {}
+    # Your own dashboard JSON instead of the bundled one, usually with
+    # --set-file metrics.grafanaDashboard.json=my-dashboard.json. Empty means the bundled one.
+    json: ""
 
 resources:
   requests:
