@@ -84,7 +84,7 @@ out="$(dash)"
 assert "$out" "name: test-express-botx-dashboard"
 assert "$out" 'grafana_dashboard: "1"'
 assert "$out" 'namespace: "default"'
-awk 'p && /^    /{sub(/^    /,""); print} /express-botx.json: \|-/{p=1}' <<<"$out" \
+awk 'p && /^    /{sub(/^    /,""); print} /express-botx.json: \|2-/{p=1}' <<<"$out" \
   | diff -q - "$chart_dir/dashboards/express-botx.json" >/dev/null \
   || { echo "dashboard JSON in the ConfigMap differs from dashboards/express-botx.json" >&2; exit 1; }
 out="$(dash --set metrics.grafanaDashboard.namespace=monitoring \
@@ -99,14 +99,26 @@ custom_dir="$(mktemp -d)"
 printf '{"title":"custom","uid":"custom-1","panels":[]}\n' >"$custom_dir/ok.json"
 printf '[1, 2]\n' >"$custom_dir/array.json"
 printf '{not json\n' >"$custom_dir/bad.json"
+printf 'null\n' >"$custom_dir/null.json"
+printf '{"title":"custom","Error":null,"panels":[]}\n' >"$custom_dir/error-key.json"
+printf '  {\n"title":"indented"\n}\n' >"$custom_dir/indented.json"
+printf '      \n{"title":"blank first line"}\r\n' >"$custom_dir/blank.json"
 out="$(dash --set-file metrics.grafanaDashboard.json="$custom_dir/ok.json")"
 assert "$out" '{"title":"custom","uid":"custom-1","panels":[]}'
 refute "$out" '"uid": "express-botx"'
-for f in array bad; do
+for f in array null; do
   expect_fail_with "custom dashboard $f" "metrics.grafanaDashboard.json must be a JSON object" \
     --set metrics.enabled=true --set metrics.grafanaDashboard.enabled=true \
     --set-file metrics.grafanaDashboard.json="$custom_dir/$f.json"
 done
+expect_fail_with "custom dashboard bad" "mustFromJson" \
+  --set metrics.enabled=true --set metrics.grafanaDashboard.enabled=true \
+  --set-file metrics.grafanaDashboard.json="$custom_dir/bad.json"
+# A key named Error is an ordinary dashboard field, and leading spaces or a
+# blank first line must not break the YAML block.
+assert "$(dash --set-file metrics.grafanaDashboard.json="$custom_dir/error-key.json")" '"Error":null'
+assert "$(dash --set-file metrics.grafanaDashboard.json="$custom_dir/indented.json")" '"title":"indented"'
+assert "$(dash --set-file metrics.grafanaDashboard.json="$custom_dir/blank.json")" '"title":"blank first line"'
 rm -rf "${custom_dir:?}"
 
 # A namespace that YAML would read as a number stays a string.
@@ -119,7 +131,7 @@ tar -tzf "$pkg_dir"/express-botx-*.tgz | grep -q 'express-botx/dashboards/expres
   || { echo "dashboards/express-botx.json is missing from the chart package" >&2; exit 1; }
 helm template test "$pkg_dir"/express-botx-*.tgz --set metrics.enabled=true \
   --set metrics.grafanaDashboard.enabled=true --show-only templates/grafana-dashboard.yaml \
-  | awk 'p && /^    /{sub(/^    /,""); print} /express-botx.json: \|-/{p=1}' \
+  | awk 'p && /^    /{sub(/^    /,""); print} /express-botx.json: \|2-/{p=1}' \
   | diff -q - "$chart_dir/dashboards/express-botx.json" >/dev/null \
   || { echo "dashboard JSON rendered from the package differs from the source" >&2; exit 1; }
 name="$(dash --set fullnameOverride="$(printf 'a%.0s' {1..63})" | awk '/^  name:/{print $2; exit}')"

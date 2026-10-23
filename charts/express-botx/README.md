@@ -296,8 +296,9 @@ namespace. Метку меняют в `metrics.grafanaDashboard.labels`, есл�
   `metrics.grafanaDashboard.annotations`.
 - Свой дашборд вместо встроенного — `--set-file metrics.grafanaDashboard.json=my-dashboard.json`.
   Метка, namespace и аннотации те же; чарт проверяет только, что это JSON-объект.
-  Удобно взять встроенный файл за основу и поправить: дашборд из sidecar Grafana
-  не даёт сохранить из интерфейса, только копией.
+  Удобно взять встроенный файл за основу и поправить: правки дашборда из sidecar,
+  сделанные в интерфейсе Grafana, provisioning перезапишет или вовсе не даст
+  сохранить (зависит от `sidecar.dashboards.provider.allowUiUpdates`).
 - Включайте ConfigMap в одном релизе на Grafana. Несколько ConfigMap с этим JSON
   конфликтуют по имени файла (`express-botx.json`) или по uid `express-botx`. Один
   дашборд и так показывает все релизы: они различаются фильтрами `namespace` и
