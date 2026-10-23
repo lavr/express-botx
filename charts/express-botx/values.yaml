@@ -143,8 +143,9 @@ metrics:
     labels: {}
   # Grafana dashboard as a ConfigMap for the Grafana dashboard sidecar
   # (k8s-sidecar, as in kube-prometheus-stack). The JSON is dashboards/express-botx.json.
-  # Enable it in one release per Grafana: the dashboard has a fixed uid and shows
-  # every release through its namespace and instance filters.
+  # Enable it in one release per Grafana: copies clash on the file name and the
+  # fixed uid. One dashboard shows every release through its namespace and
+  # instance filters.
   grafanaDashboard:
     enabled: false
     # Namespace for the ConfigMap; empty means the release namespace. Set it to

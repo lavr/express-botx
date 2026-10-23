@@ -293,9 +293,10 @@ namespace. Метку меняют в `metrics.grafanaDashboard.labels`, есл�
   (`sidecar.dashboards.folderAnnotation`, вместе с
   `sidecar.dashboards.provider.foldersFromFilesStructure`), через
   `metrics.grafanaDashboard.annotations`.
-- У дашборда постоянный uid `express-botx`, а релизы на нём различаются фильтрами
-  `namespace` и `instance`. Поэтому включайте ConfigMap в одном релизе на Grafana:
-  несколько одинаковых дашбордов sidecar положит рядом, и Grafana выберет один.
+- Включайте ConfigMap в одном релизе на Grafana. Несколько ConfigMap с этим JSON
+  конфликтуют по имени файла (`express-botx.json`) или по uid `express-botx`. Один
+  дашборд и так показывает все релизы: они различаются фильтрами `namespace` и
+  `instance`.
 
 Без sidecar этот же файл импортируют вручную, переменные и панели описаны в
 [docs/deployment.md](../../docs/deployment.md#дашборд-grafana).
