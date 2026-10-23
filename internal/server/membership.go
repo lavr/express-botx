@@ -12,6 +12,7 @@ import (
 
 	"github.com/lavr/express-botx/internal/config"
 	vlog "github.com/lavr/express-botx/internal/log"
+	"github.com/lavr/express-botx/internal/metrics"
 )
 
 // Default cache lifetimes for chat membership. A positive answer is kept
@@ -94,6 +95,8 @@ type membershipChecker struct {
 	mu       sync.Mutex
 	cache    map[string]membershipEntry
 	inflight map[string]*membershipCall
+
+	metrics *metrics.Metrics // set by the server; nil records nothing
 }
 
 func newMembershipChecker(lookup MembershipLookup, opts MembershipOptions) *membershipChecker {
@@ -136,6 +139,7 @@ func (m *membershipChecker) check(ctx context.Context, bot, chatID string) (memb
 	if !ok {
 		if len(m.inflight) >= membershipMaxInflight {
 			m.mu.Unlock()
+			m.metrics.LookupRejected()
 			return false, false, errMembershipBusy
 		}
 		call = &membershipCall{done: make(chan struct{})}
@@ -157,7 +161,16 @@ func (m *membershipChecker) check(ctx context.Context, bot, chatID string) (memb
 func (m *membershipChecker) run(key string, call *membershipCall, bot, chatID string) {
 	ctx, cancel := context.WithTimeout(context.Background(), membershipLookupTimeout)
 	defer cancel()
+	m.metrics.LookupStarted()
 	call.member, call.err = m.lookup(ctx, bot, chatID)
+	switch {
+	case call.err != nil:
+		m.metrics.LookupDone(metrics.Error)
+	case call.member:
+		m.metrics.LookupDone(metrics.Member)
+	default:
+		m.metrics.LookupDone(metrics.NotMember)
+	}
 
 	m.mu.Lock()
 	delete(m.inflight, key)
@@ -208,21 +221,24 @@ func (s *Server) checkMembership(ctx context.Context, target, bot, chatID string
 		return ErrMembershipUnavailable
 	}
 	member, cached, err := s.membership.check(ctx, bot, chatID)
-	source := "botx"
+	source := metrics.SourceLookup
 	if cached {
-		source = "cache"
+		source = metrics.SourceCache
 	}
 	key, reqID := KeyName(ctx), middleware.GetReqID(ctx)
 	switch {
 	case err != nil:
+		s.metrics.MembershipCheck(metrics.Error, source)
 		vlog.Info("scope: chat %q membership error [key: %s, request_id: %s, bot: %s, source: %s]: %s",
 			target, key, reqID, botLabel(bot), source, boundedCause(err))
 		return fmt.Errorf("%w: %v", ErrMembershipUnavailable, err)
 	case !member:
+		s.metrics.MembershipCheck(metrics.NotMember, source)
 		vlog.Info("scope: chat %q membership not_member [key: %s, request_id: %s, bot: %s, source: %s]",
 			target, key, reqID, botLabel(bot), source)
 		return errNotMember
 	}
+	s.metrics.MembershipCheck(metrics.Member, source)
 	vlog.Info("scope: chat %q membership member [key: %s, request_id: %s, bot: %s, source: %s]",
 		target, key, reqID, botLabel(bot), source)
 	return nil

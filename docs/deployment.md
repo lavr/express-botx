@@ -306,6 +306,67 @@ helm install worker oci://ghcr.io/lavr/charts/express-botx -f values-worker.yaml
 
 ---
 
+## Метрики Prometheus
+
+Сервер (`serve` и `serve --enqueue`) может отдавать метрики в формате
+Prometheus. По умолчанию они выключены.
+
+```yaml
+server:
+  metrics:
+    enabled: true
+    listen: "127.0.0.1:9090"   # обязателен; в контейнере обычно ":9090"
+    path: /metrics             # по умолчанию /metrics; только этот путь, без вложенных
+```
+
+Или переменной окружения `EXPRESS_BOTX_SERVER_METRICS_LISTEN=:9090`: она
+включает метрики на этом адресе, даже если в конфиге `enabled: false`.
+
+Метрики отдаются на **отдельном** адресе, всегда по HTTP, без `base_path` и без
+аутентификации. Кроме `path`, на этом адресе ничего нет. Открывайте его только
+сборщику метрик: в Kubernetes — порт пода без Service наружу и без Ingress. По
+этой же причине у `listen` нет значения по умолчанию: слушать все интерфейсы
+нужно решить явно. Если адрес занят, сервер не запустится.
+
+Что есть (префикс `express_botx_`):
+
+| Метрика | Метки | Что считает |
+|---|---|---|
+| `http_requests_total` | `method`, `handler`, `code` | Запросы к серверу. `handler` — шаблон маршрута (`/api/v1/send`), неизвестный путь — `other` |
+| `http_request_duration_seconds` | `method`, `handler` | Время ответа сервера |
+| `deliveries_total` | `handler`, `outcome` | Исход по каждому чату: `delivered`, `queued`, `failed` |
+| `partial_deliveries_total` | `handler` | Ответ успешный, но часть чатов не получила сообщение |
+| `edits_total` | `handler`, `outcome` | Редактирование постов Mattermost |
+| `botx_requests_total` | `endpoint`, `code` | HTTP-попытки к BotX, включая получение токена и повторы. `code` — статус или `error`. `2xx` значит, что BotX ответил, а не что ответ годный |
+| `botx_request_duration_seconds` | `endpoint` | Время до заголовков ответа BotX |
+| `membership_checks_total` | `outcome`, `source` | Проверки членства для ключей с `chats_where_member`: `member`, `not_member`, `error`; `source` — `cache` или `lookup` |
+| `membership_lookups_total` | `outcome` | Запросы членства, действительно ушедшие в BotX |
+| `membership_lookups_inflight` | — | Сколько таких запросов идёт сейчас |
+| `membership_lookups_rejected_total` | — | Проверки, отклонённые по лимиту одновременных запросов (ответ `503`) |
+| `queue_publish_total` | `outcome` | Публикации в очередь в режиме `--enqueue`: `ok`, `error` |
+| `build_info` | `version`, `goversion`, `mode` | Всегда `1`; версия, версия Go и режим (`sync` или `enqueue`) |
+
+Плюс стандартные `go_*` и `process_*`.
+
+В метках нет чатов, ключей, ботов, текста сообщений и строк запроса. Основные
+серии видны с нулём сразу после старта, поэтому `rate()` по ним не пропадает.
+Метрик `worker` пока нет.
+
+Инстанс метками не помечается: это делает Prometheus при сборе (`instance`, а
+через Kubernetes service discovery — `pod`, `namespace`). Версию на каждом
+поде показывает `build_info`.
+
+`deliveries_total` считает только чаты, до которых дошла отправка. Запрос,
+отклонённый целиком до неё (`400`, `401`, `403`, `503` проверки членства),
+туда не попадает: его видно в `http_requests_total` и `membership_checks_total`.
+
+Пример алерта на долю неудачных доставок:
+
+```promql
+sum(rate(express_botx_deliveries_total{outcome="failed"}[5m]))
+  / sum(rate(express_botx_deliveries_total[5m])) > 0.1
+```
+
 ## Обратный прокси
 
 ### nginx

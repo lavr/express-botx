@@ -19,6 +19,7 @@ CLI и HTTP-сервер для отправки сообщений в корп�
 - **Асинхронная очередь** — RabbitMQ или Kafka для надёжной доставки
 - **Секреты** — поддержка переменных окружения и HashiCorp Vault
 - **Kubernetes-ready** — Docker, Helm chart, бинарник
+- **Метрики Prometheus** — доставки, вызовы BotX, HTTP-ответы; включаются опцией ([docs/deployment.md](docs/deployment.md#метрики-prometheus))
 - **Go-библиотека** — клиент BotX API для своих сервисов ([раздел ниже](#go-библиотека))
 
 

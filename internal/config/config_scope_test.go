@@ -123,3 +123,62 @@ server:
 		}
 	}
 }
+
+func TestMetricsConfigResolve(t *testing.T) {
+	tests := []struct {
+		name    string
+		cfg     *MetricsConfig
+		env     string
+		enabled bool
+		listen  string
+		path    string
+		wantErr bool
+	}{
+		{"absent", nil, "", false, "", "", false},
+		{"disabled", &MetricsConfig{Listen: ":9090"}, "", false, "", "", false},
+		{"enabled", &MetricsConfig{Enabled: true, Listen: "127.0.0.1:9090"}, "", true, "127.0.0.1:9090", "/metrics", false},
+		{"custom path", &MetricsConfig{Enabled: true, Listen: ":9090", Path: "/prom"}, "", true, ":9090", "/prom", false},
+		{"env enables and wins", &MetricsConfig{Enabled: false, Listen: ":1"}, ":9100", true, ":9100", "/metrics", false},
+		{"enabled without listen", &MetricsConfig{Enabled: true}, "", false, "", "", true},
+		{"relative path", &MetricsConfig{Enabled: true, Listen: ":9090", Path: "metrics"}, "", false, "", "", true},
+		{"pattern braces", &MetricsConfig{Enabled: true, Listen: ":9090", Path: "/metrics/{"}, "", false, "", "", true},
+		{"pattern wildcard", &MetricsConfig{Enabled: true, Listen: ":9090", Path: "/metrics/{x}"}, "", false, "", "", true},
+		{"method in pattern", &MetricsConfig{Enabled: true, Listen: ":9090", Path: "/ GET"}, "", false, "", "", true},
+		{"nested literal path", &MetricsConfig{Enabled: true, Listen: ":9090", Path: "/internal/metrics"}, "", true, ":9090", "/internal/metrics", false},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			enabled, listen, path, err := tc.cfg.Resolve(tc.env)
+			if (err != nil) != tc.wantErr || enabled != tc.enabled || listen != tc.listen || path != tc.path {
+				t.Errorf("Resolve = %v %q %q %v", enabled, listen, path, err)
+			}
+		})
+	}
+}
+
+func TestValidate_Metrics(t *testing.T) {
+	raw := []byte(`
+bots:
+  b: {host: h, id: 2a8e7c41-5b0d-4f3e-9c6a-1d2e3f405162, secret: s}
+server:
+  metrics:
+    enabled: true
+    path: /metrics
+`)
+	var cfg Config
+	if err := yaml.Unmarshal(raw, &cfg); err != nil {
+		t.Fatal(err)
+	}
+	var paths []string
+	for _, r := range cfg.Validate(raw) {
+		if strings.Contains(r.Message, "unknown key") {
+			t.Errorf("%s: %s", r.Path, r.Message)
+		}
+		if r.Level == ValidationError {
+			paths = append(paths, r.Path)
+		}
+	}
+	if len(paths) != 1 || paths[0] != "server.metrics" {
+		t.Errorf("errors at %v, want one at server.metrics (listen missing)", paths)
+	}
+}
