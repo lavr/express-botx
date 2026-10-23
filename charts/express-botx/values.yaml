@@ -141,6 +141,24 @@ metrics:
     scrapeTimeout: ""
     # Labels your Prometheus selects ServiceMonitors by, e.g. release: kube-prometheus-stack
     labels: {}
+  # Grafana dashboard as a ConfigMap for the Grafana dashboard sidecar
+  # (k8s-sidecar, as in kube-prometheus-stack). The JSON is dashboards/express-botx.json.
+  # Enable it in one release per Grafana: copies clash on the file name and the
+  # fixed uid. One dashboard shows every release through its namespace and
+  # instance filters.
+  grafanaDashboard:
+    enabled: false
+    # Namespace for the ConfigMap; empty means the release namespace. Set it to
+    # Grafana's namespace if the sidecar does not search all namespaces.
+    namespace: ""
+    # Labels the sidecar selects ConfigMaps by (sidecar.dashboards.label/labelValue).
+    labels:
+      grafana_dashboard: "1"
+    # For example the folder annotation your sidecar reads (sidecar.dashboards.folderAnnotation).
+    annotations: {}
+    # Your own dashboard JSON instead of the bundled one, usually with
+    # --set-file metrics.grafanaDashboard.json=my-dashboard.json. Empty means the bundled one.
+    json: ""
 
 resources:
   requests:

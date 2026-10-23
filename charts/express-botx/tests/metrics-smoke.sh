@@ -74,6 +74,69 @@ for full in "$(printf 'a%.0s' {1..63})" "$(printf 'a%.0s' {1..55})-metrics"; do
   [[ "$metrics" != "$main" ]] || { echo "metrics Service name collides with the main one: $metrics" >&2; exit 1; }
 done
 
+# Grafana dashboard ConfigMap: off by default and without metrics, labelled for
+# the sidecar when on, and carrying dashboards/express-botx.json unchanged.
+refute "$(render --set metrics.enabled=true)" "kind: ConfigMap"
+refute "$(render --set metrics.grafanaDashboard.enabled=true)" "kind: ConfigMap"
+dash() { render --set metrics.enabled=true --set metrics.grafanaDashboard.enabled=true \
+  --show-only templates/grafana-dashboard.yaml "$@"; }
+out="$(dash)"
+assert "$out" "name: test-express-botx-dashboard"
+assert "$out" 'grafana_dashboard: "1"'
+assert "$out" 'namespace: "default"'
+awk 'p && /^    /{sub(/^    /,""); print} /express-botx.json: \|2-/{p=1}' <<<"$out" \
+  | diff -q - "$chart_dir/dashboards/express-botx.json" >/dev/null \
+  || { echo "dashboard JSON in the ConfigMap differs from dashboards/express-botx.json" >&2; exit 1; }
+out="$(dash --set metrics.grafanaDashboard.namespace=monitoring \
+  --set metrics.grafanaDashboard.labels.team=ops \
+  --set metrics.grafanaDashboard.annotations.grafana_folder=Bots)"
+assert "$out" 'namespace: "monitoring"'
+assert "$out" 'grafana_dashboard: "1"'
+assert "$out" "team: ops"
+assert "$out" "grafana_folder: Bots"
+# metrics.grafanaDashboard.json replaces the bundled dashboard; it must be a JSON object.
+custom_dir="$(mktemp -d)"
+printf '{"title":"custom","uid":"custom-1","panels":[]}\n' >"$custom_dir/ok.json"
+printf '[1, 2]\n' >"$custom_dir/array.json"
+printf '{not json\n' >"$custom_dir/bad.json"
+printf 'null\n' >"$custom_dir/null.json"
+printf '{"title":"custom","Error":null,"panels":[]}\n' >"$custom_dir/error-key.json"
+printf '  {\n"title":"indented"\n}\n' >"$custom_dir/indented.json"
+printf '      \n{"title":"blank first line"}\r\n' >"$custom_dir/blank.json"
+out="$(dash --set-file metrics.grafanaDashboard.json="$custom_dir/ok.json")"
+assert "$out" '{"title":"custom","uid":"custom-1","panels":[]}'
+refute "$out" '"uid": "express-botx"'
+for f in array null; do
+  expect_fail_with "custom dashboard $f" "metrics.grafanaDashboard.json must be a JSON object" \
+    --set metrics.enabled=true --set metrics.grafanaDashboard.enabled=true \
+    --set-file metrics.grafanaDashboard.json="$custom_dir/$f.json"
+done
+expect_fail_with "custom dashboard bad" "mustFromJson" \
+  --set metrics.enabled=true --set metrics.grafanaDashboard.enabled=true \
+  --set-file metrics.grafanaDashboard.json="$custom_dir/bad.json"
+# A key named Error is an ordinary dashboard field, and leading spaces or a
+# blank first line must not break the YAML block.
+assert "$(dash --set-file metrics.grafanaDashboard.json="$custom_dir/error-key.json")" '"Error":null'
+assert "$(dash --set-file metrics.grafanaDashboard.json="$custom_dir/indented.json")" '"title":"indented"'
+assert "$(dash --set-file metrics.grafanaDashboard.json="$custom_dir/blank.json")" '"title":"blank first line"'
+rm -rf "${custom_dir:?}"
+
+# A namespace that YAML would read as a number stays a string.
+assert "$(dash --set-string metrics.grafanaDashboard.namespace=123)" 'namespace: "123"'
+# The packaged chart carries the JSON too: render from the .tgz, not the source.
+pkg_dir="$(mktemp -d)"
+trap 'rm -rf "${pkg_dir:?}"' EXIT
+helm package "$chart_dir" -d "$pkg_dir" >/dev/null
+tar -tzf "$pkg_dir"/express-botx-*.tgz | grep -q 'express-botx/dashboards/express-botx.json' \
+  || { echo "dashboards/express-botx.json is missing from the chart package" >&2; exit 1; }
+helm template test "$pkg_dir"/express-botx-*.tgz --set metrics.enabled=true \
+  --set metrics.grafanaDashboard.enabled=true --show-only templates/grafana-dashboard.yaml \
+  | awk 'p && /^    /{sub(/^    /,""); print} /express-botx.json: \|2-/{p=1}' \
+  | diff -q - "$chart_dir/dashboards/express-botx.json" >/dev/null \
+  || { echo "dashboard JSON rendered from the package differs from the source" >&2; exit 1; }
+name="$(dash --set fullnameOverride="$(printf 'a%.0s' {1..63})" | awk '/^  name:/{print $2; exit}')"
+[ "${#name}" -le 63 ] || { echo "dashboard ConfigMap name longer than 63: $name" >&2; exit 1; }
+
 # serve-enqueue gets metrics too; worker refuses them.
 out="$(render --set mode=serve-enqueue --set metrics.enabled=true)"
 assert "$out" "name: EXPRESS_BOTX_SERVER_METRICS_LISTEN"

@@ -13,7 +13,7 @@ import (
 	"time"
 )
 
-const dashboardPath = "../../examples/grafana/express-botx.json"
+const dashboardPath = "../../charts/express-botx/dashboards/express-botx.json"
 
 // identRe matches whole PromQL identifiers, so a name is never cut short at a
 // digit or upper-case letter and never taken from the middle of another name.

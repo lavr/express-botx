@@ -101,6 +101,13 @@ two Services never share a name.
 {{- $name }}
 {{- end }}
 
+{{/*
+Grafana dashboard ConfigMap name, kept within 63 characters like the other names.
+*/}}
+{{- define "express-botx.dashboardName" -}}
+{{- printf "%s-dashboard" (include "express-botx.fullname" . | trunc 53 | trimSuffix "-") }}
+{{- end }}
+
 {{- define "express-botx.portName" -}}
 {{- if .Values.tls.enabled }}https{{ else }}http{{ end }}
 {{- end }}

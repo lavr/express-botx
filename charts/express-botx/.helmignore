@@ -6,3 +6,5 @@
 .hg
 .hgignore
 .svn
+# Shell smoke tests for CI; Helm does not run them.
+tests/
