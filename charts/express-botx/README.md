@@ -107,6 +107,10 @@ config:
 | `metrics.serviceMonitor.interval` | Интервал сбора | `30s` |
 | `metrics.serviceMonitor.scrapeTimeout` | Таймаут сбора | `""` |
 | `metrics.serviceMonitor.labels` | Метки, по которым Prometheus выбирает ServiceMonitor | `{}` |
+| `metrics.grafanaDashboard.enabled` | ConfigMap с дашбордом для sidecar Grafana | `false` |
+| `metrics.grafanaDashboard.namespace` | Namespace ConfigMap; пусто — namespace релиза | `""` |
+| `metrics.grafanaDashboard.labels` | Метки, по которым sidecar находит дашборды | `grafana_dashboard: "1"` |
+| `metrics.grafanaDashboard.annotations` | Аннотации ConfigMap, например папка в Grafana | `{}` |
 | `extraEnv` | Дополнительные переменные окружения | `[]` |
 
 ### HTTPS/TLS
@@ -263,6 +267,38 @@ scrape-конфиг.
 сборе; версию каждого пода показывает `express_botx_build_info`. В режиме
 `worker` метрик нет, и `metrics.enabled: true` с ним даёт ошибку рендеринга.
 Список метрик — в [docs/deployment.md](../../docs/deployment.md#метрики-prometheus).
+
+#### Дашборд Grafana
+
+```yaml
+metrics:
+  enabled: true
+  grafanaDashboard:
+    enabled: true
+```
+
+Чарт создаёт ConfigMap `<release>-express-botx-dashboard` с дашбордом
+[dashboards/express-botx.json](dashboards/express-botx.json) и меткой
+`grafana_dashboard: "1"`. Его подхватывает sidecar Grafana (`k8s-sidecar`). В
+kube-prometheus-stack он по умолчанию включён, ищет как раз эту метку и во всех
+namespace, так что настраивать ничего не нужно. В отдельном чарте `grafana` sidecar
+надо включить (`sidecar.dashboards.enabled`), и по умолчанию он ищет только в своём
+namespace. Метку меняют в `metrics.grafanaDashboard.labels`, если sidecar ищет
+другую (`sidecar.dashboards.label` и `labelValue`).
+
+- Если sidecar смотрит только в свой namespace, укажите namespace Grafana в
+  `metrics.grafanaDashboard.namespace`. Для ConfigMap в чужом namespace у того,
+  кто ставит релиз, должны быть права на него.
+- Папку в Grafana задают аннотацией, которую читает ваш sidecar
+  (`sidecar.dashboards.folderAnnotation`, вместе с
+  `sidecar.dashboards.provider.foldersFromFilesStructure`), через
+  `metrics.grafanaDashboard.annotations`.
+- У дашборда постоянный uid `express-botx`, а релизы на нём различаются фильтрами
+  `namespace` и `instance`. Поэтому включайте ConfigMap в одном релизе на Grafana:
+  несколько одинаковых дашбордов sidecar положит рядом, и Grafana выберет один.
+
+Без sidecar этот же файл импортируют вручную, переменные и панели описаны в
+[docs/deployment.md](../../docs/deployment.md#дашборд-grafana).
 
 ### Секреты
 

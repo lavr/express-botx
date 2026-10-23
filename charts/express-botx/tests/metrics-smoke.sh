@@ -74,6 +74,29 @@ for full in "$(printf 'a%.0s' {1..63})" "$(printf 'a%.0s' {1..55})-metrics"; do
   [[ "$metrics" != "$main" ]] || { echo "metrics Service name collides with the main one: $metrics" >&2; exit 1; }
 done
 
+# Grafana dashboard ConfigMap: off by default and without metrics, labelled for
+# the sidecar when on, and carrying dashboards/express-botx.json unchanged.
+refute "$(render --set metrics.enabled=true)" "kind: ConfigMap"
+refute "$(render --set metrics.grafanaDashboard.enabled=true)" "kind: ConfigMap"
+dash() { render --set metrics.enabled=true --set metrics.grafanaDashboard.enabled=true \
+  --show-only templates/grafana-dashboard.yaml "$@"; }
+out="$(dash)"
+assert "$out" "name: test-express-botx-dashboard"
+assert "$out" 'grafana_dashboard: "1"'
+assert "$out" "namespace: default"
+awk 'p{sub(/^    /,""); print} /express-botx.json: \|-/{p=1}' <<<"$out" \
+  | diff -q - "$chart_dir/dashboards/express-botx.json" >/dev/null \
+  || { echo "dashboard JSON in the ConfigMap differs from dashboards/express-botx.json" >&2; exit 1; }
+out="$(dash --set metrics.grafanaDashboard.namespace=monitoring \
+  --set metrics.grafanaDashboard.labels.team=ops \
+  --set metrics.grafanaDashboard.annotations.grafana_folder=Bots)"
+assert "$out" "namespace: monitoring"
+assert "$out" 'grafana_dashboard: "1"'
+assert "$out" "team: ops"
+assert "$out" "grafana_folder: Bots"
+name="$(dash --set fullnameOverride="$(printf 'a%.0s' {1..63})" | awk '/^  name:/{print $2; exit}')"
+[ "${#name}" -le 63 ] || { echo "dashboard ConfigMap name longer than 63: $name" >&2; exit 1; }
+
 # serve-enqueue gets metrics too; worker refuses them.
 out="$(render --set mode=serve-enqueue --set metrics.enabled=true)"
 assert "$out" "name: EXPRESS_BOTX_SERVER_METRICS_LISTEN"

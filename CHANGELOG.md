@@ -2,11 +2,15 @@
 
 ## Unreleased
 
-### Added: пример дашборда Grafana
+### Added: дашборд Grafana
 
-`examples/grafana/express-botx.json` — дашборд по метрикам Prometheus: HTTP,
-доставки по чатам, запросы к BotX, проверки членства и очередь. Источник
-данных и фильтры по `job`, `namespace` и `instance` выбираются переменными.
+`charts/express-botx/dashboards/express-botx.json` — дашборд по метрикам
+Prometheus: HTTP, доставки по чатам, запросы к BotX, проверки членства и
+очередь. Источник данных и фильтры по `job`, `namespace` и `instance`
+выбираются переменными. Его импортируют вручную или ставит Helm-чарт:
+`metrics.grafanaDashboard.enabled: true` создаёт ConfigMap для sidecar Grafana
+(в kube-prometheus-stack он подхватывается без настройки). Описание —
+`docs/deployment.md`, раздел «Дашборд Grafana».
 
 ## 0.45.0
 
