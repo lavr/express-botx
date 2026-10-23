@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.45.0
 
 ### Added: метрики Prometheus
 
@@ -10,6 +10,16 @@
 запросы к серверу, исходы доставки по чатам, частичные доставки, HTTP-попытки
 к BotX, проверки членства и публикации в очередь. Эндпоинт без аутентификации:
 открывайте его только сборщику метрик. Список метрик — `docs/deployment.md`.
+Метрика `express_botx_build_info` с метками `version`, `goversion` и `mode`
+показывает, какая сборка запущена на каждом инстансе.
+
+### Added: метрики в Helm-чарте
+
+`metrics.enabled: true` включает метрики в поде и создаёт для них отдельный
+Service типа ClusterIP: основной Service и Ingress этот порт не публикуют.
+`metrics.serviceMonitor.enabled: true` добавляет ServiceMonitor для
+prometheus-operator. Для `worker` метрик нет, и чарт с ними не рендерится.
+Подробнее — README чарта, раздел «Метрики Prometheus».
 
 ### Added: ключ для чатов, где состоит бот (`chats_where_member`)
 

@@ -273,7 +273,7 @@ if errors.Is(err, botx.ErrNoPermission) {
 Нужен Go 1.25.5 или новее (директива `go` в `go.mod`). Подключение:
 
 ```bash
-go get github.com/lavr/express-botx@v0.44.0
+go get github.com/lavr/express-botx@v0.45.0
 ```
 
 Релизы с `0.44.0` помечаются тегами `vX.Y.Z`, и Go видит их как версии модуля. Более
