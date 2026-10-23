@@ -98,6 +98,15 @@ config:
 | `resources.requests.memory` | Memory request | `64Mi` |
 | `resources.limits.memory` | Memory limit | `128Mi` |
 | `autoscaling.enabled` | Включить HPA | `false` |
+| `metrics.enabled` | Включить метрики Prometheus (не в `worker`) | `false` |
+| `metrics.port` | Порт контейнера для метрик | `9090` |
+| `metrics.path` | Путь метрик; должен совпадать с `server.metrics.path` в конфиге | `/metrics` |
+| `metrics.service.port` | Порт отдельного ClusterIP Service метрик | `9090` |
+| `metrics.service.annotations` | Аннотации Service метрик | `{}` |
+| `metrics.serviceMonitor.enabled` | Создать ServiceMonitor (prometheus-operator) | `false` |
+| `metrics.serviceMonitor.interval` | Интервал сбора | `30s` |
+| `metrics.serviceMonitor.scrapeTimeout` | Таймаут сбора | `""` |
+| `metrics.serviceMonitor.labels` | Метки, по которым Prometheus выбирает ServiceMonitor | `{}` |
 | `extraEnv` | Дополнительные переменные окружения | `[]` |
 
 ### HTTPS/TLS
@@ -229,6 +238,31 @@ config:
 helm install api ./charts/express-botx -f values-api.yaml
 helm install worker ./charts/express-botx -f values-worker.yaml
 ```
+
+### Метрики Prometheus
+
+```yaml
+metrics:
+  enabled: true
+  serviceMonitor:
+    enabled: true
+    labels:
+      release: kube-prometheus-stack   # то, по чему ваш Prometheus выбирает ServiceMonitor
+```
+
+Чарт задаёт `EXPRESS_BOTX_SERVER_METRICS_LISTEN=:<metrics.port>`, открывает порт
+`metrics` у контейнера и создаёт отдельный Service `<release>-express-botx-metrics`
+типа ClusterIP. Основной Service и Ingress этот порт не публикуют: эндпоинт без
+аутентификации. Путь сбора `metrics.path` должен совпадать с
+`config.server.metrics.path` (по умолчанию оба `/metrics`); при структурном
+`config` чарт проверяет это сам, при `configRaw` и `existingSecret` — на вас. ServiceMonitor требует CRD prometheus-operator. Без него можно
+собирать метрики через аннотации в `metrics.service.annotations` или через свой
+scrape-конфиг.
+
+Поды различаются метками `pod` и `instance`, которые Prometheus ставит при
+сборе; версию каждого пода показывает `express_botx_build_info`. В режиме
+`worker` метрик нет, и `metrics.enabled: true` с ним даёт ошибку рендеринга.
+Список метрик — в [docs/deployment.md](../../docs/deployment.md#метрики-prometheus).
 
 ### Секреты
 

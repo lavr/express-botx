@@ -66,6 +66,41 @@ Config secret name.
 {{- default (include "express-botx.fullname" .) .Values.existingSecret }}
 {{- end }}
 
+{{/*
+Metrics are served by serve and serve-enqueue only.
+*/}}
+{{- define "express-botx.metrics.validate" -}}
+{{- if and .Values.metrics.enabled (eq .Values.mode "worker") }}
+{{- fail "metrics.enabled is not supported in worker mode: the worker has no metrics endpoint" }}
+{{- end }}
+{{- if and .Values.metrics.enabled (not (hasPrefix "/" (toString .Values.metrics.path))) }}
+{{- fail "metrics.path must start with /" }}
+{{- end }}
+{{- /* With the structured config the chart can see the path the app serves. */ -}}
+{{- if and .Values.metrics.enabled (not .Values.configRaw) (not .Values.existingSecret) }}
+{{- $served := "/metrics" }}
+{{- with .Values.config.server }}{{ with .metrics }}{{ with .path }}{{ $served = . }}{{ end }}{{ end }}{{ end }}
+{{- if ne (toString .Values.metrics.path) $served }}
+{{- fail (printf "metrics.path %q does not match the path the app serves (%q, from config.server.metrics.path or the default); set both to the same value" .Values.metrics.path $served) }}
+{{- end }}
+{{- end }}
+{{- end }}
+
+{{/*
+Metrics Service name: the fullname cut to leave room for "-metrics", so the
+name stays within 63 characters. A fullname that itself ends in "-metrics"
+can come out unchanged from that; it then gets a different suffix, so the
+two Services never share a name.
+*/}}
+{{- define "express-botx.metricsName" -}}
+{{- $full := include "express-botx.fullname" . }}
+{{- $name := printf "%s-metrics" ($full | trunc 55 | trimSuffix "-") }}
+{{- if eq $name $full }}
+{{- $name = printf "%s-mtr" ($full | trunc 59 | trimSuffix "-") }}
+{{- end }}
+{{- $name }}
+{{- end }}
+
 {{- define "express-botx.portName" -}}
 {{- if .Values.tls.enabled }}https{{ else }}http{{ end }}
 {{- end }}

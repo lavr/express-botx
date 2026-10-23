@@ -1,0 +1,23 @@
+{{- if .Values.metrics.enabled }}
+apiVersion: v1
+kind: Service
+metadata:
+  name: {{ include "express-botx.metricsName" . }}
+  labels:
+    {{- include "express-botx.labels" . | nindent 4 }}
+    app.kubernetes.io/component: metrics
+  {{- with .Values.metrics.service.annotations }}
+  annotations:
+    {{- toYaml . | nindent 4 }}
+  {{- end }}
+spec:
+  # Always ClusterIP: the endpoint has no authentication.
+  type: ClusterIP
+  ports:
+    - port: {{ .Values.metrics.service.port }}
+      targetPort: metrics
+      protocol: TCP
+      name: metrics
+  selector:
+    {{- include "express-botx.selectorLabels" . | nindent 4 }}
+{{- end }}
