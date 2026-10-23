@@ -166,7 +166,7 @@ express-botx worker --config config.yaml --no-catalog-publish
 
 Готовые конфигурации для локальной разработки:
 
-- `examples/docker-compose-kafka/` — express-botx + Kafka + Zookeeper
+- `examples/docker-compose-kafka/` — express-botx + Kafka (KRaft, без Zookeeper)
 - `examples/docker-compose-rabbitmq/` — express-botx + RabbitMQ
 
 ## Деплой в Kubernetes
