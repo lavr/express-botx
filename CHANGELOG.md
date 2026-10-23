@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+### Added: пример дашборда Grafana
+
+`examples/grafana/express-botx.json` — дашборд по метрикам Prometheus: HTTP,
+доставки по чатам, запросы к BotX, проверки членства и очередь. Источник
+данных и фильтры по `job`, `namespace` и `instance` выбираются переменными.
+
 ## 0.45.0
 
 ### Added: метрики Prometheus

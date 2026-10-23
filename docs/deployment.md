@@ -370,6 +370,10 @@ sum(rate(express_botx_deliveries_total{outcome="failed"}[5m]))
   / sum(rate(express_botx_deliveries_total[5m])) > 0.1
 ```
 
+Пример дашборда Grafana по этим метрикам —
+[examples/grafana/express-botx.json](../examples/grafana/express-botx.json),
+импорт и состав панелей описаны в [examples/grafana/README.md](../examples/grafana/README.md).
+
 ## Обратный прокси
 
 ### nginx

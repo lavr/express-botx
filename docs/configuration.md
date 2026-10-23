@@ -506,6 +506,7 @@ server:
 - Env-переменные: `EXPRESS_CALLBACK_EVENT`, `EXPRESS_CALLBACK_SYNC_ID`,
   `EXPRESS_CALLBACK_BOT_ID`, `EXPRESS_CALLBACK_CHAT_ID`, `EXPRESS_CALLBACK_USER_HUID`
 - Exit code 0 = успех, != 0 = ошибка (логируется)
+- Пример обработчика — `examples/callback-handler.sh`
 
 **webhook:**
 - HTTP POST на указанный URL с оригинальным JSON в теле
