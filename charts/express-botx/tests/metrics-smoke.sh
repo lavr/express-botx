@@ -84,7 +84,7 @@ out="$(dash)"
 assert "$out" "name: test-express-botx-dashboard"
 assert "$out" 'grafana_dashboard: "1"'
 assert "$out" 'namespace: "default"'
-awk 'p{sub(/^    /,""); print} /express-botx.json: \|-/{p=1}' <<<"$out" \
+awk 'p && /^    /{sub(/^    /,""); print} /express-botx.json: \|-/{p=1}' <<<"$out" \
   | diff -q - "$chart_dir/dashboards/express-botx.json" >/dev/null \
   || { echo "dashboard JSON in the ConfigMap differs from dashboards/express-botx.json" >&2; exit 1; }
 out="$(dash --set metrics.grafanaDashboard.namespace=monitoring \
@@ -104,7 +104,7 @@ tar -tzf "$pkg_dir"/express-botx-*.tgz | grep -q 'express-botx/dashboards/expres
   || { echo "dashboards/express-botx.json is missing from the chart package" >&2; exit 1; }
 helm template test "$pkg_dir"/express-botx-*.tgz --set metrics.enabled=true \
   --set metrics.grafanaDashboard.enabled=true --show-only templates/grafana-dashboard.yaml \
-  | awk 'p{sub(/^    /,""); print} /express-botx.json: \|-/{p=1}' \
+  | awk 'p && /^    /{sub(/^    /,""); print} /express-botx.json: \|-/{p=1}' \
   | diff -q - "$chart_dir/dashboards/express-botx.json" >/dev/null \
   || { echo "dashboard JSON rendered from the package differs from the source" >&2; exit 1; }
 name="$(dash --set fullnameOverride="$(printf 'a%.0s' {1..63})" | awk '/^  name:/{print $2; exit}')"
