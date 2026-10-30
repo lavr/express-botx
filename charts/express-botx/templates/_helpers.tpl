@@ -29,15 +29,69 @@ Create chart name and version as used by the chart label.
 {{- end }}
 
 {{/*
-Common labels.
+Labels the chart owns. commonLabels never override them.
 */}}
-{{- define "express-botx.labels" -}}
+{{- define "express-botx.standardLabels" -}}
 helm.sh/chart: {{ include "express-botx.chart" . }}
 {{ include "express-botx.selectorLabels" . }}
 {{- if .Chart.AppVersion }}
 app.kubernetes.io/version: {{ .Chart.AppVersion | quote }}
 {{- end }}
 app.kubernetes.io/managed-by: {{ .Release.Service }}
+{{- end }}
+
+{{/*
+Render a user map through tpl, so values may reference other values.
+Usage: include "express-botx.tplMap" (dict "value" .Values.x "context" $)
+*/}}
+{{- define "express-botx.tplMap" -}}
+{{- if .value }}
+{{- tpl (toYaml .value) .context }}
+{{- end }}
+{{- end }}
+
+{{/*
+Common labels: the chart's own labels plus commonLabels.
+*/}}
+{{- define "express-botx.labels" -}}
+{{- include "express-botx.labelsWith" (dict "context" . "extra" dict) }}
+{{- end }}
+
+{{/*
+Common labels plus labels of one resource.
+Precedence: chart labels, then the resource's labels, then commonLabels.
+Usage: include "express-botx.labelsWith" (dict "context" $ "extra" .Values.x.labels)
+*/}}
+{{- define "express-botx.labelsWith" -}}
+{{- $ctx := .context }}
+{{- $common := fromYaml (include "express-botx.tplMap" (dict "value" $ctx.Values.commonLabels "context" $ctx)) }}
+{{- $extra := deepCopy (default dict .extra) }}
+{{- $standard := fromYaml (include "express-botx.standardLabels" $ctx) }}
+{{- toYaml (mergeOverwrite $common $extra $standard) }}
+{{- end }}
+
+{{/*
+Pod template labels: selector labels win over commonLabels and podLabels.
+*/}}
+{{- define "express-botx.podLabels" -}}
+{{- $common := fromYaml (include "express-botx.tplMap" (dict "value" .Values.commonLabels "context" .)) }}
+{{- $pod := fromYaml (include "express-botx.tplMap" (dict "value" .Values.podLabels "context" .)) }}
+{{- $selector := fromYaml (include "express-botx.selectorLabels" .) }}
+{{- toYaml (mergeOverwrite $common $pod $selector) }}
+{{- end }}
+
+{{/*
+commonAnnotations plus annotations of one resource; the resource wins.
+Renders nothing when both are empty.
+Usage: include "express-botx.annotations" (dict "context" $ "extra" .Values.x.annotations)
+*/}}
+{{- define "express-botx.annotations" -}}
+{{- $ctx := .context }}
+{{- $common := fromYaml (include "express-botx.tplMap" (dict "value" $ctx.Values.commonAnnotations "context" $ctx)) }}
+{{- $all := mergeOverwrite $common (deepCopy (default dict .extra)) }}
+{{- if $all }}
+{{- toYaml $all }}
+{{- end }}
 {{- end }}
 
 {{/*

@@ -4,11 +4,10 @@ kind: Service
 metadata:
   name: {{ include "express-botx.metricsName" . }}
   labels:
-    {{- include "express-botx.labels" . | nindent 4 }}
-    app.kubernetes.io/component: metrics
-  {{- with .Values.metrics.service.annotations }}
+    {{- include "express-botx.labelsWith" (dict "context" $ "extra" (dict "app.kubernetes.io/component" "metrics")) | nindent 4 }}
+  {{- with include "express-botx.annotations" (dict "context" $ "extra" .Values.metrics.service.annotations) }}
   annotations:
-    {{- toYaml . | nindent 4 }}
+    {{- . | nindent 4 }}
   {{- end }}
 spec:
   # Always ClusterIP: the endpoint has no authentication.

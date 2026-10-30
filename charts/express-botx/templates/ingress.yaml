@@ -5,9 +5,9 @@ metadata:
   name: {{ include "express-botx.fullname" . }}
   labels:
     {{- include "express-botx.labels" . | nindent 4 }}
-  {{- with .Values.ingress.annotations }}
+  {{- with include "express-botx.annotations" (dict "context" $ "extra" .Values.ingress.annotations) }}
   annotations:
-    {{- toYaml . | nindent 4 }}
+    {{- . | nindent 4 }}
   {{- end }}
 spec:
   {{- if .Values.ingress.className }}
