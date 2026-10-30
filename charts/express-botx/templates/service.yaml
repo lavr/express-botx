@@ -4,6 +4,10 @@ metadata:
   name: {{ include "express-botx.fullname" . }}
   labels:
     {{- include "express-botx.labels" . | nindent 4 }}
+  {{- with include "express-botx.annotations" (dict "context" $ "extra" dict) }}
+  annotations:
+    {{- . | nindent 4 }}
+  {{- end }}
 spec:
   type: {{ .Values.service.type }}
   ports:

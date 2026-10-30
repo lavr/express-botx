@@ -112,6 +112,10 @@ config:
 | `metrics.grafanaDashboard.labels` | Метки, по которым sidecar находит дашборды | `grafana_dashboard: "1"` |
 | `metrics.grafanaDashboard.annotations` | Аннотации ConfigMap, например папка в Grafana | `{}` |
 | `metrics.grafanaDashboard.json` | Свой JSON дашборда вместо встроенного; пусто — встроенный | `""` |
+| `commonLabels` | Метки на всех ресурсах и подах; шаблоны Helm допустимы | `{}` |
+| `commonAnnotations` | Аннотации на всех ресурсах; шаблоны Helm допустимы | `{}` |
+| `podLabels` | Метки пода; шаблоны Helm допустимы | `{}` |
+| `podAnnotations` | Аннотации пода; шаблоны Helm допустимы | `{}` |
 | `extraEnv` | Дополнительные переменные окружения | `[]` |
 
 ### HTTPS/TLS

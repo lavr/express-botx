@@ -9,13 +9,10 @@ metadata:
   name: {{ include "express-botx.dashboardName" . }}
   namespace: {{ .Values.metrics.grafanaDashboard.namespace | default .Release.Namespace | quote }}
   labels:
-    {{- include "express-botx.labels" . | nindent 4 }}
-    {{- with .Values.metrics.grafanaDashboard.labels }}
-    {{- toYaml . | nindent 4 }}
-    {{- end }}
-  {{- with .Values.metrics.grafanaDashboard.annotations }}
+    {{- include "express-botx.labelsWith" (dict "context" $ "extra" .Values.metrics.grafanaDashboard.labels) | nindent 4 }}
+  {{- with include "express-botx.annotations" (dict "context" $ "extra" .Values.metrics.grafanaDashboard.annotations) }}
   annotations:
-    {{- toYaml . | nindent 4 }}
+    {{- . | nindent 4 }}
   {{- end }}
 data:
   # Explicit indentation: the JSON may itself start with spaces.

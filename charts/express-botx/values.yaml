@@ -178,6 +178,14 @@ serviceAccount:
   name: ""
   annotations: {}
 
+# Labels and annotations added to every resource the chart creates and to the
+# pod template (labels only). Values go through tpl, so they may reference other
+# values, for example '{{ .Values.global.team }}'. Labels the chart sets itself
+# (app.kubernetes.io/name, instance, version, managed-by, helm.sh/chart) win.
+commonLabels: {}
+commonAnnotations: {}
+
+# Pod template labels and annotations, also rendered through tpl.
 podAnnotations: {}
 podLabels: {}
 nodeSelector: {}
